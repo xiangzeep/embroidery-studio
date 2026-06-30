@@ -1,24 +1,27 @@
-// object-inspector-bindings.ts — Phase 5 PR21 純ロジック (patch ビルダ)。
+// English note.
 //
-// ObjectInspector の各コントロールが updateObject(id, patch) に渡す patch
-// を構築する関数群。React 非依存の純関数として切り出し、design-store 経由で
-// テストする (RTL 不要)。
+// English note.
+// English note.
+// English note.
 
 import type {
   EmbroideryObject,
   ObjectKind,
   ObjectProps,
+  StrokeOverride,
   UnderlayConfig,
 } from "@/lib/pipeline/types";
+import type { ConversionConfig } from "@/lib/pipeline/config";
+import { resolveObjectKindForStroke } from "@/lib/pipeline/stroke-classifier";
 
-/** kind 変更パッチ (props は維持) */
+/** English note. */
 export function applyKindChange(
   kind: ObjectKind,
 ): Partial<Omit<EmbroideryObject, "id">> {
   return { kind };
 }
 
-/** props サブセット merge パッチ (object.props を base に shallow merge) */
+/** English note. */
 export function applyPropsChange(
   object: EmbroideryObject,
   patch: Partial<ObjectProps>,
@@ -27,9 +30,9 @@ export function applyPropsChange(
 }
 
 /**
- * underlay.kind 変更パッチ。kind 切替で必要パラメータ (insetMm / stitchLenMm /
- * spacingMm / angleDeg) のデフォルト値を補う。
- * 既存 props.underlay が同じ kind の場合は値を維持する。
+ * English note.
+ * English note.
+ * English note.
  */
 export function applyUnderlayKindChange(
   object: EmbroideryObject,
@@ -38,6 +41,24 @@ export function applyUnderlayKindChange(
   const existing = object.props.underlay;
   const next = buildUnderlay(kind, existing);
   return { props: { ...object.props, underlay: next } };
+}
+
+export function applyStrokeOverrideChange(
+  object: EmbroideryObject,
+  strokeOverride: StrokeOverride,
+  config: ConversionConfig,
+): Partial<Omit<EmbroideryObject, "id">> {
+  return {
+    kind: resolveObjectKindForStroke(
+      object.baseKind ?? object.kind,
+      object.strokeKind ?? "none",
+      object.strokeRole ?? "none",
+      config.digitizingMode,
+      config.outlineFontStrategy,
+      strokeOverride,
+    ),
+    strokeOverride,
+  };
 }
 
 function buildUnderlay(

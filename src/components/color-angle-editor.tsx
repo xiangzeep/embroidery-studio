@@ -36,7 +36,7 @@ export function ColorAngleEditor({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">色ごとの縫う向き</CardTitle>
+        <CardTitle className="text-base">Stitch Direction by Color</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         {blocks.map((block) => {
@@ -50,13 +50,13 @@ export function ColorAngleEditor({
                     className="size-4 shrink-0 rounded-sm border"
                     style={{ backgroundColor: rgbToCss(block.rgb) }}
                   />
-                  <Label className="truncate">色 {block.colorIndex + 1}</Label>
+                  <Label className="truncate">Color {block.colorIndex + 1}</Label>
                 </div>
                 <div className="flex items-center gap-1">
                   <span className="text-xs tabular-nums text-muted-foreground">
                     {angle}°
                     {!overridden && (
-                      <span className="ml-1 text-[10px]">(全体)</span>
+                      <span className="ml-1 text-[10px]">(Global)</span>
                     )}
                   </span>
                   {overridden && (
@@ -64,7 +64,7 @@ export function ColorAngleEditor({
                       type="button"
                       onClick={() => resetAngle(block.colorIndex)}
                       disabled={disabled}
-                      title="全体の向きに戻す"
+                      title="Reset to global direction"
                       className="text-muted-foreground hover:text-foreground disabled:opacity-50"
                     >
                       <RotateCcw className="size-3" />
@@ -89,7 +89,7 @@ export function ColorAngleEditor({
 
         <Button className="w-full" onClick={onApply} disabled={disabled}>
           <Wand2 className="size-4" />
-          向きを反映
+          Apply Direction
         </Button>
       </CardContent>
     </Card>

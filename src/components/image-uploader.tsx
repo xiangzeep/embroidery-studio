@@ -20,7 +20,7 @@ export function ImageUploader({ onImage }: Props) {
   const handleFile = useCallback(
     (file: File) => {
       if (!ACCEPTED.includes(file.type)) {
-        toast.error("PNG / JPEG / SVG のみ対応しています");
+        toast.error("Only PNG, JPEG, and SVG files are supported");
         return;
       }
       const reader = new FileReader();
@@ -36,7 +36,7 @@ export function ImageUploader({ onImage }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">1. 画像を読み込む</CardTitle>
+        <CardTitle className="text-base">1. Load Image</CardTitle>
       </CardHeader>
       <CardContent>
         <div
@@ -72,14 +72,14 @@ export function ImageUploader({ onImage }: Props) {
                   onImage(null);
                 }}
               >
-                変更する
+                Change
               </Button>
             </>
           ) : (
             <>
               <Upload className="size-6 text-muted-foreground" />
               <div className="text-sm">
-                ドラッグ&ドロップ または クリックで選択
+                Drag and drop or click to select
               </div>
               <div className="text-xs text-muted-foreground">
                 PNG / JPEG / SVG

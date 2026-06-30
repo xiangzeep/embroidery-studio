@@ -1,8 +1,8 @@
 import type { Point2D, Polygon, Shape } from "./types";
 
 /**
- * px 座標の Shape を mm 座標に変換する。
- * 3 点未満の holes はスキップ (closed polygon にならないため)。
+ * English note.
+ * English note.
  */
 export function scaleShape(shapePx: Shape, mmPerPx: number): Shape {
   return {
@@ -14,9 +14,9 @@ export function scaleShape(shapePx: Shape, mmPerPx: number): Shape {
 }
 
 /**
- * PCA で polygon の長軸方向と短辺長を求める。
- * - longAxis: 単位ベクトル
- * - shortSide: 長軸と直交する短軸方向に投影した範囲
+ * English note.
+ * English note.
+ * English note.
  * - center: 重心
  */
 export function analyzeShape(polygon: Polygon): {
@@ -82,7 +82,7 @@ export function analyzeShape(polygon: Polygon): {
   return { shortSide, longAxis, center: [cx, cy] };
 }
 
-/** 長軸方向と短軸方向への投影範囲から aspect ratio (longSide / shortSide) を求める。 */
+/** English note. */
 export function computeAspectRatio(
   polygon: Polygon,
   longAxis: Point2D,

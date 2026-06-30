@@ -1,7 +1,7 @@
-// Phase 2 計画書 §6 Lockstitch (tie-in / tie-off)。
-// 各 object の最初/最後に 3 stitch (kind="run") のバックタックを挿入し、糸抜けを防ぐ。
-// Phase 3 で travel-run による object 連結を行う際、color 内で連結している境界では
-// tie-in/off を抑制する設計に差し替える (assembleWithLockstitch 側の判断)。
+// Lockstitch helpers for tie-in and tie-off stitches.
+// English note.
+// English note.
+// English note.
 
 import type { Stitch } from "./types";
 
@@ -10,8 +10,8 @@ export type Point = [number, number];
 const DEFAULT_BACK_DIST_MM = 0.8;
 
 /**
- * tie-in: anchor の手前 (`firstDir` の逆方向に `backDistMm`) → anchor → 手前 の
- * 3 stitch (すべて `kind="run"`) を返す。
+ * English note.
+ * English note.
  */
 export function emitTieIn(
   anchor: Point,
@@ -31,8 +31,8 @@ export function emitTieIn(
 }
 
 /**
- * tie-off: 進行方向 (`lastDir`) の逆方向に `backDistMm` 後退する 3 stitch。
- * 構造は `emitTieIn` と同じ (anchor → back → anchor → back のうち 3 点)。
+ * English note.
+ * English note.
  */
 export function emitTieOff(
   anchor: Point,

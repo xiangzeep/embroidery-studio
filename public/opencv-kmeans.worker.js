@@ -1,14 +1,14 @@
-// OpenCV.js を WebWorker で動かして画像を k-means 量子化する。
-// メインスレッドからは
+// English note.
+// English note.
 //   { type: 'quantize', seq, width, height, buffer, colorCount, iterations, epsilon, smoothing }
-// を postMessage で送る。結果は
+// English note.
 //   { type: 'result', seq, paletteBuf, labelsBuf, outBuf, width, height }
-// で返す (Transferable で 3 つの ArrayBuffer をゼロコピー転送)。
+// English note.
 //
-// smoothing > 0 のときは k-means の前段で bilateralFilter をかけ、
-// 境界を保ったままアンチエイリアスや中間色を潰してクラスタリングを安定させる。
+// English note.
+// English note.
 //
-// このファイルは plain JS。public/ に置いて static 配信される。
+// English note.
 
 /* global cv */
 
@@ -29,12 +29,12 @@ self.onmessage = (e) => {
   else queued.push(e.data);
 };
 
-// labels に書き込む「背景」 sentinel 値。Uint8Array なので 0..colorCount-1 とぶつからない 255。
+// English note.
 const BACKGROUND_LABEL = 0xff;
 
-// smoothing (0..4) → bilateralFilter のパラメータ。
-// d は近傍半径、sigmaColor は色差の許容、sigmaSpace は空間距離の重み。
-// 0 はフィルタ無しを意味する。
+// English note.
+// English note.
+// English note.
 const BILATERAL_PRESETS = [
   null,
   { d: 5, sigmaColor: 35, sigmaSpace: 35 },
@@ -61,8 +61,8 @@ function handle(msg) {
   const srcU8 = new Uint8ClampedArray(buffer);
   const opaqueMask = maskBuffer ? new Uint8Array(maskBuffer) : null;
 
-  // bilateralFilter で前処理してから k-means に流す (smoothing が 0 のときはスキップ)。
-  // 入力の RGBA は不透明合成済み (透明部分は白埋め) なので、そのまま 3ch に変換して問題ない。
+  // English note.
+  // English note.
   const sIdx = Math.max(0, Math.min(BILATERAL_PRESETS.length - 1, smoothing | 0));
   const bilateral = BILATERAL_PRESETS[sIdx];
   const rgbU8 = new Uint8Array(pixelCount * 3);
@@ -88,7 +88,7 @@ function handle(msg) {
       self.postMessage({
         type: 'error',
         seq,
-        message: 'bilateralFilter 失敗: ' + ((err && err.message) || String(err)),
+        message: 'bilateralFilter failed: ' + ((err && err.message) || String(err)),
       });
       if (srcRgba) srcRgba.delete();
       if (rgb) rgb.delete();
@@ -106,8 +106,8 @@ function handle(msg) {
     }
   }
 
-  // 不透明ピクセルだけを k-means に投入する。
-  // opaqueMask が未指定なら全ピクセル不透明として扱う (後方互換)。
+  // English note.
+  // English note.
   const opaqueIndices = [];
   for (let i = 0; i < pixelCount; i++) {
     if (!opaqueMask || opaqueMask[i] === 1) opaqueIndices.push(i);
@@ -118,12 +118,12 @@ function handle(msg) {
     self.postMessage({
       type: 'error',
       seq,
-      message: '不透明ピクセル数が色数より少ないため減色できません',
+      message: 'Cannot quantize because opaque pixel count is smaller than color count',
     });
     return;
   }
 
-  // (bilateralFilter 後の) RGB を Float32 化して k-means に投入。不透明ピクセルのみ。
+  // English note.
   const rgbF32 = new Float32Array(opaqueCount * 3);
   for (let j = 0; j < opaqueCount; j++) {
     const i = opaqueIndices[j];
@@ -163,7 +163,7 @@ function handle(msg) {
       palette[k * 3 + 2] = clampByte(centers.data32F[k * 3 + 2]);
     }
 
-    // 出力 labels と RGBA: 透明ピクセルは sentinel ラベル + 白で埋める。
+    // English note.
     const labelsArr = new Uint8Array(pixelCount).fill(BACKGROUND_LABEL);
     const outRgba = new Uint8ClampedArray(pixelCount * 4);
     for (let i = 0; i < pixelCount; i++) {

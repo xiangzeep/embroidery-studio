@@ -1,6 +1,8 @@
 import type { StitchPattern } from "./types";
 import type { EmbroideryFormat } from "./config";
 import { writeEmbroideryViaWorker } from "./pyodide-worker";
+import { writeDst } from "./dst-writer";
+import { optimizePatternCommands } from "./command-optimizer";
 
 export type WriteInput = {
   pattern: StitchPattern;
@@ -8,8 +10,12 @@ export type WriteInput = {
 };
 
 /**
- * pyembroidery 出力。Pyodide は Web Worker 内で動く (pyodide-worker.ts)。
+ * English note.
  */
 export async function writeEmbroidery(input: WriteInput): Promise<Blob> {
-  return writeEmbroideryViaWorker(input);
+  const pattern = optimizePatternCommands(input.pattern);
+  if (input.format === "dst") {
+    return writeDst(pattern);
+  }
+  return writeEmbroideryViaWorker({ ...input, pattern });
 }

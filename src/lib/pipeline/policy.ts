@@ -1,14 +1,14 @@
-// Phase 3 §7 Trim Policy: format ごとの trim/jump/travel-run 閾値を定義する。
-// connectObjects から参照される。閾値の不変条件: trim > jump >= travelRun。
+// English note.
+// English note.
 
 import type { EmbroideryFormat } from "./config";
 
 export type TrimPolicy = {
-  /** これ以上の距離は trim を挿入してから jump */
+  /** English note. */
   trimThresholdMm: number;
-  /** travel run と jump の境界 (将来別運用予備) */
+  /** English note. */
   jumpThresholdMm: number;
-  /** これ未満なら travel run (kind="run") で繋ぐ */
+  /** English note. */
   travelRunUntilMm: number;
 };
 

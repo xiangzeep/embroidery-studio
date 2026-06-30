@@ -1,15 +1,15 @@
 "use client";
 
-// preview-canvas-editable.tsx — Phase 5 PR20 + PR23。
+// preview-canvas-editable.tsx - editable local preview canvas.
 //
-// 既存 StitchCanvas を内部利用しつつ、上層に以下のオーバーレイを重ねる:
-//   - select mode (PR20): クリックヒットテスト → designStore.selectedObjectId
-//                          選択中 object の outer をハイライト描画
-//   - node   mode (PR23): SVG で頂点ハンドル + 辺中点ハンドルを描画
-//                          ドラッグで頂点移動、辺中点クリックで頂点挿入、
-//                          Delete キーで選択中頂点を削除
+// English note.
+// English note.
+// English note.
+// English note.
+// English note.
+// English note.
 //
-// 座標系は mm 単位 (shape.outer も mm)。SVG viewBox で mm→px 変換を任せる。
+// English note.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { StitchCanvas } from "./stitch-preview";
@@ -34,7 +34,7 @@ type Props = {
   design: EmbroideryDesign | null;
 };
 
-const VERTEX_HIT_PX = 8; // SVG ピクセル単位のヒット半径
+const VERTEX_HIT_PX = 8; // English note.
 
 export function PreviewCanvasEditable({ pattern, design }: Props) {
   const selectedObjectId = useDesignStore((s) => s.selectedObjectId);
@@ -51,9 +51,9 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
   );
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
 
-  // 選択中 object / mode 切替で頂点選択をリセット (React 公式 "resetting state on
-  // prop change" パターン: render 中の条件分岐で setState を呼ぶことで cascading
-  // render を避ける)。
+  // English note.
+  // English note.
+  // English note.
   const [prevKey, setPrevKey] = useState<string>(
     `${editMode}|${selectedObjectId ?? "_"}`,
   );
@@ -76,7 +76,7 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
       ? design.objects.find((o) => o.id === selectedObjectId) ?? null
       : null;
 
-  // canvas overlay (select mode のハイライト)
+  // English note.
   useEffect(() => {
     const canvas = overlayRef.current;
     if (!canvas) return;
@@ -94,7 +94,7 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
     drawOutline(ctx, selectedObject.shape.outer, scale);
   }, [pattern, w, h, scale, selectedObject, editMode]);
 
-  // Delete キーで選択中頂点を削除 (node mode のみ)
+  // English note.
   useEffect(() => {
     if (editMode !== "node") return;
     if (selectedVertexIdx === null) return;
@@ -102,7 +102,7 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       if (!selectedObject) return;
       const removed = removeVertexAt(selectedObject.shape.outer, selectedVertexIdx);
-      if (removed === null) return; // 3 頂点未満は削除拒否
+      if (removed === null) return; // English note.
       e.preventDefault();
       updateObject(selectedObject.id, {
         shape: { ...selectedObject.shape, outer: removed },
@@ -191,7 +191,7 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
           onMouseUp={handleNodeMouseUp}
           onMouseLeave={handleNodeMouseUp}
         >
-          {/* 辺中点ハンドル (小さい四角) */}
+          {/* English note */}
           {edgeMidpoints(selectedObject.shape.outer).map((m, i) => (
             <rect
               key={`edge-${i}`}
@@ -205,7 +205,7 @@ export function PreviewCanvasEditable({ pattern, design }: Props) {
               strokeWidth={0.5 / scale}
             />
           ))}
-          {/* 頂点ハンドル (円) */}
+          {/* English note */}
           {selectedObject.shape.outer.map((p, i) => (
             <circle
               key={`vertex-${i}`}

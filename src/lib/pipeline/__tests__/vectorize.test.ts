@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 
-// vectorize() 内部の buildMask が `new ImageData(...)` を呼ぶため、
-// node 環境では未定義のクラスをスタブする。
-// tracer をモックしているテストでは mask の中身は使われない。
+// English note.
+// English note.
+// English note.
 if (typeof (globalThis as { ImageData?: unknown }).ImageData === "undefined") {
   (globalThis as { ImageData: unknown }).ImageData = class {
     data: Uint8ClampedArray;
@@ -59,13 +59,13 @@ function makeMaskFromAscii(ascii: string): {
 }
 
 describe("parsePathD", () => {
-  it("単一の M..Z を 1 ポリゴンとして返す", () => {
+  it("translated case", () => {
     const out = parsePathD("M 0 0 L 10 0 L 10 10 L 0 10 Z");
     expect(out).toHaveLength(1);
     expect(out[0].length).toBeGreaterThanOrEqual(4);
   });
 
-  it("M..Z M..Z を 2 ポリゴン（outer + hole）として返す", () => {
+  it("translated case", () => {
     const out = parsePathD(
       "M 0 0 L 100 0 L 100 100 L 0 100 Z M 30 30 L 30 70 L 70 70 L 70 30 Z",
     );
@@ -74,7 +74,7 @@ describe("parsePathD", () => {
 });
 
 describe("signedArea", () => {
-  it("CCW の正方形は正", () => {
+  it("translated case", () => {
     expect(
       signedArea([
         [0, 0],
@@ -84,7 +84,7 @@ describe("signedArea", () => {
       ]),
     ).toBeGreaterThan(0);
   });
-  it("CW の正方形は負", () => {
+  it("translated case", () => {
     expect(
       signedArea([
         [0, 0],
@@ -108,7 +108,7 @@ describe("pointInPolygon", () => {
 });
 
 describe("buildShapesByContainment", () => {
-  it("outer + hole の 2 サブパスを 1 Shape に統合", () => {
+  it("translated case", () => {
     const outer: [number, number][] = [
       [0, 0],
       [100, 0],
@@ -126,7 +126,7 @@ describe("buildShapesByContainment", () => {
     expect(shapes[0].holes).toHaveLength(1);
   });
 
-  it("離れた 2 つの outer を 2 Shape として分裂", () => {
+  it("translated case", () => {
     const o1: [number, number][] = [
       [0, 0],
       [10, 0],
@@ -147,7 +147,7 @@ describe("buildShapesByContainment", () => {
 });
 
 describe("dilateForegroundMask", () => {
-  it("中央 1 画素が iterations=1 で 4-neighbor 膨張して 5 画素になる", () => {
+  it("translated case", () => {
     const { data, width, height } = makeMaskFromAscii(
       `
       .....
@@ -169,7 +169,7 @@ describe("dilateForegroundMask", () => {
     );
   });
 
-  it("iterations=0 はマスクを変更しない", () => {
+  it("translated case", () => {
     const { data, width, height } = makeMaskFromAscii(
       `
       .#.
@@ -182,7 +182,7 @@ describe("dilateForegroundMask", () => {
     expect(maskToString(data, width, height)).toBe(before);
   });
 
-  it("画像端でも 4-neighbor が範囲外を踏まない", () => {
+  it("translated case", () => {
     const { data, width, height } = makeMaskFromAscii(
       `
       #..
@@ -196,7 +196,7 @@ describe("dilateForegroundMask", () => {
     );
   });
 
-  it("vectorize から dilatePx を渡すとトレースに膨張後マスクが届く", async () => {
+  it("translated case", async () => {
     let received: ImageData | null = null;
     const captureTracer: Tracer = {
       async trace(mask) {
@@ -204,7 +204,7 @@ describe("dilateForegroundMask", () => {
         return [];
       },
     };
-    // 3x3 の中央 1 画素を colorIndex=0 にする
+    // English note.
     const labels = new Uint8Array(3 * 3).fill(1);
     labels[4] = 0;
     await vectorize(
@@ -220,7 +220,7 @@ describe("dilateForegroundMask", () => {
 });
 
 describe("vectorize (mock tracer)", () => {
-  it("<path> 内の outer+hole が 1 Shape として保持される", async () => {
+  it("translated case", async () => {
     const mockTracer: Tracer = {
       async trace() {
         return [
@@ -238,10 +238,10 @@ describe("vectorize (mock tracer)", () => {
     expect(regions[0].shapes[0].holes).toHaveLength(1);
   });
 
-  it("複数 <path> にまたがる多重ネスト (穴の中の島) を深さで分類", async () => {
-    // imagetracerjs は穴の中の島を別 <path> として分離する。
-    // path 1: 外形 (100x100) + 文字穴 (40x40)
-    // path 2: 文字穴の中の小さな島 (20x20) — 独立 path として出力される
+  it("translated case", async () => {
+    // English note.
+    // path 1: outer shape (100x100) + glyph hole (40x40)
+    // English note.
     const mockTracer: Tracer = {
       async trace() {
         return [
@@ -256,15 +256,15 @@ describe("vectorize (mock tracer)", () => {
       mockTracer,
     );
     expect(regions).toHaveLength(1);
-    // 深さ 0 (外形 100x100) と 深さ 2 (中の島 20x20) が outer になる
+    // English note.
     expect(regions[0].shapes).toHaveLength(2);
-    // 外形 100x100 の hole として 40x40 の穴が登録される
+    // English note.
     const big = regions[0].shapes.find(
       (s) => Math.abs(s.outer[0][0] - 0) < 1 && Math.abs(s.outer[0][1] - 0) < 1,
     );
     expect(big).toBeDefined();
     expect(big!.holes).toHaveLength(1);
-    // 中の島 20x20 は穴を持たない独立 outer
+    // English note.
     const island = regions[0].shapes.find(
       (s) =>
         Math.abs(s.outer[0][0] - 45) < 1 && Math.abs(s.outer[0][1] - 45) < 1,

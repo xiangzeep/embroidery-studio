@@ -1,7 +1,7 @@
-// Phase 3 §4 Pathing: object 訪問順最適化と branching 検出。
-// PR13 スコープ: shapesTouch (接触判定) / findBranches (Union-Find グループ化) /
-// chooseEntryExit (進入退出点選定)。optimizeOrder は PR14、render 配線は PR15。
-// 純関数: 入力 EmbroideryObject / Shape を破壊せず、新オブジェクトを返す。
+// English note.
+// English note.
+// English note.
+// English note.
 
 import type {
   BranchGroup,
@@ -10,6 +10,8 @@ import type {
   Point2D,
   Shape,
 } from "./types";
+import { groupObjectsByLayerOrder } from "./layer-ordering";
+import { isStrokeBranchGroup, orderStrokeBranchObjects } from "./stroke-graph";
 
 export type { BranchGroup } from "./types";
 
@@ -21,13 +23,16 @@ export type EdgePoint = {
 };
 
 const DEFAULT_TOUCH_EPSILON_MM = 0.5;
+const STROKE_BRANCH_GAP_EPSILON_MM = 1.5;
+const TWO_OPT_OBJECT_CAP = 48;
+const TWO_OPT_MAX_PASSES = 2;
 
 /**
- * 2 つの Shape が `epsilon` (mm) 以内で接触/重なるかを判定する。
- * bbox 先行枝刈り → outer-outer 全線分 pair の最短距離が `< epsilon` で true。
- * holes は無視 (Phase 3 では outer 接触のみで branch group を構築する)。
+ * English note.
+ * English note.
+ * English note.
  *
- * 計算量: O(N×M) where N, M は outer の頂点数。object 数 < 50 想定で許容範囲。
+ * English note.
  */
 export function shapesTouch(
   a: Shape,
@@ -38,7 +43,7 @@ export function shapesTouch(
   const bbA = polygonBBox(a.outer);
   const bbB = polygonBBox(b.outer);
   if (!bboxesOverlap(bbA, bbB, epsilon)) return false;
-  // 全線分 pair で最短距離を計算 (距離 < epsilon で touch とみなす)
+  // English note.
   for (let i = 0; i < a.outer.length; i++) {
     const p1 = a.outer[i];
     const p2 = a.outer[(i + 1) % a.outer.length];
@@ -52,12 +57,12 @@ export function shapesTouch(
 }
 
 /**
- * 同色 EmbroideryObject 群を Union-Find で接触判定 → branch group 化する。
- * 異色 object は必ず別 group。孤立 object も 1 要素 group として返る。
- * 出力 group の順序は「group 内の最小入力 index」昇順で決定的。
- * 入力 objects は mutate しない。
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * 計算量: O(N²) (全 pair の `shapesTouch`)。
+ * English note.
  */
 export function findBranches(objects: EmbroideryObject[]): BranchGroup[] {
   const n = objects.length;
@@ -66,7 +71,8 @@ export function findBranches(objects: EmbroideryObject[]): BranchGroup[] {
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       if (objects[i].colorIndex !== objects[j].colorIndex) continue;
-      if (shapesTouch(objects[i].shape, objects[j].shape)) uf.union(i, j);
+      const epsilon = strokeBranchGapEpsilon(objects[i], objects[j]);
+      if (shapesTouch(objects[i].shape, objects[j].shape, epsilon)) uf.union(i, j);
     }
   }
   const groupsByRoot = new Map<number, number[]>();
@@ -84,7 +90,7 @@ export function findBranches(objects: EmbroideryObject[]): BranchGroup[] {
       colorIndex: objects[indices[0]].colorIndex,
     });
   }
-  // group は「最小入力 index」の昇順で並べる (決定性のため)
+  // English note.
   groups.sort((g1, g2) => {
     const i1 = objects.findIndex((o) => o.id === g1.objectIds[0]);
     const i2 = objects.findIndex((o) => o.id === g2.objectIds[0]);
@@ -93,15 +99,33 @@ export function findBranches(objects: EmbroideryObject[]): BranchGroup[] {
   return groups;
 }
 
+function strokeBranchGapEpsilon(
+  a: EmbroideryObject,
+  b: EmbroideryObject,
+): number {
+  if (
+    a.layer === b.layer &&
+    a.strokeKind !== undefined &&
+    a.strokeKind !== "none" &&
+    b.strokeKind !== undefined &&
+    b.strokeKind !== "none" &&
+    a.strokeMetrics?.isStrokeLike === true &&
+    b.strokeMetrics?.isStrokeLike === true
+  ) {
+    return STROKE_BRANCH_GAP_EPSILON_MM;
+  }
+  return DEFAULT_TOUCH_EPSILON_MM;
+}
+
 /**
- * EmbroideryObject の進入点と退出点を `prevExit` からの最近接で選定する。
+ * English note.
  *
- * - kind="run":   outer の 2 端 (`[0]` と `[N-1]`) から prevExit に近い方が entry、反対が exit
- * - kind="satin": outer の全頂点 pair で最遠の 2 点 (長軸 2 端) のうち prevExit に近い方が entry
- * - kind="fill":  outer 頂点中 prevExit に最も近い点が entry、entry から最も遠い outer 頂点が exit
+ * English note.
+ * English note.
+ * English note.
  *
- * `nextEntry` は将来 (PR15) の 2-way 最適化用フックで本 PR では未使用 (`_nextEntry`)。
- * 等距離タイの場合は **小さい index** を優先する (決定性確保)。
+ * English note.
+ * English note.
  */
 export function chooseEntryExit(
   obj: EmbroideryObject,
@@ -153,19 +177,19 @@ export function chooseEntryExit(
 }
 
 /**
- * Phase 3 §4.1 訪問順最適化。`design.objects` を以下の手順で再採番した新 Design を返す。
+ * English note.
  *
- *   Step A: colorIndex 昇順で stable group 化
- *   Step B: 各色グループ内で findBranches を呼ぶ
- *   Step C: 色 anchor を引き継ぎつつ、branch group 間/内とも nearest-neighbor で順序付け
- *   Step D: `locked: true` の object は元の order を保持し、再採番されない (衝突回避)
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * - 入力 `design` / `objects` は mutate しない
- * - 出力 `objects` は入力と同じ要素数・同じ id 集合、`order` と配列順のみ変化
- * - 出力 `objects` は `order` 昇順でソート済み
- * - 空 `objects` なら `{ ...design, objects: [] }` を返す
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * 計算量: O(N²) (`findBranches` 内の `shapesTouch` ペア走査が支配的)。object 数 < 50 想定。
+ * English note.
  */
 export function optimizeOrder(design: EmbroideryDesign): EmbroideryDesign {
   if (design.objects.length === 0) return { ...design, objects: [] };
@@ -174,48 +198,55 @@ export function optimizeOrder(design: EmbroideryDesign): EmbroideryDesign {
   const movable = cloned.filter((o) => o.locked !== true);
   const lockedOrders = new Set(locked.map((o) => o.order));
 
-  // movable を color → branch group → branch 内 NN の順で並べる
+  // English note.
   const ordered: EmbroideryObject[] = [];
   if (movable.length > 0) {
-    const colors = [...new Set(movable.map((o) => o.colorIndex))].sort(
-      (a, b) => a - b,
-    );
     let anchor: Point2D = [0, 0];
-    for (const ci of colors) {
-      const colorObjs = movable.filter((o) => o.colorIndex === ci);
-      const groups = findBranches(colorObjs);
-      const idMap = new Map(colorObjs.map((o) => [o.id, o]));
-      // branch group 間も nearest-neighbor
-      const remainingGroups = [...groups];
-      while (remainingGroups.length > 0) {
-        let bestGI = 0;
-        let bestD = Infinity;
-        for (let gi = 0; gi < remainingGroups.length; gi++) {
-          const groupObjs = remainingGroups[gi].objectIds
-            .map((id) => idMap.get(id)!)
-            .filter(Boolean);
-          // group 内の最近 entry までの距離を group 評価値とする
-          for (const obj of groupObjs) {
-            const ee = chooseEntryExit(obj, anchor);
-            const d = distSq(ee.entry.pt, anchor);
-            if (d < bestD) {
-              bestD = d;
-              bestGI = gi;
+    for (const layerGroup of groupObjectsByLayerOrder(movable)) {
+      const colors = [...new Set(layerGroup.objects.map((o) => o.colorIndex))].sort(
+        (a, b) => a - b,
+      );
+      for (const ci of colors) {
+        const colorObjs = layerGroup.objects.filter((o) => o.colorIndex === ci);
+        const groups = findBranches(colorObjs);
+        const idMap = new Map(colorObjs.map((o) => [o.id, o]));
+        // English note.
+        const remainingGroups = [...groups];
+        const colorStart = anchor;
+        const colorRoute: EmbroideryObject[] = [];
+        while (remainingGroups.length > 0) {
+          let bestGI = 0;
+          let bestD = Infinity;
+          for (let gi = 0; gi < remainingGroups.length; gi++) {
+            const groupObjs = remainingGroups[gi].objectIds
+              .map((id) => idMap.get(id)!)
+              .filter(Boolean);
+            // English note.
+            for (const obj of groupObjs) {
+              const ee = chooseEntryExit(obj, anchor);
+              const d = distSq(ee.entry.pt, anchor);
+              if (d < bestD) {
+                bestD = d;
+                bestGI = gi;
+              }
             }
           }
+          const pickedGroup = remainingGroups.splice(bestGI, 1)[0];
+          const groupObjs = pickedGroup.objectIds
+            .map((id) => idMap.get(id)!)
+            .filter(Boolean);
+          const route = routeBranchGroup(groupObjs, anchor);
+          colorRoute.push(...route.orderedObjects);
+          anchor = route.lastExit;
         }
-        const pickedGroup = remainingGroups.splice(bestGI, 1)[0];
-        const groupObjs = pickedGroup.objectIds
-          .map((id) => idMap.get(id)!)
-          .filter(Boolean);
-        const route = routeBranchGroup(groupObjs, anchor);
-        ordered.push(...route.orderedObjects);
-        anchor = route.lastExit;
+        const improvedColorRoute = improveRouteWithTwoOpt(colorRoute, colorStart);
+        ordered.push(...improvedColorRoute);
+        anchor = routeLastExit(improvedColorRoute, colorStart);
       }
     }
   }
 
-  // movable に order を採番 (locked の order をスキップして衝突回避)
+  // English note.
   let counter = 0;
   const nextOrder = (): number => {
     while (lockedOrders.has(counter)) counter++;
@@ -233,8 +264,13 @@ function routeBranchGroup(
   groupObjects: EmbroideryObject[],
   prevAnchor: Point2D,
 ): { orderedObjects: EmbroideryObject[]; lastExit: Point2D } {
+  if (isStrokeBranchGroup(groupObjects)) {
+    const orderedObjects = orderStrokeBranchObjects(groupObjects, prevAnchor);
+    return { orderedObjects, lastExit: routeLastExit(orderedObjects, prevAnchor) };
+  }
+
   const remaining = [...groupObjects];
-  const orderedObjects: EmbroideryObject[] = [];
+  const nearestNeighbor: EmbroideryObject[] = [];
   let anchor = prevAnchor;
   while (remaining.length > 0) {
     let bestIdx = 0;
@@ -250,10 +286,75 @@ function routeBranchGroup(
       }
     }
     const picked = remaining.splice(bestIdx, 1)[0];
-    orderedObjects.push(picked);
+    nearestNeighbor.push(picked);
     anchor = bestExit;
   }
-  return { orderedObjects, lastExit: anchor };
+
+  const orderedObjects = improveRouteWithTwoOpt(nearestNeighbor, prevAnchor);
+  return { orderedObjects, lastExit: routeLastExit(orderedObjects, prevAnchor) };
+}
+
+export function estimateRouteTravelLength(
+  objects: EmbroideryObject[],
+  start: Point2D = [0, 0],
+): number {
+  let anchor: Point2D = [start[0], start[1]];
+  let total = 0;
+  for (const obj of objects) {
+    const ee = chooseEntryExit(obj, anchor);
+    total += Math.hypot(ee.entry.pt[0] - anchor[0], ee.entry.pt[1] - anchor[1]);
+    anchor = ee.exit.pt;
+  }
+  return total;
+}
+
+export function improveRouteWithTwoOpt(
+  objects: EmbroideryObject[],
+  start: Point2D = [0, 0],
+): EmbroideryObject[] {
+  if (objects.length < 4) return objects.slice();
+  if (objects.length > TWO_OPT_OBJECT_CAP) {
+    const out: EmbroideryObject[] = [];
+    let anchor: Point2D = [start[0], start[1]];
+    for (let i = 0; i < objects.length; i += TWO_OPT_OBJECT_CAP) {
+      const chunk = objects.slice(i, i + TWO_OPT_OBJECT_CAP);
+      const improvedChunk = improveRouteWithTwoOpt(chunk, anchor);
+      out.push(...improvedChunk);
+      anchor = routeLastExit(improvedChunk, anchor);
+    }
+    return out;
+  }
+
+  let best = objects.slice();
+  let bestLength = estimateRouteTravelLength(best, start);
+
+  for (let pass = 0; pass < TWO_OPT_MAX_PASSES; pass++) {
+    let improved = false;
+    for (let i = 0; i < best.length - 1; i++) {
+      for (let j = i + 1; j < best.length; j++) {
+        const candidate = best
+          .slice(0, i)
+          .concat(best.slice(i, j + 1).reverse(), best.slice(j + 1));
+        const candidateLength = estimateRouteTravelLength(candidate, start);
+        if (candidateLength + 1e-6 < bestLength) {
+          best = candidate;
+          bestLength = candidateLength;
+          improved = true;
+        }
+      }
+    }
+    if (!improved) break;
+  }
+
+  return best;
+}
+
+function routeLastExit(objects: EmbroideryObject[], start: Point2D): Point2D {
+  let anchor: Point2D = [start[0], start[1]];
+  for (const obj of objects) {
+    anchor = chooseEntryExit(obj, anchor).exit.pt;
+  }
+  return anchor;
 }
 
 // --- private helpers ---

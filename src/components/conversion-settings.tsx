@@ -14,9 +14,14 @@ import {
 import { Loader2, Sparkles } from "lucide-react";
 import type { FillStrategy } from "@/lib/pipeline/render";
 import {
+  QUALITY_PRESETS,
   applyFabricDefaults,
+  applyQualityPreset,
   type ConversionConfig,
+  type DigitizingMode,
   type EmbroideryFormat,
+  type OutlineFontStrategy,
+  type QualityPreset,
 } from "@/lib/pipeline/config";
 import type { FabricKind } from "@/lib/pipeline/types";
 
@@ -36,22 +41,64 @@ const FORMATS: { value: EmbroideryFormat; label: string }[] = [
 ];
 
 const FABRICS: { value: FabricKind; label: string }[] = [
-  { value: "denim", label: "デニム" },
-  { value: "twill", label: "ツイル" },
-  { value: "canvas", label: "キャンバス" },
-  { value: "knit-light", label: "ニット (薄手)" },
-  { value: "knit-heavy", label: "ニット (厚手)" },
-  { value: "terry", label: "パイル (タオル地)" },
-  { value: "fleece", label: "フリース" },
-  { value: "leather", label: "レザー" },
-  { value: "silk", label: "シルク" },
-  { value: "felt", label: "フェルト" },
+  { value: "denim", label: "Denim" },
+  { value: "twill", label: "Twill" },
+  { value: "canvas", label: "Canvas" },
+  { value: "knit-light", label: "Knit (Light)" },
+  { value: "knit-heavy", label: "Knit (Heavy)" },
+  { value: "terry", label: "Terry Cloth" },
+  { value: "fleece", label: "Fleece" },
+  { value: "leather", label: "Leather" },
+  { value: "silk", label: "Silk" },
+  { value: "felt", label: "Felt" },
+];
+
+const QUALITY_OPTIONS: { value: QualityPreset; label: string }[] = [
+  { value: "fast", label: "Fast" },
+  { value: "balanced", label: "Balanced" },
+  { value: "high", label: "High" },
+  { value: "detail", label: "Detail" },
+];
+
+const DIGITIZING_MODES: { value: DigitizingMode; label: string; hint: string }[] = [
+  {
+    value: "line-art",
+    label: "Line Art",
+    hint: "Fine outlines prefer plain run stitches.",
+  },
+  {
+    value: "photo-stitch",
+    label: "Photo Stitch",
+    hint: "Allows denser decorative stitch treatment.",
+  },
+];
+
+const OUTLINE_FONT_STRATEGIES: {
+  value: OutlineFontStrategy;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    value: "auto",
+    label: "Auto",
+    hint: "Run for contours, satin for decorative bands.",
+  },
+  {
+    value: "prefer-run",
+    label: "Prefer Run",
+    hint: "Push outlines and text-like strokes toward run.",
+  },
+  {
+    value: "prefer-satin",
+    label: "Prefer Satin",
+    hint: "Allow clear decorative bands to stay satin.",
+  },
 ];
 
 const STRATEGIES: { value: FillStrategy; label: string }[] = [
-  { value: "global-angle", label: "全体角度を使う" },
-  { value: "shape-long-axis", label: "形状の長軸に沿う" },
-  { value: "shape-cross-axis", label: "形状の長軸に直交" },
+  { value: "global-angle", label: "Use Global Angle" },
+  { value: "shape-long-axis", label: "Follow Shape Long Axis" },
+  { value: "shape-cross-axis", label: "Perpendicular to Shape Long Axis" },
 ];
 
 export function ConversionSettings({
@@ -68,11 +115,11 @@ export function ConversionSettings({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">2. パラメータを調整</CardTitle>
+        <CardTitle className="text-base">2. Adjust Parameters</CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="space-y-2">
-          <Label>生地</Label>
+          <Label>Fabric</Label>
           <Select
             value={value.fabric}
             onValueChange={(v) =>
@@ -92,8 +139,33 @@ export function ConversionSettings({
           </Select>
         </div>
 
+
         <div className="space-y-2">
-          <Label>出力フォーマット</Label>
+          <Label>Quality</Label>
+          <Select
+            value={value.qualityPreset}
+            onValueChange={(v) =>
+              onChange(applyQualityPreset(value, v as QualityPreset))
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {QUALITY_OPTIONS.map((option) => {
+                const preset = QUALITY_PRESETS[option.value];
+                return (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label} · {preset.maxDimension}px · {preset.maxColorCount} colors
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Output Format</Label>
           <Select
             value={value.format}
             onValueChange={(v) => update("format", v as EmbroideryFormat)}
@@ -111,8 +183,47 @@ export function ConversionSettings({
           </Select>
         </div>
 
+        <div className="space-y-2">
+          <Label>Digitizing Mode</Label>
+          <Select
+            value={value.digitizingMode}
+            onValueChange={(v) => update("digitizingMode", v as DigitizingMode)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DIGITIZING_MODES.map((mode) => (
+                <SelectItem key={mode.value} value={mode.value}>
+                  {mode.label} · {mode.hint}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Outline / Font Strategy</Label>
+          <Select
+            value={value.outlineFontStrategy}
+            onValueChange={(v) =>
+              update("outlineFontStrategy", v as OutlineFontStrategy)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {OUTLINE_FONT_STRATEGIES.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label} · {option.hint}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <SliderField
-          label="幅"
+          label="Width"
           unit="mm"
           value={value.widthMm}
           min={20}
@@ -121,16 +232,16 @@ export function ConversionSettings({
           onChange={(v) => update("widthMm", v)}
         />
         <SliderField
-          label="色数"
-          unit="色"
+          label="Color Count"
+          unit=""
           value={value.colorCount}
           min={1}
-          max={16}
+          max={QUALITY_PRESETS[value.qualityPreset].maxColorCount}
           step={1}
           onChange={(v) => update("colorCount", v)}
         />
         <SliderField
-          label="ステッチ密度"
+          label="Stitch Density"
           unit="mm"
           value={value.stitchDensity}
           min={0.2}
@@ -145,7 +256,7 @@ export function ConversionSettings({
           }
         />
         <SliderField
-          label="サテン最大幅"
+          label="Stitch Direction (Global)"
           unit="mm"
           value={value.satinMaxWidthMm}
           min={1}
@@ -154,7 +265,7 @@ export function ConversionSettings({
           onChange={(v) => update("satinMaxWidthMm", v)}
         />
         <div className="space-y-2">
-          <Label>方向ストラテジ</Label>
+          <Label>Direction Strategy</Label>
           <Select
             value={value.fillStrategy}
             onValueChange={(v) => update("fillStrategy", v as FillStrategy)}
@@ -172,7 +283,7 @@ export function ConversionSettings({
           </Select>
         </div>
         <SliderField
-          label="縫う向き (全体)"
+          label="Stitch Direction (Global)"
           unit="°"
           value={value.fillAngleDeg}
           min={0}
@@ -181,7 +292,7 @@ export function ConversionSettings({
           onChange={(v) => update("fillAngleDeg", v)}
         />
         <SliderField
-          label="色平滑化"
+          label="Color Smoothing"
           unit=""
           value={value.smoothing}
           min={0}
@@ -190,7 +301,7 @@ export function ConversionSettings({
           onChange={(v) => update("smoothing", v)}
         />
         <SliderField
-          label="境界の重ね合わせ"
+          label="Boundary Overlap"
           unit="px"
           value={value.boundaryDilatePx}
           min={0}
@@ -198,6 +309,25 @@ export function ConversionSettings({
           step={1}
           onChange={(v) => update("boundaryDilatePx", v)}
         />
+        <SliderField
+          label="Min Region Area"
+          unit="px²"
+          value={value.minRegionAreaPx}
+          min={0}
+          max={120}
+          step={1}
+          onChange={(v) => update("minRegionAreaPx", v)}
+        />
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={value.removeWhiteBackground}
+            onChange={(event) =>
+              update("removeWhiteBackground", event.target.checked)
+            }
+          />
+          Remove White Background
+        </label>
 
         <Button
           className="w-full"
@@ -207,12 +337,12 @@ export function ConversionSettings({
           {disabled ? (
             <>
               <Loader2 className="size-4 animate-spin" />
-              処理中
+              Processing
             </>
           ) : (
             <>
               <Sparkles className="size-4" />
-              刺繍データを生成
+              Generate Embroidery Data
             </>
           )}
         </Button>

@@ -20,13 +20,13 @@ describe("edgeRunUnderlay (rectangle, no hole)", () => {
     holes: [],
   };
 
-  it("10mm 正方形に対して 1 本の閉ループ polyline を返す", () => {
+  it("translated case", () => {
     const rings = edgeRunUnderlay(square10, 0.4, 2.5);
     expect(rings).toHaveLength(1);
     expect(rings[0].length).toBeGreaterThanOrEqual(4);
   });
 
-  it("各点は外形から insetMm だけ内側にある (±0.1mm)", () => {
+  it("translated case", () => {
     const rings = edgeRunUnderlay(square10, 0.4, 2.5);
     for (const [x, y] of rings[0]) {
       expect(x).toBeGreaterThanOrEqual(0.4 - 0.05);
@@ -43,9 +43,9 @@ describe("edgeRunUnderlay (rectangle, no hole)", () => {
     }
   });
 
-  it("隣接点間距離は stitchLenMm 以下 (90° 角での corner cut を許容)", () => {
-    // 90° 角の corner cut では Euclidean = 直線歩行距離/√2 まで縮みうるため、
-    // 物理ステッチ長を表す **上限**側のみ strict にチェックする。下限は ≥ stitch/√2 程度。
+  it("translated case", () => {
+    // English note.
+    // English note.
     const rings = edgeRunUnderlay(square10, 0.4, 2.5);
     const ring = rings[0];
     for (let i = 1; i < ring.length; i++) {
@@ -77,16 +77,16 @@ describe("edgeRunUnderlay (rectangle with hole)", () => {
     ],
   };
 
-  it("外形リング + 穴リングの計 2 本を返す", () => {
+  it("translated case", () => {
     const rings = edgeRunUnderlay(ringShape, 0.4, 2.5);
     expect(rings).toHaveLength(2);
     expect(rings[0].length).toBeGreaterThanOrEqual(4);
     expect(rings[1].length).toBeGreaterThanOrEqual(4);
   });
 
-  it("穴リングは穴を insetMm だけ外側に膨らませたリング ([5.6..14.4] bbox)", () => {
-    // outer と hole は中心が同じ (10,10) で重心では区別不能なので、
-    // 「より小さい bbox 範囲のリング」= 穴リング、で識別する。
+  it("translated case", () => {
+    // English note.
+    // English note.
     const rings = edgeRunUnderlay(ringShape, 0.4, 2.5);
     function bboxSpan(r: [number, number][]): number {
       let lo = Infinity,
@@ -99,7 +99,7 @@ describe("edgeRunUnderlay (rectangle with hole)", () => {
     }
     const sorted = [...rings].sort((a, b) => bboxSpan(a) - bboxSpan(b));
     const holeRing = sorted[0];
-    expect(bboxSpan(holeRing)).toBeLessThan(12); // 穴 bbox span ≒ 8.8
+    expect(bboxSpan(holeRing)).toBeLessThan(12); // hole bbox span is about 8.8
     for (const [x, y] of holeRing) {
       expect(x).toBeGreaterThanOrEqual(5.6 - 0.1);
       expect(x).toBeLessThanOrEqual(14.4 + 0.1);
@@ -120,7 +120,7 @@ describe("centerRunUnderlay (thin rectangle)", () => {
     holes: [],
   };
 
-  it("細長矩形の中央線 (y ≒ 1.0, ±0.3mm) を返す", () => {
+  it("translated case", () => {
     const line = centerRunUnderlay(thinBar, 2.5);
     expect(line.length).toBeGreaterThanOrEqual(6);
     expect(line.length).toBeLessThanOrEqual(12);
@@ -132,7 +132,7 @@ describe("centerRunUnderlay (thin rectangle)", () => {
     expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThanOrEqual(15);
   });
 
-  it("隣接点間距離は stitchLenMm の ±20% 以内", () => {
+  it("translated case", () => {
     const line = centerRunUnderlay(thinBar, 2.5);
     for (let i = 1; i < line.length; i++) {
       const d = Math.hypot(
@@ -144,7 +144,7 @@ describe("centerRunUnderlay (thin rectangle)", () => {
     }
   });
 
-  it("極小面積の shape (≦ 0.25mm²) に対して空配列を返す", () => {
+  it("translated case", () => {
     const dot: Shape = {
       outer: [
         [0, 0],
@@ -159,7 +159,7 @@ describe("centerRunUnderlay (thin rectangle)", () => {
 });
 
 describe("__internal helpers", () => {
-  it("offsetShapeInward は outer -delta / 穴 +delta で 2 本", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -179,9 +179,9 @@ describe("__internal helpers", () => {
     expect(__internal.offsetShapeInward(shape, 0.5)).toHaveLength(2);
   });
 
-  it("thinMaskZhangSuen は 10×3 horizontal bar を中央行 1 ピクセル幅にする", () => {
-    // 標準 Zhang-Suen は端点を侵食するため、10px 幅入力に対して skeleton は概ね 6-10px。
-    // 全ピクセルが中央行 (y=2) に集まる「1px 厚」の性質のみを strict にチェックする。
+  it("translated case", () => {
+    // English note.
+    // English note.
     const w = 12,
       h = 5;
     const mask = new Uint8Array(w * h);
@@ -212,13 +212,13 @@ describe("edge cases", () => {
     holes: [],
   };
 
-  it("edgeRunUnderlay: insetMm <= 0 / stitchLenMm <= 0 で空配列", () => {
+  it("translated case", () => {
     expect(edgeRunUnderlay(sq, 0, 2.5)).toEqual([]);
     expect(edgeRunUnderlay(sq, -0.1, 2.5)).toEqual([]);
     expect(edgeRunUnderlay(sq, 0.4, 0)).toEqual([]);
   });
 
-  it("edgeRunUnderlay: inset が大きすぎて外形消失で空配列", () => {
+  it("translated case", () => {
     const tiny: Shape = {
       outer: [
         [0, 0],
@@ -231,10 +231,10 @@ describe("edge cases", () => {
     expect(edgeRunUnderlay(tiny, 0.6, 2.5)).toEqual([]);
   });
 
-  it("edgeRunUnderlay: 外形消失時は holes があっても空配列 (順序契約の保護)", () => {
-    // [0,1]² の outer (1mm 角) を 0.6mm 内側オフセット → 消失。
-    // 一方 hole は 0.4mm 角を +0.6mm 外側オフセットしても残るため、
-    // 順序契約が破られないよう実装側で全体を [] にする必要がある。
+  it("translated case", () => {
+    // English note.
+    // English note.
+    // English note.
     const withHole: Shape = {
       outer: [
         [0, 0],
@@ -254,7 +254,7 @@ describe("edge cases", () => {
     expect(edgeRunUnderlay(withHole, 0.6, 2.5)).toEqual([]);
   });
 
-  it("centerRunUnderlay: 三角形でも 2 点以上の polyline", () => {
+  it("translated case", () => {
     const tri: Shape = {
       outer: [
         [0, 0],
@@ -268,7 +268,7 @@ describe("edge cases", () => {
 });
 
 describe("fillUnderlay", () => {
-  it("表縫い angle=0 (水平) に直交した垂直スキャンを spacingMm 間隔で生成", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -291,7 +291,7 @@ describe("fillUnderlay", () => {
     }
   });
 
-  it("spacingMm を半分にすると scanline 本数がおおむね倍", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -307,7 +307,7 @@ describe("fillUnderlay", () => {
     expect(fine.length).toBeLessThan(coarse.length * 2.2);
   });
 
-  it("穴を持つ shape では穴内部に scanline 点が落ちない", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -332,7 +332,7 @@ describe("fillUnderlay", () => {
     expect(insideHole.length).toBe(0);
   });
 
-  it("spacingMm <= 0 や outer 退化で空配列", () => {
+  it("translated case", () => {
     const sq: Shape = {
       outer: [
         [0, 0],
@@ -360,7 +360,7 @@ describe("fillUnderlay", () => {
 });
 
 describe("zigzagUnderlay", () => {
-  it("幅 5mm × 長さ 30mm の satin で両 rail 間を spacingMm で往復する単一 polyline", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -378,7 +378,7 @@ describe("zigzagUnderlay", () => {
     const railHigh = ys.filter((y) => Math.abs(y - 4.5) < 0.15).length;
     expect(railLow + railHigh).toBe(pts.length);
     expect(Math.abs(railLow - railHigh)).toBeLessThanOrEqual(1);
-    // 隣接点は必ず逆 rail (zigzag 性)
+    // English note.
     for (let i = 1; i < pts.length; i++) {
       const prevHigh = pts[i - 1][1] > 2.5;
       const currHigh = pts[i][1] > 2.5;
@@ -386,7 +386,7 @@ describe("zigzagUnderlay", () => {
     }
   });
 
-  it("spacingMm が小さいほどステップ数が増える", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -401,7 +401,7 @@ describe("zigzagUnderlay", () => {
     expect(dense.length).toBeGreaterThan(sparse.length * 3);
   });
 
-  it("insetMm を 1.0 に増やすと rail 位置が内側に寄る", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -420,7 +420,7 @@ describe("zigzagUnderlay", () => {
     expect(yMinLarge).toBeCloseTo(1.0, 1);
   });
 
-  it("insetMm が shortSide/2 を超えると空配列 (退化ケース)", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -461,15 +461,15 @@ describe("generateUnderlayStitches dispatch", () => {
     };
   }
 
-  it('kind="none" なら空配列', () => {
+  it('kind="none" returns an empty array', () => {
     expect(generateUnderlayStitches(fillObj({ kind: "none" }))).toEqual([]);
   });
 
-  it("underlay 未定義でも空配列", () => {
+  it("translated case", () => {
     expect(generateUnderlayStitches(fillObj(undefined))).toEqual([]);
   });
 
-  it('kind="edge-run" は kind=run の連続で inset 0.4mm の枠内座標', () => {
+  it('kind="edge-run" returns run stitches inside the inset frame', () => {
     const r = generateUnderlayStitches(
       fillObj({ kind: "edge-run", insetMm: 0.4, stitchLenMm: 2 }),
     );
@@ -482,7 +482,7 @@ describe("generateUnderlayStitches dispatch", () => {
     }
   });
 
-  it('kind="center-run" は細長 satin で polyline 化', () => {
+  it('kind="center-run" produces a polyline for narrow satin', () => {
     const obj: EmbroideryObject = {
       ...fillObj({ kind: "center-run", stitchLenMm: 2 }),
       kind: "satin",
@@ -501,7 +501,7 @@ describe("generateUnderlayStitches dispatch", () => {
     expect(r.every((s) => s.kind === "run")).toBe(true);
   });
 
-  it('kind="zigzag" は両 rail 間 polyline', () => {
+  it('kind="zigzag" returns a polyline between rails', () => {
     const obj: EmbroideryObject = {
       ...fillObj({ kind: "zigzag", spacingMm: 2, insetMm: 0.5 }),
       kind: "satin",
@@ -519,11 +519,12 @@ describe("generateUnderlayStitches dispatch", () => {
     expect(r.length).toBeGreaterThan(10);
   });
 
-  it('kind="fill" は segments を flatten', () => {
+  it('kind="fill" routes scanline segments safely', () => {
     const r = generateUnderlayStitches(
       fillObj({ kind: "fill", angleDeg: 0, spacingMm: 3 }),
     );
     expect(r.length).toBeGreaterThan(0);
-    expect(r.every((s) => s.kind === "run")).toBe(true);
+    expect(r.some((s) => s.kind === "run")).toBe(true);
+    expect(r.some((s) => s.kind === "jump")).toBe(true);
   });
 });

@@ -1,14 +1,14 @@
 "use client";
 
-// sewing-order-panel.tsx — Phase 5 PR22 縫い順編集パネル。
+// English note.
 //
-// design.objects を order 昇順でリスト表示し、@dnd-kit/sortable で縦並び替え。
-// 並び替え結果は design-store の reorderObjects 経由で order を 0..n-1 で再採番。
-// 各行に lock / visibility / delete 操作、ヘッダに「自動最適化」(applyOptimizeOrder)
-// と travel/jump 可視化トグルを置く。
+// English note.
+// English note.
+// English note.
+// English note.
 //
-// 純ロジック (DnD → id 配列変換) は sewing-order-helpers.ts に切り出して store
-// 経由でテスト。本コンポーネントは UI バインドのみ。
+// English note.
+// English note.
 
 import {
   DndContext,
@@ -42,13 +42,15 @@ const KIND_BADGE: Record<EmbroideryObject["kind"], string> = {
 };
 
 type Props = {
-  /** travel/jump 可視化トグル (購読は別 PR で配線) */
+  /** English note. */
   showTravel: boolean;
   onShowTravelChange: (next: boolean) => void;
 };
 
 export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
   const design = useDesignStore((s) => s.design);
+  const selectedObjectId = useDesignStore((s) => s.selectedObjectId);
+  const setSelectedObjectId = useDesignStore((s) => s.setSelectedObjectId);
   const reorderObjects = useDesignStore((s) => s.reorderObjects);
   const updateObject = useDesignStore((s) => s.updateObject);
   const removeObject = useDesignStore((s) => s.removeObject);
@@ -76,7 +78,7 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
   return (
     <Card>
       <CardHeader className="space-y-3">
-        <CardTitle className="text-base">縫い順</CardTitle>
+        <CardTitle className="text-base">Sewing Order</CardTitle>
         <div className="flex items-center justify-between gap-2">
           <Button
             size="sm"
@@ -85,7 +87,7 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
             disabled={!design || sorted.length < 2}
           >
             <Wand2 className="mr-1 size-3.5" />
-            自動最適化
+            Auto Optimize
           </Button>
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <input
@@ -93,7 +95,7 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
               checked={showTravel}
               onChange={(e) => onShowTravelChange(e.target.checked)}
             />
-            travel/jump 可視化
+            travel/jump Visualization
           </label>
         </div>
       </CardHeader>
@@ -101,7 +103,7 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
         {sorted.length === 0
           ? (
             <p className="px-6 py-4 text-sm text-muted-foreground">
-              オブジェクトがありません。
+              Click an object in the preview to select it.
             </p>
           )
           : (
@@ -116,6 +118,8 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
                     <SortableRow
                       key={obj.id}
                       object={obj}
+                      selected={obj.id === selectedObjectId}
+                      onSelect={() => setSelectedObjectId(obj.id)}
                       onToggleLocked={(locked) =>
                         updateObject(obj.id, { locked })}
                       onToggleVisible={(visible) =>
@@ -134,11 +138,15 @@ export function SewingOrderPanel({ showTravel, onShowTravelChange }: Props) {
 
 function SortableRow({
   object,
+  selected,
+  onSelect,
   onToggleLocked,
   onToggleVisible,
   onDelete,
 }: {
   object: EmbroideryObject;
+  selected: boolean;
+  onSelect: () => void;
   onToggleLocked: (locked: boolean) => void;
   onToggleVisible: (visible: boolean) => void;
   onDelete: () => void;
@@ -159,40 +167,55 @@ function SortableRow({
     <li
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-2 px-3 py-2 text-sm"
+      className={`flex items-center gap-2 px-3 py-2 text-sm ${
+        selected ? "bg-sky-50" : ""
+      }`}
     >
+      <div
+        className="flex min-w-0 flex-1 items-center gap-2"
+        onClick={onSelect}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect();
+          }
+        }}
+      >
       <button
         type="button"
         className="cursor-grab text-muted-foreground"
         {...attributes}
         {...listeners}
-        aria-label="ドラッグハンドル"
+        aria-label="Drag handle"
       >
         <GripVertical className="size-4" />
       </button>
-      <span
-        className="size-3.5 shrink-0 rounded-sm border"
-        style={{ backgroundColor: rgbToCss(object.rgb) }}
-      />
-      <span className="inline-flex w-5 justify-center rounded bg-muted px-1 text-[10px] font-bold tabular-nums">
-        {KIND_BADGE[object.kind]}
-      </span>
-      <Label className="flex-1 truncate text-xs">
-        #{object.order} / {object.id}
-      </Label>
+        <span
+          className="size-3.5 shrink-0 rounded-sm border"
+          style={{ backgroundColor: rgbToCss(object.rgb) }}
+        />
+        <span className="inline-flex w-5 justify-center rounded bg-muted px-1 text-[10px] font-bold tabular-nums">
+          {KIND_BADGE[object.kind]}
+        </span>
+        <Label className="flex-1 truncate text-xs">
+          #{object.order} / {object.id}
+        </Label>
+      </div>
       <IconBtn
-        title={isLocked ? "lock 解除" : "lock"}
+        title={isLocked ? "Unlock" : "lock"}
         onClick={() => onToggleLocked(!isLocked)}
       >
         {isLocked ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
       </IconBtn>
       <IconBtn
-        title={isVisible ? "非表示" : "表示"}
+        title={isVisible ? "Hide" : "Show"}
         onClick={() => onToggleVisible(!isVisible)}
       >
         {isVisible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
       </IconBtn>
-      <IconBtn title="削除" onClick={onDelete} destructive>
+      <IconBtn title="Delete" onClick={onDelete} destructive>
         <Trash2 className="size-3.5" />
       </IconBtn>
     </li>

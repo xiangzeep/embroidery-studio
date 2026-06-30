@@ -3,6 +3,8 @@ import {
   shapesTouch,
   findBranches,
   chooseEntryExit,
+  estimateRouteTravelLength,
+  improveRouteWithTwoOpt,
   optimizeOrder,
   type EdgePoint,
 } from "../pathing";
@@ -37,18 +39,18 @@ describe("pathing module skeleton", () => {
     expect(typeof findBranches).toBe("function");
     expect(typeof chooseEntryExit).toBe("function");
   });
-  it("BranchGroup は構造的に構築可能", () => {
+  it("translated case", () => {
     const g: BranchGroup = { objectIds: ["a"], colorIndex: 0 };
     expect(g.objectIds[0]).toBe("a");
   });
-  it("EdgePoint は構造的に構築可能", () => {
+  it("translated case", () => {
     const ep: EdgePoint = { objId: "a", pt: [0, 0], side: "outer", index: 0 };
     expect(ep.side).toBe("outer");
   });
 });
 
 describe("shapesTouch — bbox pruning", () => {
-  it("bbox が大きく離れていれば false", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -69,7 +71,7 @@ describe("shapesTouch — bbox pruning", () => {
     };
     expect(shapesTouch(a, b)).toBe(false);
   });
-  it("bbox 完全一致 + 線分も重複 → true", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -93,7 +95,7 @@ describe("shapesTouch — bbox pruning", () => {
 });
 
 describe("shapesTouch — segment distance", () => {
-  it("C 字のくぼみ内に b: bbox は overlap だが線分間距離は離れる → false", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -121,7 +123,7 @@ describe("shapesTouch — segment distance", () => {
 });
 
 describe("shapesTouch — touching / overlapping / epsilon", () => {
-  it("辺を共有する 2 正方形 → true", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -142,7 +144,7 @@ describe("shapesTouch — touching / overlapping / epsilon", () => {
     };
     expect(shapesTouch(a, b)).toBe(true);
   });
-  it("距離 0.4 (epsilon=0.5 デフォルト) → true", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -163,7 +165,7 @@ describe("shapesTouch — touching / overlapping / epsilon", () => {
     };
     expect(shapesTouch(a, b)).toBe(true);
   });
-  it("距離 0.6 (epsilon=0.5 デフォルト) → false", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -184,7 +186,7 @@ describe("shapesTouch — touching / overlapping / epsilon", () => {
     };
     expect(shapesTouch(a, b)).toBe(false);
   });
-  it("epsilon=1.0 なら距離 0.6 は true", () => {
+  it("translated case", () => {
     const a: Shape = {
       outer: [
         [0, 0],
@@ -212,7 +214,7 @@ describe("findBranches", () => {
     expect(findBranches([])).toEqual([]);
   });
 
-  it("同色 3 object が直線接触 → 1 group", () => {
+  it("translated case", () => {
     const a = makeObj("a", 0, [
       [0, 0],
       [10, 0],
@@ -236,7 +238,7 @@ describe("findBranches", () => {
     ]);
   });
 
-  it("色が異なれば接触していても別 group", () => {
+  it("translated case", () => {
     const a = makeObj("a", 0, [
       [0, 0],
       [10, 0],
@@ -255,7 +257,7 @@ describe("findBranches", () => {
     ]);
   });
 
-  it("孤立 object は 1 要素 group として返される", () => {
+  it("translated case", () => {
     const a = makeObj("a", 0, [
       [0, 0],
       [5, 0],
@@ -274,7 +276,7 @@ describe("findBranches", () => {
     expect(r[1]).toEqual({ objectIds: ["b"], colorIndex: 0 });
   });
 
-  it("出力順は最小入力 index 昇順で決定的", () => {
+  it("translated case", () => {
     const a = makeObj("a", 0, [
       [50, 0],
       [60, 0],
@@ -300,7 +302,7 @@ describe("findBranches", () => {
     ]);
   });
 
-  it("入力 objects を mutate しない (純関数)", () => {
+  it("translated case", () => {
     const a = makeObj("a", 0, [
       [0, 0],
       [10, 0],
@@ -323,7 +325,7 @@ describe("chooseEntryExit (run)", () => {
   const runObj = (outer: Point2D[]): EmbroideryObject =>
     makeObj("run-1", 0, outer, "run");
 
-  it("prevExit に近い端点が entry、反対端が exit", () => {
+  it("translated case", () => {
     const obj = runObj([
       [0, 0],
       [10, 0],
@@ -338,7 +340,7 @@ describe("chooseEntryExit (run)", () => {
     expect(r.exit.index).toBe(2);
   });
 
-  it("prevExit が反対側なら entry/exit が反転", () => {
+  it("translated case", () => {
     const obj = runObj([
       [0, 0],
       [10, 0],
@@ -349,7 +351,7 @@ describe("chooseEntryExit (run)", () => {
     expect(r.exit.pt).toEqual([0, 0]);
   });
 
-  it("等距離なら index=0 を entry (決定性)", () => {
+  it("translated case", () => {
     const obj = runObj([
       [0, 0],
       [10, 0],
@@ -364,7 +366,7 @@ describe("chooseEntryExit (satin)", () => {
   const satinObj = (outer: Point2D[]): EmbroideryObject =>
     makeObj("sat-1", 0, outer, "satin");
 
-  it("X 方向細長 satin: prevExit=(-5, 0.5) → entry x≒0, exit x≒20", () => {
+  it("X-axis narrow satin: prevExit=(-5, 0.5) -> entry near x=0 and exit near x=20", () => {
     const obj = satinObj([
       [0, 0],
       [20, 0],
@@ -377,7 +379,7 @@ describe("chooseEntryExit (satin)", () => {
     expect(Math.abs(r.entry.pt[0] - r.exit.pt[0])).toBeGreaterThan(15);
   });
 
-  it("Y 方向細長 satin: 縦方向に長軸を認識", () => {
+  it("translated case", () => {
     const obj = satinObj([
       [0, 0],
       [1, 0],
@@ -444,7 +446,7 @@ const fillBox = (
 });
 
 describe("optimizeOrder — 単一色直線配置", () => {
-  it("入力 [right, middle, left] でも結果は order [left=0, middle=1, right=2]", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -463,7 +465,7 @@ describe("optimizeOrder — 単一色直線配置", () => {
     expect(ids).toEqual(["left", "middle", "right"]);
   });
 
-  it("出力 objects は order 昇順でソート済み", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -480,7 +482,7 @@ describe("optimizeOrder — 単一色直線配置", () => {
     }
   });
 
-  it("入力 design / objects を mutate しない", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -505,7 +507,7 @@ describe("optimizeOrder — 単一色直線配置", () => {
     expect(optimizeOrder(design).objects).toEqual([]);
   });
 
-  it("id 集合は完全保持", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -525,7 +527,7 @@ describe("optimizeOrder — 単一色直線配置", () => {
 });
 
 describe("optimizeOrder — 色境界保護", () => {
-  it("colorIndex 順に block 化 (同色をまたいで別色を挟まない)", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -545,7 +547,7 @@ describe("optimizeOrder — 色境界保護", () => {
 });
 
 describe("optimizeOrder — locked 保持", () => {
-  it("locked=true の object は元の order を保持し、再採番されない", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -568,7 +570,7 @@ describe("optimizeOrder — locked 保持", () => {
     expect(a.order).not.toBe(b.order);
   });
 
-  it("全 object が locked なら元の order を保持", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -583,7 +585,7 @@ describe("optimizeOrder — locked 保持", () => {
     expect(r.objects.find((o) => o.id === "b")!.order).toBe(20);
   });
 
-  it("locked と非 locked の order が衝突しない", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -600,8 +602,8 @@ describe("optimizeOrder — locked 保持", () => {
   });
 });
 
-describe("optimizeOrder — branch group 連携", () => {
-  it("接触する 2 object は同じ branch group 内で連続 order される", () => {
+describe("optimizeOrder branch group integration", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 20,
@@ -623,7 +625,7 @@ describe("optimizeOrder — branch group 連携", () => {
     expect(Math.abs(idxA - idxB)).toBe(1);
   });
 
-  it("複数 branch group が同色内で順序付けされる (group 間も NN)", () => {
+  it("translated case", () => {
     const design: EmbroideryDesign = {
       widthMm: 100,
       heightMm: 50,
@@ -640,5 +642,117 @@ describe("optimizeOrder — branch group 連携", () => {
       .sort((x, y) => x.order - y.order)
       .map((o) => o.id);
     expect(sorted).toEqual(["a", "b", "c"]);
+  });
+});
+
+
+describe("optimizeOrder - limited 2-opt", () => {
+  it("improves a nearest-neighbor route when a local reversal is shorter", () => {
+    const objects = [
+      fillBox("near-east", 8, 0, 0),
+      fillBox("north-west", 3, 7, 0),
+      fillBox("north", 6, 9, 0),
+      fillBox("near-mid", 5, 2, 0),
+    ];
+    const nearestNeighborRoute = [objects[3], objects[0], objects[1], objects[2]];
+
+    const improved = improveRouteWithTwoOpt(nearestNeighborRoute, [0, 0]);
+
+    expect(improved.map((o) => o.id)).toEqual([
+      "near-east",
+      "near-mid",
+      "north-west",
+      "north",
+    ]);
+    expect(estimateRouteTravelLength(improved, [0, 0])).toBeLessThan(
+      estimateRouteTravelLength(nearestNeighborRoute, [0, 0]),
+    );
+  });
+
+  it("still improves local windows when the route exceeds the global 2-opt cap", () => {
+    const localProblem = [
+      fillBox("near-mid", 5, 2, 0),
+      fillBox("near-east", 8, 0, 0),
+      fillBox("north-west", 3, 7, 0),
+      fillBox("north", 6, 9, 0),
+    ];
+    const tail = Array.from({ length: 50 }, (_, i) =>
+      fillBox(`tail-${i}`, 100 + i * 4, 80, 0),
+    );
+    const longRoute = [...localProblem, ...tail];
+
+    const improved = improveRouteWithTwoOpt(longRoute, [0, 0]);
+
+    expect(estimateRouteTravelLength(improved, [0, 0])).toBeLessThan(
+      estimateRouteTravelLength(longRoute, [0, 0]),
+    );
+  });
+
+  it("keeps locked objects at their locked order after optimization", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 100,
+      heightMm: 100,
+      fabric: { kind: "denim" } as never,
+      objects: [
+        { ...fillBox("near-mid", 5, 2, 0), order: 0 },
+        { ...fillBox("locked", 4, 4, 0), order: 1, locked: true },
+        { ...fillBox("near-east", 8, 0, 0), order: 2 },
+        { ...fillBox("north-west", 3, 7, 0), order: 3 },
+        { ...fillBox("north", 6, 9, 0), order: 4 },
+      ],
+    };
+
+    const result = optimizeOrder(design);
+
+    expect(result.objects.find((o) => o.id === "locked")?.order).toBe(1);
+    expect(result.objects.map((o) => o.order)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("applies local 2-opt across disconnected branch groups in the same layer and color", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 100,
+      heightMm: 100,
+      fabric: { kind: "denim" } as never,
+      objects: [
+        { ...fillBox("near-east", 8, 0, 0), layer: "detail", order: 0 },
+        { ...fillBox("north-west", 3, 7, 0), layer: "detail", order: 1 },
+        { ...fillBox("north", 6, 9, 0), layer: "detail", order: 2 },
+        { ...fillBox("near-mid", 5, 2, 0), layer: "detail", order: 3 },
+      ],
+    };
+
+    const result = optimizeOrder(design);
+
+    expect(result.objects.map((o) => o.id)).toEqual([
+      "near-east",
+      "near-mid",
+      "north-west",
+      "north",
+    ]);
+  });
+});
+
+describe("optimizeOrder - layer ordering", () => {
+  it("sews base fill before detail, outline, and highlight even when color indices differ", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 100,
+      heightMm: 100,
+      fabric: { kind: "denim" } as never,
+      objects: [
+        { ...fillBox("outline", 0, 0, 0), layer: "outline", colorIndex: 0, order: 0 },
+        { ...fillBox("highlight", 10, 0, 0), layer: "highlight", colorIndex: 1, order: 1 },
+        { ...fillBox("base", 20, 0, 0), layer: "base-fill", colorIndex: 9, order: 2 },
+        { ...fillBox("detail", 30, 0, 0), layer: "detail", colorIndex: 2, order: 3 },
+      ],
+    };
+
+    const result = optimizeOrder(design);
+
+    expect(result.objects.map((object) => object.id)).toEqual([
+      "base",
+      "detail",
+      "outline",
+      "highlight",
+    ]);
   });
 });

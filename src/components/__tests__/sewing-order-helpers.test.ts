@@ -15,15 +15,15 @@ function makeObj(id: string, order: number): EmbroideryObject {
 }
 
 describe("sortByOrder", () => {
-  it("order 昇順にソートしたコピーを返す (入力非破壊)", () => {
+  it("translated case", () => {
     const input = [makeObj("c", 2), makeObj("a", 0), makeObj("b", 1)];
     const out = sortByOrder(input);
     expect(out.map((o) => o.id)).toEqual(["a", "b", "c"]);
-    // 入力非破壊
+    // input is not mutated
     expect(input.map((o) => o.id)).toEqual(["c", "a", "b"]);
   });
 
-  it("空配列はそのまま空", () => {
+  it("translated case", () => {
     expect(sortByOrder([])).toEqual([]);
   });
 });
@@ -31,15 +31,15 @@ describe("sortByOrder", () => {
 describe("reorderByDrag", () => {
   const objs = [makeObj("a", 0), makeObj("b", 1), makeObj("c", 2)];
 
-  it("activeId === overId なら現状維持", () => {
+  it("translated case", () => {
     expect(reorderByDrag(objs, "b", "b")).toEqual(["a", "b", "c"]);
   });
 
-  it("先頭→末尾の移動", () => {
+  it("translated case", () => {
     expect(reorderByDrag(objs, "a", "c")).toEqual(["b", "c", "a"]);
   });
 
-  it("末尾→先頭の移動", () => {
+  it("translated case", () => {
     expect(reorderByDrag(objs, "c", "a")).toEqual(["c", "a", "b"]);
   });
 
@@ -47,17 +47,17 @@ describe("reorderByDrag", () => {
     expect(reorderByDrag(objs, "b", "a")).toEqual(["b", "a", "c"]);
   });
 
-  it("不正 activeId は throw", () => {
+  it("translated case", () => {
     expect(() => reorderByDrag(objs, "zzz", "a")).toThrow(/unknown activeId/);
   });
 
-  it("不正 overId は throw", () => {
+  it("translated case", () => {
     expect(() => reorderByDrag(objs, "a", "zzz")).toThrow(/unknown overId/);
   });
 
-  it("order がソート前と一致しなくても order 昇順で扱う", () => {
+  it("translated case", () => {
     const shuffled = [makeObj("c", 2), makeObj("a", 0), makeObj("b", 1)];
-    // ソート結果 [a, b, c] に対する操作
+    // English note.
     expect(reorderByDrag(shuffled, "a", "c")).toEqual(["b", "c", "a"]);
   });
 });

@@ -51,25 +51,25 @@ describe("resolvePullAmount", () => {
     holes: [],
   };
 
-  it("props.pullCompMm が指定されていればそれを採用", () => {
+  it("translated case", () => {
     const obj = makeObj("satin", shape, { pullCompMm: 0.25 });
     expect(__internal.resolvePullAmount(obj, denim)).toBeCloseTo(0.25, 5);
   });
 
-  it("pullCompPerSideMm のみ指定なら left/right の平均", () => {
+  it("translated case", () => {
     const obj = makeObj("satin", shape, {
       pullCompPerSideMm: { left: 0.1, right: 0.3 },
     });
     expect(__internal.resolvePullAmount(obj, denim)).toBeCloseTo(0.2, 5);
   });
 
-  it("両方未指定なら pullCompForWidth(fabric, shortSide) を返す", () => {
-    // 短軸 7mm, denim → max(0.10, 7*0.025) = 0.175mm
+  it("translated case", () => {
+    // short axis 7mm, denim -> max(0.10, 7*0.025) = 0.175mm
     const obj = makeObj("satin", shape);
     expect(__internal.resolvePullAmount(obj, denim)).toBeCloseTo(0.175, 3);
   });
 
-  it("pullCompMm が pullCompPerSideMm より優先される", () => {
+  it("translated case", () => {
     const obj = makeObj("satin", shape, {
       pullCompMm: 0.5,
       pullCompPerSideMm: { left: 0.1, right: 0.2 },
@@ -79,7 +79,7 @@ describe("resolvePullAmount", () => {
 });
 
 describe("offsetSatinByNormal", () => {
-  it("水平方向の細長矩形 (30x7mm) を 0.2mm 外側オフセットすると短軸方向に 0.4mm 広がる", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -91,11 +91,11 @@ describe("offsetSatinByNormal", () => {
     };
     const out = __internal.offsetSatinByNormal(shape, 0.2);
     const b = bbox(out.outer);
-    expect(b.h).toBeCloseTo(7.4, 1); // 短軸 = 7 + 2*0.2
-    expect(b.w).toBeCloseTo(30, 1); // 長軸はほぼ変わらない
+    expect(b.h).toBeCloseTo(7.4, 1); // short axis = 7 + 2*0.2
+    expect(b.w).toBeCloseTo(30, 1); // English note.
   });
 
-  it("amount=0 のとき shape の頂点座標は元と一致する", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -112,7 +112,7 @@ describe("offsetSatinByNormal", () => {
     }
   });
 
-  it("斜め向き矩形でも PCA 短軸方向に広がる (回転不変)", () => {
+  it("translated case", () => {
     const rad = Math.PI / 6;
     const cos = Math.cos(rad),
       sin = Math.sin(rad);
@@ -131,7 +131,7 @@ describe("offsetSatinByNormal", () => {
 });
 
 describe("applyPullCompensation", () => {
-  it("Satin に pullCompMm=0.2 を指定すると短軸方向 bbox が +0.4mm 広がる", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -147,7 +147,7 @@ describe("applyPullCompensation", () => {
     expect(b.h).toBeCloseTo(5.4, 1);
   });
 
-  it("Satin で pullCompMm 未指定なら pullCompForWidth(fabric, shortSide) 値を採用", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -160,11 +160,11 @@ describe("applyPullCompensation", () => {
     const obj = makeObj("satin", shape);
     const r = applyPullCompensation(obj, denim);
     const b = bbox(r.shape.outer);
-    // amount = max(0.10, 7*0.025) = 0.175 → 短軸 7 + 0.35 = 7.35
+    // amount = max(0.10, 7*0.025) = 0.175 -> short axis 7 + 0.35 = 7.35
     expect(b.h).toBeCloseTo(7.35, 1);
   });
 
-  it("Run は参照同一で返り shape も不変", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -176,7 +176,7 @@ describe("applyPullCompensation", () => {
     expect(applyPullCompensation(obj, denim)).toBe(obj);
   });
 
-  it("Fill (PR9 拡張) では参照同一ではなく新 object を返す", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -190,7 +190,7 @@ describe("applyPullCompensation", () => {
     expect(applyPullCompensation(obj, denim)).not.toBe(obj);
   });
 
-  it("入力 obj.shape は破壊されない (非破壊性)", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -206,7 +206,7 @@ describe("applyPullCompensation", () => {
     expect(JSON.stringify(shape)).toBe(snapshot);
   });
 
-  it("Satin 補正後の shape.holes は入力 holes と参照を共有しない", () => {
+  it("translated case", () => {
     const holes: [number, number][][] = [
       [
         [10, 2],
@@ -231,7 +231,7 @@ describe("applyPullCompensation", () => {
     expect(r.shape.holes).toEqual(shape.holes);
   });
 
-  it("id / colorIndex / rgb / props / order / locked が維持される", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -261,7 +261,7 @@ describe("applyPullCompensation", () => {
     expect(r.shape).not.toBe(shape);
   });
 
-  it("pullCompPerSideMm のみ指定なら left/right 平均値で均一適用", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -280,8 +280,8 @@ describe("applyPullCompensation", () => {
   });
 });
 
-describe("applyPullCompensation (Fill, PR9 拡張)", () => {
-  it("Fill (穴あり) で outer は外側 / hole は内側にオフセットされる", () => {
+describe("applyPullCompensation for fill objects", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -308,7 +308,7 @@ describe("applyPullCompensation (Fill, PR9 拡張)", () => {
     expect(hb.w).toBeCloseTo(3.6, 1);
   });
 
-  it("Fill (穴なし) で outer のみ広がる", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -323,7 +323,7 @@ describe("applyPullCompensation (Fill, PR9 拡張)", () => {
     expect(bbox(r.shape.outer).w).toBeCloseTo(10.6, 1);
   });
 
-  it("Fill で pullCompMm 未指定なら pullCompForWidth 値を採用", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -351,12 +351,12 @@ describe("applyPushCompensation (overlap detection)", () => {
     holes: [],
   };
 
-  it("neighbors=[] なら参照同一", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     expect(applyPushCompensation(obj, [])).toBe(obj);
   });
 
-  it("離れた異色 neighbor のみなら参照同一", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const far: EmbroideryObject = {
       ...makeObj("fill", {
@@ -374,7 +374,7 @@ describe("applyPushCompensation (overlap detection)", () => {
     expect(applyPushCompensation(obj, [far])).toBe(obj);
   });
 
-  it("同色 neighbor とのみ重なっていれば参照同一 (Phase 2 §5.2)", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const same: EmbroideryObject = {
       ...makeObj("fill", {
@@ -392,7 +392,7 @@ describe("applyPushCompensation (overlap detection)", () => {
     expect(applyPushCompensation(obj, [same])).toBe(obj);
   });
 
-  it("異色 neighbor と重なる場合 shape が変化した新 object", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const diff: EmbroideryObject = {
       ...makeObj("fill", {
@@ -412,7 +412,7 @@ describe("applyPushCompensation (overlap detection)", () => {
     expect(bbox(r.shape.outer).w).toBeLessThan(10);
   });
 
-  it("kind=run の obj は常に参照同一", () => {
+  it("translated case", () => {
     const obj = makeObj(
       "run",
       {
@@ -440,7 +440,7 @@ describe("applyPushCompensation (overlap detection)", () => {
     expect(applyPushCompensation(obj, [overlap])).toBe(obj);
   });
 
-  it("pushCompMm 未指定 (=0 扱い) なら参照同一", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare);
     const overlap: EmbroideryObject = {
       ...makeObj("fill", {
@@ -485,7 +485,7 @@ describe("applyPushCompensation (offset values)", () => {
     };
   }
 
-  it("10mm 正方形に pushCompMm=0.4 で outer bbox は 9.2mm に縮む", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const r = applyPushCompensation(obj, [diffColorNeighbor()]);
     const b = bbox(r.shape.outer);
@@ -493,7 +493,7 @@ describe("applyPushCompensation (offset values)", () => {
     expect(b.h).toBeCloseTo(9.2, 1);
   });
 
-  it("穴あり fill で outer は内側 / hole は外側にオフセット", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -517,7 +517,7 @@ describe("applyPushCompensation (offset values)", () => {
     expect(bbox(r.shape.holes[0]).w).toBeCloseTo(4.8, 1); // 4 + 0.8
   });
 
-  it("異色 neighbor が複数あっても shape は 1 回ぶんしか縮まない", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const n1 = diffColorNeighbor();
     const n2: EmbroideryObject = {
@@ -537,7 +537,7 @@ describe("applyPushCompensation (offset values)", () => {
     expect(bbox(r.shape.outer).w).toBeCloseTo(9.2, 1);
   });
 
-  it("pushCompMm が大きすぎて outer が消失する場合は元 shape の座標を保つ", () => {
+  it("translated case", () => {
     const small: Shape = {
       outer: [
         [0, 0],
@@ -566,7 +566,7 @@ describe("applyPushCompensation (offset values)", () => {
     expect(bbox(r.shape.outer).h).toBeCloseTo(1, 2);
   });
 
-  it("入力 obj.shape は破壊されない", () => {
+  it("translated case", () => {
     const obj = makeObj("fill", tenSquare, { pushCompMm: 0.4 });
     const snap = JSON.stringify(tenSquare);
     applyPushCompensation(obj, [diffColorNeighbor()]);

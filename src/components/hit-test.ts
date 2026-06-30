@@ -1,19 +1,19 @@
-// hit-test.ts — Phase 5 PR20 プレビュー上のクリックヒットテスト。
+// English note.
 //
-// React 非依存の純関数として hitTestObject(design, point) を提供する。
-// クリック座標 (mm 単位) を受け取り、最も上 (= objects 配列で order が大きい)
-// の object のうち outer に含まれる id を返す。holes は無視 (穴の中をクリック
-// しても穴の外側 object を選択する Wilcom 流儀)。
+// English note.
+// English note.
+// English note.
+// English note.
 //
-// 座標は **mm 単位** で渡される想定。canvas pixel → mm 変換は呼び出し側で行う。
+// English note.
 
 import { pointInPolygon } from "@/lib/pipeline/vectorize";
 import type { EmbroideryDesign, Point2D } from "@/lib/pipeline/types";
 
 /**
- * design.objects のうち outer に point が含まれる中で、最も order が大きい
- * (= 最後に縫う = 視覚的に上に来る) object の id を返す。
- * 該当無し / design null は null。
+ * English note.
+ * English note.
+ * English note.
  */
 export function hitTestObject(
   design: EmbroideryDesign | null,

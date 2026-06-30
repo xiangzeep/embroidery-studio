@@ -1,48 +1,55 @@
-// satin.ts — 2-rail satin renderer (Phase 4 PR17)。
+// satin.ts - 2-rail satin renderer.
 //
-// 既存 `satinStitches` (render.ts) は PCA 単一長軸方向のスキャンラインだけで、
-// C / S / 円弧型 satin の「角の薄い部分で糸が浮く / 厚い部分で糸が潰れる」
-// 欠点があった。本モジュールでは:
-//   1. shape.outer から **2 本の長辺 rail (left/right)** を抽出 (`extractRails`)
-//   2. 両 rail を arc-length 同期で等分割して left(t) → right(t) のジグザグを
-//      出力 (`renderSatin2Rail`)
-// を提供する純関数群を導入する。renderer 差し替えは Phase 4 PR18 (auto-split)
-// 完了後に別 PR で行うため、本 PR は新規モジュール追加のみで orchestration 層
-// への影響ゼロ。
+// English note.
+// English note.
+// English note.
+// English note.
+// English note.
+//      output (`renderSatin2Rail`)
+// English note.
+// English note.
+// English note.
 //
-// 純関数: 同一入力で同一出力。入力 Shape / SatinRails は破壊しない。
+// English note.
 
 import type { Point2D, Shape } from "./types";
 
 type Point = Point2D;
 
 const MIDLINE_SAMPLE_COUNT = 200;
-const CAP_GROUP_TOLERANCE_RATIO = 0.02; // axis span の 2% 以内を cap グループ扱い
+const CAP_GROUP_TOLERANCE_RATIO = 0.02; // English note.
 
 /**
- * 2-rail satin の左右レール。
- * - left / right はそれぞれ start → end の順に並んだ polyline
- * - 頂点数は left / right で揃わなくてもよい (arc-length で同期)
+ * English note.
+ * English note.
+ * English note.
  */
 export type SatinRails = {
   left: Point[];
   right: Point[];
 };
 
+export type SatinWidthStats = {
+  minWidthMm: number;
+  maxWidthMm: number;
+  averageWidthMm: number;
+  sampleCount: number;
+};
+
 /**
- * shape.outer から 2 本の長辺 rail を抽出する。
+ * English note.
  *
- * アルゴリズム:
- *   1. outer の閉じた重複点を除去 (pts)
- *   2. 凸包の最長エッジ方向を主軸 (axis) とする (PCA は C 字に弱いため)
- *   3. pts を axis に射影、min / max を取る
- *   4. 投影が min 近傍 / max 近傍にあって polyline 上で連続するグループを
- *      start cap / end cap として識別 (矩形では 2 頂点ずつ、C 字では 1 頂点ずつ)
- *   5. cap 間の 2 つの polyline 弧を rail とする
- *   6. axis 法線 (perp) 上の平均射影で left / right を確定
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * 退化 shape (頂点 < 3 / axis 0 / cap 識別失敗) では outer 自身を rail とする
- * 安全フォールバックを返す。純関数。入力 Shape は破壊しない。
+ * English note.
+ * English note.
  */
 export function extractRails(shape: Shape): SatinRails {
   const pts = stripClosingDuplicate(shape.outer);
@@ -72,7 +79,7 @@ export function extractRails(shape: Shape): SatinRails {
   }
   const tol = span * CAP_GROUP_TOLERANCE_RATIO;
 
-  // cyclic 連続な start cap (proj - minP < tol) / end cap (maxP - proj < tol) を識別
+  // English note.
   const inStart = projs.map((v) => v - minP <= tol);
   const inEnd = projs.map((v) => maxP - v <= tol);
   const startCap = findCyclicRun(inStart);
@@ -84,7 +91,7 @@ export function extractRails(shape: Shape): SatinRails {
 
   // Rail 1: polyline forward from "last of startCap" to "first of endCap"
   // Rail 2: polyline forward from "last of endCap" to "first of startCap"
-  //         (端点を反転して start → end 方向に揃える)
+  // English note.
   const rail1 = sliceCyclic(pts, startCap.last, endCap.first);
   const rail2 = sliceCyclic(pts, endCap.last, startCap.first).slice().reverse();
 
@@ -97,26 +104,61 @@ export function extractRails(shape: Shape): SatinRails {
 }
 
 /**
- * 2-rail を arc-length 同期で等分割し、ジグザグ satin 縫い目を生成する。
+ * English note.
  *
- * 1. left / right それぞれの累積 arc-length を計算
- * 2. 細サンプル (MIDLINE_SAMPLE_COUNT) で中点曲線の実測長 L_mid を求める
- * 3. ステップ数 N = max(2, ceil(L_mid / densityMm))
- * 4. i = 0..N で t_i = i / N から left(t_i), right(t_i) を取得
- * 5. 偶数 i は [left, right]、奇数 i は [right, left] を push (zigzag)
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * `maxStitchMm` は本 PR では受け取るのみ未使用。横幅 (rail 間) が `maxStitchMm`
- * を超える wide satin の brick split は Phase 4 PR18 で追加する。シグネチャを
- * 残すことで後続 PR の差分を局所化する。
+ * English note.
+ * English note.
+ * English note.
  *
- * 純関数: 同一入力で同一出力。入力 SatinRails を破壊しない。
+ * English note.
  */
+export function estimateSatinWidthStats(
+  rails: SatinRails,
+  sampleCount = 32,
+): SatinWidthStats {
+  const left = rails.left.slice();
+  const right = rails.right.slice();
+  if (left.length === 0 || right.length === 0 || sampleCount <= 0) {
+    return { minWidthMm: 0, maxWidthMm: 0, averageWidthMm: 0, sampleCount: 0 };
+  }
+
+  const cumL = cumulativeLengths(left);
+  const cumR = cumulativeLengths(right);
+  const count = Math.max(1, Math.floor(sampleCount));
+  let minWidthMm = Infinity;
+  let maxWidthMm = 0;
+  let totalWidthMm = 0;
+
+  for (let i = 0; i < count; i++) {
+    const t = count === 1 ? 0 : i / (count - 1);
+    const pl = arcLengthSample(left, cumL.lens, cumL.total, t);
+    const pr = arcLengthSample(right, cumR.lens, cumR.total, t);
+    const widthMm = Math.hypot(pr[0] - pl[0], pr[1] - pl[1]);
+    if (widthMm < minWidthMm) minWidthMm = widthMm;
+    if (widthMm > maxWidthMm) maxWidthMm = widthMm;
+    totalWidthMm += widthMm;
+  }
+
+  return {
+    minWidthMm: Number.isFinite(minWidthMm) ? minWidthMm : 0,
+    maxWidthMm,
+    averageWidthMm: totalWidthMm / count,
+    sampleCount: count,
+  };
+}
+
 export function renderSatin2Rail(
   rails: SatinRails,
   densityMm: number,
   _maxStitchMm: number,
 ): Point[] {
-  void _maxStitchMm; // brickSplit は renderer 側 (render.ts applyBrickSplit) で呼ぶ
+  void _maxStitchMm; // English note.
   const left = rails.left.slice();
   const right = rails.right.slice();
   if (left.length === 0 || right.length === 0) return [];
@@ -141,16 +183,16 @@ export function renderSatin2Rail(
 }
 
 /**
- * Wide satin の 1 stitch (left → right) を maxStitchMm で分割し、行ごとに 1/3
- * 位相シフト (`phase = (rowIndex % 3) / 3`) を加えて needle perforation line を
- * 分散する (Phase 4 計画書 §4.2 / Wilcom Auto Split 相当)。
+ * English note.
+ * English note.
+ * English note.
  *
- * - 距離 ≤ `maxStitchMm` のとき分割せず `[left, right]` をそのまま返す
- * - 距離 > `maxStitchMm` のとき `segs = ceil(dist / maxStitchMm)` 個の中間点を
- *   `t = clamp01(((i - 1) + phase) / segs)` で生成し、`[left, ...mid, right]`
- *   (長さ `segs + 2`) を返す
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  *
- * 純関数: 同一入力で同一出力。入力 Point は破壊しない。
+ * English note.
  */
 export function brickSplit(
   left: Point,
@@ -185,14 +227,14 @@ function clamp01(v: number): number {
   return v;
 }
 
-/** テスト容易性のため (brickSplit, lerp を直接呼びたい場面) */
+/** English note. */
 export const __internal = {
   brickSplit,
   lerp,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
-// internal helpers (export しない)
+// English note.
 
 function stripClosingDuplicate(poly: ReadonlyArray<Point>): Point[] {
   if (poly.length < 2) return poly.slice();
@@ -204,7 +246,7 @@ function stripClosingDuplicate(poly: ReadonlyArray<Point>): Point[] {
   return poly.slice();
 }
 
-/** Andrew's monotone chain で凸包を求める (CCW, 末尾重複なし)。 */
+/** English note. */
 function convexHull(pts: Point[]): Point[] {
   const sorted = pts.slice().sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
   if (sorted.length < 3) return sorted;
@@ -230,7 +272,7 @@ function convexHull(pts: Point[]): Point[] {
   return lower.slice(0, -1).concat(upper.slice(0, -1));
 }
 
-/** 凸包の最長エッジ単位ベクトルを返す (CCW なので向きは任意で OK)。 */
+/** English note. */
 function longestHullEdgeAxis(hull: Point[]): Point | null {
   if (hull.length < 2) return null;
   let bestLen2 = 0;
@@ -251,7 +293,7 @@ function longestHullEdgeAxis(hull: Point[]): Point | null {
   return [bestAxis[0] / len, bestAxis[1] / len];
 }
 
-/** 凸包頂点の全 pair から最遠 pair の単位ベクトルを返す (fallback)。 */
+/** English note. */
 function diameterAxis(hull: Point[]): Point | null {
   if (hull.length < 2) return null;
   let bestD2 = 0;
@@ -275,9 +317,9 @@ function diameterAxis(hull: Point[]): Point | null {
 }
 
 /**
- * 真偽配列の中で「cyclic に連続する true の run」を 1 つ識別し、
- * {first, last} (polyline index) を返す。複数の run が存在する場合は最長を選ぶ。
- * true が無ければ null。
+ * English note.
+ * English note.
+ * English note.
  */
 function findCyclicRun(mask: boolean[]): { first: number; last: number } | null {
   const n = mask.length;
@@ -285,14 +327,14 @@ function findCyclicRun(mask: boolean[]): { first: number; last: number } | null 
   if (mask.every((m) => m)) return { first: 0, last: n - 1 };
   if (mask.every((m) => !m)) return null;
 
-  // false を 1 つ以上含むので、false の直後 (cyclic) を run の開始候補とする
+  // English note.
   let bestLen = 0;
   let bestStart = -1;
   let bestEnd = -1;
   for (let start = 0; start < n; start++) {
     const prev = (start - 1 + n) % n;
-    if (!mask[start] || mask[prev]) continue; // run の開始は (prev=false, start=true)
-    // start から true が続く長さを cyclic に測る
+    if (!mask[start] || mask[prev]) continue; // English note.
+    // English note.
     let len = 0;
     let i = start;
     while (mask[i]) {
@@ -310,7 +352,7 @@ function findCyclicRun(mask: boolean[]): { first: number; last: number } | null 
   return { first: bestStart, last: bestEnd };
 }
 
-/** pts を周回して fromIdx → toIdx (両端含む) を取り出す。 */
+/** English note. */
 function sliceCyclic(pts: Point[], fromIdx: number, toIdx: number): Point[] {
   const n = pts.length;
   const out: Point[] = [];
@@ -330,7 +372,7 @@ function meanProjection(path: Point[], dir: Point): number {
   return sum / path.length;
 }
 
-/** polyline の累積長 (lens[i] は 0..i 区間の積算) と総長を返す。 */
+/** English note. */
 function cumulativeLengths(poly: Point[]): { lens: number[]; total: number } {
   const lens: number[] = [0];
   let total = 0;
@@ -344,8 +386,8 @@ function cumulativeLengths(poly: Point[]): { lens: number[]; total: number } {
 }
 
 /**
- * polyline 上で arc-length 比 `t ∈ [0,1]` に対応する点を線形補間で返す。
- * total = 0 (1 点 / 全頂点同位置) のときは先頭点を返す。
+ * English note.
+ * English note.
  */
 function arcLengthSample(
   poly: Point[],
@@ -370,7 +412,7 @@ function arcLengthSample(
   return [a[0] + (b[0] - a[0]) * ratio, a[1] + (b[1] - a[1]) * ratio];
 }
 
-/** 中点曲線 (left + right を t で同期した平均) の実測総長を返す。 */
+/** English note. */
 function estimateMidlineLength(
   left: Point[],
   cumL: { lens: number[]; total: number },

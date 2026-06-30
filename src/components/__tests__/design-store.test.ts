@@ -40,7 +40,7 @@ describe("designStore — initial state", () => {
     });
   });
 
-  it("初期値は design=null / selectedObjectId=null / editMode=select", () => {
+  it("translated case", () => {
     const s = designStore.getState();
     expect(s.design).toBe(null);
     expect(s.selectedObjectId).toBe(null);
@@ -57,7 +57,7 @@ describe("designStore — setDesign", () => {
     });
   });
 
-  it("design を差し替えて以前の selectedObjectId が消えれば null にリセット", () => {
+  it("translated case", () => {
     const { setDesign, setSelectedObjectId } = designStore.getState();
     setDesign(makeDesign(["a", "b"]));
     setSelectedObjectId("a");
@@ -66,15 +66,15 @@ describe("designStore — setDesign", () => {
     expect(designStore.getState().selectedObjectId).toBe(null);
   });
 
-  it("selectedObjectId が新 design にも存在すれば保持", () => {
+  it("translated case", () => {
     const { setDesign, setSelectedObjectId } = designStore.getState();
     setDesign(makeDesign(["a", "b"]));
     setSelectedObjectId("a");
-    setDesign(makeDesign(["a", "c"])); // 'a' は引き継がれる
+    setDesign(makeDesign(["a", "c"])); // English note.
     expect(designStore.getState().selectedObjectId).toBe("a");
   });
 
-  it("design=null に戻すと selectedObjectId も null", () => {
+  it("translated case", () => {
     const { setDesign, setSelectedObjectId } = designStore.getState();
     setDesign(makeDesign(["a"]));
     setSelectedObjectId("a");
@@ -93,24 +93,24 @@ describe("designStore — setSelectedObjectId", () => {
     });
   });
 
-  it("存在する id をセットできる", () => {
+  it("translated case", () => {
     designStore.getState().setSelectedObjectId("a");
     expect(designStore.getState().selectedObjectId).toBe("a");
   });
 
-  it("存在しない id は no-op (state 不変)", () => {
+  it("translated case", () => {
     designStore.getState().setSelectedObjectId("a");
     designStore.getState().setSelectedObjectId("zzz");
     expect(designStore.getState().selectedObjectId).toBe("a");
   });
 
-  it("null をセットすると常にクリア", () => {
+  it("translated case", () => {
     designStore.getState().setSelectedObjectId("a");
     designStore.getState().setSelectedObjectId(null);
     expect(designStore.getState().selectedObjectId).toBe(null);
   });
 
-  it("design が null のとき何もしない", () => {
+  it("translated case", () => {
     designStore.setState({ design: null });
     designStore.getState().setSelectedObjectId("a");
     expect(designStore.getState().selectedObjectId).toBe(null);
@@ -126,7 +126,7 @@ describe("designStore — updateObject", () => {
     });
   });
 
-  it("対象 object の props を shallow merge する", () => {
+  it("translated case", () => {
     designStore.getState().updateObject("a", {
       props: { densityMm: 0.5, maxStitchMm: 5 },
     });
@@ -136,21 +136,31 @@ describe("designStore — updateObject", () => {
     expect(obj.props.maxStitchMm).toBe(5);
   });
 
-  it("対象 object 以外は参照を保持 (React の再レンダ最小化)", () => {
+  it("translated case", () => {
     const before = designStore.getState().design!.objects[1];
     designStore.getState().updateObject("a", { order: 99 });
     const after = designStore.getState().design!.objects[1];
-    expect(after).toBe(before); // 参照同一
+    expect(after).toBe(before); // same reference
   });
 
-  it("design=null のとき no-op", () => {
+  it("preserves strokeOverride when object props change", () => {
+    designStore.getState().updateObject("a", {
+      props: { densityMm: 0.8, maxStitchMm: 5 },
+      strokeOverride: "use-global",
+    });
+    const obj = designStore.getState().design!.objects[0];
+    expect(obj.strokeOverride).toBe("use-global");
+    expect(obj.props.densityMm).toBe(0.8);
+  });
+
+  it("translated case", () => {
     designStore.setState({ design: null });
     expect(() => designStore.getState().updateObject("a", { order: 1 })).not
       .toThrow();
     expect(designStore.getState().design).toBe(null);
   });
 
-  it("存在しない id は no-op", () => {
+  it("translated case", () => {
     const before = designStore.getState().design;
     designStore.getState().updateObject("zzz", { order: 1 });
     expect(designStore.getState().design).toBe(before);
@@ -166,28 +176,28 @@ describe("designStore — reorderObjects", () => {
     });
   });
 
-  it("id 配列の順で並び替え、order を 0..n-1 で再採番", () => {
+  it("translated case", () => {
     designStore.getState().reorderObjects(["c", "a", "b"]);
     const objs = designStore.getState().design!.objects;
     expect(objs.map((o) => o.id)).toEqual(["c", "a", "b"]);
     expect(objs.map((o) => o.order)).toEqual([0, 1, 2]);
   });
 
-  it("長さ不一致は throw", () => {
+  it("translated case", () => {
     expect(() => designStore.getState().reorderObjects(["a", "b"])).toThrow();
   });
 
-  it("未知 id を含む配列は throw", () => {
+  it("translated case", () => {
     expect(() => designStore.getState().reorderObjects(["a", "b", "zzz"]))
       .toThrow(/unknown id/);
   });
 
-  it("重複 id を含む配列は throw", () => {
+  it("translated case", () => {
     expect(() => designStore.getState().reorderObjects(["a", "a", "b"]))
-      .toThrow(/重複/);
+      .toThrow(/duplicate/);
   });
 
-  it("design=null のとき throw", () => {
+  it("translated case", () => {
     designStore.setState({ design: null });
     expect(() => designStore.getState().reorderObjects(["a"])).toThrow(
       /design is null/,
@@ -196,7 +206,7 @@ describe("designStore — reorderObjects", () => {
 });
 
 describe("designStore — setEditMode", () => {
-  it("各モードに切替できる", () => {
+  it("translated case", () => {
     const { setEditMode } = designStore.getState();
     setEditMode("node");
     expect(designStore.getState().editMode).toBe("node");
@@ -207,7 +217,7 @@ describe("designStore — setEditMode", () => {
   });
 });
 
-describe("designStore — removeObject (Phase 5 PR22)", () => {
+describe("designStore removeObject", () => {
   beforeEach(() => {
     designStore.setState({
       design: makeDesign(["a", "b", "c"]),
@@ -216,46 +226,46 @@ describe("designStore — removeObject (Phase 5 PR22)", () => {
     });
   });
 
-  it("指定 id を削除し、他は順序保持", () => {
+  it("translated case", () => {
     designStore.getState().removeObject("b");
     const ids = designStore.getState().design!.objects.map((o) => o.id);
     expect(ids).toEqual(["a", "c"]);
   });
 
-  it("選択中 id を削除すると selectedObjectId が null", () => {
+  it("translated case", () => {
     designStore.getState().setSelectedObjectId("b");
     designStore.getState().removeObject("b");
     expect(designStore.getState().selectedObjectId).toBe(null);
   });
 
-  it("選択中以外を削除しても selectedObjectId は保持", () => {
+  it("translated case", () => {
     designStore.getState().setSelectedObjectId("a");
     designStore.getState().removeObject("c");
     expect(designStore.getState().selectedObjectId).toBe("a");
   });
 
-  it("存在しない id は no-op", () => {
+  it("translated case", () => {
     const before = designStore.getState().design;
     designStore.getState().removeObject("zzz");
     expect(designStore.getState().design).toBe(before);
   });
 
-  it("design=null は no-op (throw しない)", () => {
+  it("translated case", () => {
     designStore.setState({ design: null });
     expect(() => designStore.getState().removeObject("a")).not.toThrow();
   });
 });
 
-describe("designStore — applyOptimizeOrder (Phase 5 PR22)", () => {
-  it("design=null は no-op", () => {
+describe("designStore applyOptimizeOrder", () => {
+  it("translated case", () => {
     designStore.setState({ design: null });
     expect(() => designStore.getState().applyOptimizeOrder()).not.toThrow();
     expect(designStore.getState().design).toBe(null);
   });
 
-  it("design が設定されていれば optimizeOrder を呼んで差し替える", () => {
-    // optimizeOrder の純粋性は pathing.test.ts でカバー済み。
-    // 本ケースでは design が新オブジェクトに差し替わることだけ確認。
+  it("translated case", () => {
+    // English note.
+    // English note.
     designStore.setState({
       design: makeDesign(["a", "b"]),
       selectedObjectId: null,
@@ -266,14 +276,14 @@ describe("designStore — applyOptimizeOrder (Phase 5 PR22)", () => {
     const before = designStore.getState().design;
     designStore.getState().applyOptimizeOrder();
     const after = designStore.getState().design;
-    // 参照は異なる (optimizeOrder は新 design を返す)
+    // English note.
     expect(after).not.toBe(before);
-    // 中身の id 集合は同じ
+    // English note.
     expect(after!.objects.map((o) => o.id).sort()).toEqual(["a", "b"]);
   });
 });
 
-describe("designStore — undo / redo (Phase 5 PR24)", () => {
+describe("designStore undo / redo", () => {
   beforeEach(() => {
     designStore.setState({
       design: null,
@@ -284,7 +294,7 @@ describe("designStore — undo / redo (Phase 5 PR24)", () => {
     });
   });
 
-  it("setDesign で history が新規作成される", () => {
+  it("translated case", () => {
     designStore.getState().setDesign(makeDesign(["a"]));
     const h = designStore.getState().history;
     expect(h).not.toBe(null);
@@ -292,7 +302,7 @@ describe("designStore — undo / redo (Phase 5 PR24)", () => {
     expect(h!.future).toEqual([]);
   });
 
-  it("updateObject 後に undo で前状態に戻り、redo で再度新状態に進める", () => {
+  it("translated case", () => {
     const { setDesign } = designStore.getState();
     setDesign(makeDesign(["a"]));
     const beforeUpdate = designStore.getState().design;
@@ -309,22 +319,22 @@ describe("designStore — undo / redo (Phase 5 PR24)", () => {
     expect(designStore.getState().design).toEqual(afterUpdate);
   });
 
-  it("undo 不能な状態 (past 空) は no-op", () => {
+  it("translated case", () => {
     designStore.getState().setDesign(makeDesign(["a"]));
     const before = designStore.getState();
     designStore.getState().undo();
-    // design/history どちらも変化なし
+    // English note.
     expect(designStore.getState().design).toBe(before.design);
     expect(designStore.getState().history).toBe(before.history);
   });
 
-  it("design=null での undo/redo は no-op (throw しない)", () => {
+  it("translated case", () => {
     designStore.setState({ design: null, history: null });
     expect(() => designStore.getState().undo()).not.toThrow();
     expect(() => designStore.getState().redo()).not.toThrow();
   });
 
-  it("reorderObjects / removeObject / applyOptimizeOrder も history に積まれる", () => {
+  it("translated case", () => {
     designStore.getState().setDesign(makeDesign(["a", "b", "c"]));
     expect(designStore.getState().history!.past.length).toBe(0);
     designStore.getState().reorderObjects(["c", "a", "b"]);
@@ -336,22 +346,24 @@ describe("designStore — undo / redo (Phase 5 PR24)", () => {
   });
 });
 
-describe("designStore — visualization (Phase 5 PR24)", () => {
-  it("setVisualization で flag を patch できる", () => {
+describe("designStore visualization", () => {
+  it("translated case", () => {
     designStore.setState({
-      visualization: { showTravel: false, showJump: false, showTrim: false },
+      visualization: { showTravel: false, showJump: false, showTrim: false, showStitchTypes: false },
     });
     designStore.getState().setVisualization({ showTravel: true });
     expect(designStore.getState().visualization).toEqual({
       showTravel: true,
       showJump: false,
       showTrim: false,
+      showStitchTypes: false,
     });
-    designStore.getState().setVisualization({ showJump: true, showTrim: true });
+    designStore.getState().setVisualization({ showJump: true, showTrim: true, showStitchTypes: true });
     expect(designStore.getState().visualization).toEqual({
       showTravel: true,
       showJump: true,
       showTrim: true,
+      showStitchTypes: true,
     });
   });
 });

@@ -1,23 +1,23 @@
-// sewing-order-helpers.ts — Phase 5 PR22 純ロジック。
+// English note.
 //
-// SewingOrderPanel の DnD onDragEnd 結果を「並び替え後の id 配列」に変換する
-// ロジックを React 非依存の純関数として切り出し、design-store 経由でテスト
-// する (RTL/jsdom 不要)。
+// English note.
+// English note.
+// English note.
 
 import type { EmbroideryObject } from "@/lib/pipeline/types";
 
 /**
- * objects を order 昇順でソートしたコピーを返す (純関数)。
+ * English note.
  */
 export function sortByOrder(objects: EmbroideryObject[]): EmbroideryObject[] {
   return objects.slice().sort((a, b) => a.order - b.order);
 }
 
 /**
- * dnd-kit の onDragEnd から得られる activeId / overId をもとに、
- * 現在の order 昇順配列を並び替えた id 配列を返す。
- * - activeId === overId なら配列を変更せず返す
- * - 不正 id (現在の objects に無い) の場合は throw
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export function reorderByDrag(
   objects: EmbroideryObject[],

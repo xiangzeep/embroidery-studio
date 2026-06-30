@@ -1,10 +1,10 @@
-// serialize.ts — Phase 5 PR24 EmbroideryDesign の JSON 永続化。
+// English note.
 //
-// fabric.underlayPolicy は関数を含むため、fabric.kind のみシリアライズし、
-// 復元時に getFabricProfile(kind) で UnderlayPolicy 含む FabricProfile を再構築。
-// objects / props / shape は純データなのでそのまま JSON 化可能。
+// English note.
+// English note.
+// English note.
 //
-// schemaVersion を持たせて将来のスキーマ進化を吸収できる形にする。
+// English note.
 
 import { getFabricProfile } from "@/lib/pipeline/fabric";
 import type {
@@ -43,7 +43,7 @@ export class SerializeError extends Error {
   }
 }
 
-/** EmbroideryDesign → JSON 文字列 (整形なし)。fabric は kind のみ保存。 */
+/** English note. */
 export function serializeDesign(design: EmbroideryDesign): string {
   const profile = design.fabric;
   const overrides: SerializedDesign["fabricOverrides"] = {};
@@ -71,7 +71,7 @@ export function serializeDesign(design: EmbroideryDesign): string {
   return JSON.stringify(payload);
 }
 
-/** JSON 文字列 → EmbroideryDesign (fabric を kind から再構築)。 */
+/** English note. */
 export function deserializeDesign(json: string): EmbroideryDesign {
   let parsed: unknown;
   try {
@@ -101,7 +101,7 @@ export function deserializeDesign(json: string): EmbroideryDesign {
       `unknown fabricKind: ${String(obj.fabricKind)}`,
     );
   }
-  // overrides は profile を spread で上書き (underlayPolicy は関数のため保持)
+  // English note.
   const overrides = (obj.fabricOverrides ?? {}) as Partial<typeof profile>;
   const mergedProfile = { ...profile, ...overrides };
   return {

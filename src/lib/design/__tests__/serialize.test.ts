@@ -19,6 +19,8 @@ function makeObj(id: string): EmbroideryObject {
     rgb: [10, 20, 30],
     shape: { outer: [[0, 0], [10, 0], [10, 10], [0, 10]], holes: [] },
     props: { densityMm: 1.2, maxStitchMm: 7, angleDeg: 45 },
+    strokeRole: "area",
+    strokeOverride: "use-global",
     order: 0,
   };
 }
@@ -33,7 +35,7 @@ function makeDesign(): EmbroideryDesign {
 }
 
 describe("serializeDesign / deserializeDesign — round trip", () => {
-  it("元の design と等価な構造に復元される", () => {
+  it("translated case", () => {
     const original = makeDesign();
     const json = serializeDesign(original);
     const restored = deserializeDesign(json);
@@ -45,19 +47,19 @@ describe("serializeDesign / deserializeDesign — round trip", () => {
     expect(restored.objects).toEqual(original.objects);
   });
 
-  it("schemaVersion を含む", () => {
+  it("translated case", () => {
     const json = serializeDesign(makeDesign());
     const obj = JSON.parse(json);
     expect(obj.schemaVersion).toBe(SCHEMA_VERSION);
   });
 
-  it("fabric override がない場合は fabricOverrides を含まない", () => {
+  it("translated case", () => {
     const json = serializeDesign(makeDesign());
     const obj = JSON.parse(json);
     expect(obj.fabricOverrides).toBeUndefined();
   });
 
-  it("fabric override がある場合は fabricOverrides で保存・復元される", () => {
+  it("translated case", () => {
     const baseline = FABRIC_PROFILES.denim;
     const design: EmbroideryDesign = {
       ...makeDesign(),
@@ -68,13 +70,33 @@ describe("serializeDesign / deserializeDesign — round trip", () => {
     expect(obj.fabricOverrides?.defaultDensityMm).toBe(0.3);
     const restored = deserializeDesign(json);
     expect(restored.fabric.defaultDensityMm).toBe(0.3);
-    // 他フィールド (関数含む) は baseline 由来
+    // English note.
     expect(typeof restored.fabric.underlayPolicy.fill).toBe("function");
+  });
+
+  it("preserves strokeRole and strokeOverride in app design serialization", () => {
+    const design: EmbroideryDesign = {
+      ...makeDesign(),
+      objects: [
+        {
+          ...makeObj("outline-1"),
+          kind: "run",
+          strokeRole: "outline",
+          strokeOverride: "force-run",
+        },
+      ],
+    };
+
+    const json = serializeDesign(design);
+    const restored = deserializeDesign(json);
+
+    expect(restored.objects[0].strokeRole).toBe("outline");
+    expect(restored.objects[0].strokeOverride).toBe("force-run");
   });
 });
 
 describe("deserializeDesign — error handling", () => {
-  it("不正 JSON は SerializeError(invalid-json)", () => {
+  it("translated case", () => {
     expect(() => deserializeDesign("{not-json")).toThrowError(SerializeError);
     try {
       deserializeDesign("{not-json");
@@ -83,7 +105,7 @@ describe("deserializeDesign — error handling", () => {
     }
   });
 
-  it("schemaVersion 不一致は unsupported-version", () => {
+  it("translated case", () => {
     const json = JSON.stringify({
       schemaVersion: 999,
       widthMm: 100,
@@ -99,7 +121,7 @@ describe("deserializeDesign — error handling", () => {
     }
   });
 
-  it("必須フィールド欠如は missing-field", () => {
+  it("translated case", () => {
     const json = JSON.stringify({ schemaVersion: 1, widthMm: 100 });
     try {
       deserializeDesign(json);
@@ -109,7 +131,7 @@ describe("deserializeDesign — error handling", () => {
     }
   });
 
-  it("未知 fabricKind は unknown-fabric", () => {
+  it("translated case", () => {
     const json = JSON.stringify({
       schemaVersion: 1,
       widthMm: 100,

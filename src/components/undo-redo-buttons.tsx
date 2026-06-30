@@ -1,10 +1,10 @@
 "use client";
 
-// undo-redo-buttons.tsx — Phase 5 PR24 Undo/Redo + JSON Save/Load コントロール。
+// English note.
 //
-// design-store の history を経由した undo/redo、および
-// serializeDesign / deserializeDesign による JSON 入出力を提供する。
-// ファイル DL は <a download> 経由、UL は <input type="file"> 経由。
+// English note.
+// English note.
+// English note.
 
 import { Redo2, Undo2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -40,7 +40,7 @@ export function UndoRedoButtons() {
     }).catch((err) => {
       console.error("design load failed:", err);
     });
-    e.target.value = ""; // 同じファイル再選択を許可
+    e.target.value = ""; // English note.
   };
 
   return (
@@ -68,13 +68,13 @@ export function UndoRedoButtons() {
         variant="outline"
         disabled={!design}
         onClick={handleSave}
-        title="JSON 保存"
+        title="Save JSON"
       >
         Save
       </Button>
       <label
         className="inline-flex h-8 cursor-pointer items-center gap-1 rounded border px-3 text-sm hover:bg-muted"
-        title="JSON 読込"
+        title="Load JSON"
       >
         <Upload className="size-3.5" />
         Load

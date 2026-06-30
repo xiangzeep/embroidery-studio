@@ -1,26 +1,71 @@
 import { describe, it, expect } from "vitest";
 import {
   convertImageToEmbroideryDirect,
+  rerenderDesignAndWrite,
   runPrepipeline,
   runStitchAndWrite,
 } from "../compose";
 import * as pipeline from "../index";
+import { FABRIC_PROFILES } from "../fabric";
+import { makeDefaultConfig } from "../config";
+import type { EmbroideryDesign } from "../types";
 
 describe("compose", () => {
-  it("convertImageToEmbroideryDirect が compose.ts から import できる", () => {
+  it("translated case", () => {
     expect(typeof convertImageToEmbroideryDirect).toBe("function");
   });
 
-  it("runPrepipeline / runStitchAndWrite が compose.ts から export されている", () => {
+  it("translated case", () => {
     expect(typeof runPrepipeline).toBe("function");
     expect(typeof runStitchAndWrite).toBe("function");
+    expect(typeof rerenderDesignAndWrite).toBe("function");
   });
 
-  it("旧 index.ts 経由でも同名でアクセスできる (re-export が機能している)", () => {
+  it("translated case", () => {
     expect(pipeline.convertImageToEmbroideryDirect).toBe(
       convertImageToEmbroideryDirect,
     );
     expect(pipeline.runPrepipeline).toBe(runPrepipeline);
     expect(pipeline.runStitchAndWrite).toBe(runStitchAndWrite);
+    expect(pipeline.rerenderDesignAndWrite).toBe(rerenderDesignAndWrite);
+  });
+
+  it("rerenders from edited design instead of rebuilding from source regions", async () => {
+    const design: EmbroideryDesign = {
+      widthMm: 20,
+      heightMm: 10,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        {
+          id: "run-1",
+          kind: "run",
+          baseKind: "run",
+          colorIndex: 0,
+          rgb: [0, 0, 0],
+          shape: { outer: [[0, 0], [20, 0], [20, 1], [0, 1]], holes: [] },
+          props: { densityMm: 0.4, maxStitchMm: 4 },
+          strokeKind: "thin-run",
+          strokeRole: "outline",
+          strokeOverride: "use-global",
+          order: 0,
+        },
+      ],
+    };
+
+    const result = await rerenderDesignAndWrite(
+      design,
+      {
+        regions: [],
+        widthMm: 20,
+        heightMm: 10,
+        widthPx: 200,
+        heightPx: 100,
+      },
+      makeDefaultConfig("denim"),
+    );
+
+    expect(result.design.objects[0].id).toBe("run-1");
+    expect(result.pattern.totalStitches).toBeGreaterThan(0);
+    expect(result.stats.stitchCount).toBeGreaterThan(0);
   });
 });

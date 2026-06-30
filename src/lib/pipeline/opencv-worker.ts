@@ -1,12 +1,12 @@
 "use client";
 
 /**
- * OpenCV.js (WASM) を classic Web Worker に隔離して動かすクライアント。
- * メインスレッドから cv を直接触らないため、k-means や形態学演算で
- * OOM になっても UI スレッドが巻き込まれない。
+ * English note.
+ * English note.
+ * English note.
  *
- * 設計は engr-gemini-conte-ocr (/lib/detectRulings.ts + /public/opencv-detect.worker.js)
- * のパターンを踏襲。Worker は /public/opencv-kmeans.worker.js。
+ * English note.
+ * English note.
  */
 
 const WORKER_URL = "/opencv-kmeans.worker.js";
@@ -34,7 +34,7 @@ function getWorker(): Promise<Worker> {
   if (workerPromise) return workerPromise;
   workerPromise = new Promise<Worker>((resolve, reject) => {
     if (typeof window === "undefined") {
-      reject(new Error("OpenCV worker は ブラウザでのみ起動可能"));
+      reject(new Error("OpenCV worker can only run in the browser"));
       return;
     }
     let w: Worker;
@@ -48,7 +48,7 @@ function getWorker(): Promise<Worker> {
       w.terminate();
       reject(
         new Error(
-          `OpenCV Worker の初期化が ${INIT_TIMEOUT_MS}ms でタイムアウトしました`,
+          `OpenCV Worker initialization timed out after ${INIT_TIMEOUT_MS}ms`,
         ),
       );
     }, INIT_TIMEOUT_MS);
@@ -77,20 +77,20 @@ function getWorker(): Promise<Worker> {
 
 export type QuantizeInput = {
   imageData: ImageData;
-  /** 1=不透明, 0=透明。透明ピクセルは k-means から除外し、labels に sentinel BACKGROUND_LABEL を入れる */
+  /** English note. */
   opaqueMask?: Uint8Array;
   colorCount: number;
   iterations?: number;
   epsilon?: number;
   /**
-   * k-means 前段の bilateralFilter 強度 (0..4)。
-   * 0 でフィルタ無効。境界を保ったまま中間色を均すのでクラスタリングが安定し、
-   * 細い影色が背景に吸われるのを抑える。
+   * English note.
+   * English note.
+   * English note.
    */
   smoothing?: number;
 };
 
-/** labels に入る背景 sentinel 値。Uint8Array なので 0..colorCount-1 とぶつからない 255 を使う。 */
+/** English note. */
 export const BACKGROUND_LABEL = 0xff;
 
 export type QuantizedImage = {
@@ -160,12 +160,12 @@ export async function quantizeViaWorker(
   });
 }
 
-/** Worker を事前ウォームアップ (UI を見せる前に呼んでおくと初回が速い) */
+/** English note. */
 export function warmupOpenCV(): Promise<Worker> {
   return getWorker();
 }
 
-/** テスト/再起動用 */
+/** English note. */
 export function terminateOpenCV(): void {
   if (!workerPromise) return;
   void workerPromise.then((w) => w.terminate());

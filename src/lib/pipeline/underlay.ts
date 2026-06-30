@@ -1,11 +1,11 @@
-// Phase 2 計画書 §3 Underlay。
-// PR10 + PR11 完了状態:
-//   - edgeRunUnderlay: 外形を内側オフセット + 各 hole を外側オフセットして resample
-//   - centerRunUnderlay: Zhang-Suen thinning で medial-axis polyline を抽出
-//   - fillUnderlay: 表縫いに直交方向の粗 scanline (fill 用)
-//   - zigzagUnderlay: 細長 satin の両 rail 間を spacing で往復する単一 polyline
-// 純関数: Shape + 数値のみを入力とし、EmbroideryObject / UnderlayConfig には触らない。
-// generateUnderlayStitches 統合は PR12 で行う。
+// Underlay generation helpers.
+// Local implementation status:
+// English note.
+// English note.
+// English note.
+// English note.
+// English note.
+// English note.
 
 import type { EmbroideryObject, Point2D, Polygon, Shape, Stitch } from "./types";
 import { analyzeShape } from "./geometry";
@@ -13,20 +13,22 @@ import { offsetPolygon } from "./polygon-offset";
 import { intersectScanline } from "./scanline";
 import { pointInPolygon } from "./vectorize";
 
-const PX_PER_MM = 10; // center-run の rasterize 解像度 (1px = 0.1mm)
-const MIN_SKELETON_PIXELS = 12; // これ未満の skeleton は退化扱いで空配列
-const MIN_AREA_MM2 = 0.25; // 極小 shape の早期除外閾値
+const PX_PER_MM = 10; // English note.
+const MIN_SKELETON_PIXELS = 12; // English note.
+const MIN_AREA_MM2 = 0.25; // English note.
+const DEFAULT_UNDERLAY_MAX_STITCH_MM = 7;
+const DEFAULT_UNDERLAY_TRIM_THRESHOLD_MM = 8;
 
 /**
- * Edge-run underlay (Phase 2 §3.1 中幅 satin / fill 用)。
+ * Edge-run underlay for medium-width satin and fill objects.
  *
- * 戻り値の `Point2D[][]` は「複数の閉ループ polyline」を表す:
- *   - `[0]`:    外形を `insetMm` 内側に縮めたリング (1 本)
- *   - `[1..]`:  各 hole を `insetMm` 外側に膨らませたリング (入力順)
+ * English note.
+ * English note.
+ * English note.
  *
- * **外形が消失した場合は空配列を返す** (holes だけが残ると順序契約が崩れ、
- * 下縫いの意味を成さないため)。任意の hole が消失したらその hole のリングだけを落とす。
- * `insetMm <= 0` や `stitchLenMm <= 0` の不正入力には早期 return で空配列を返す。
+ * English note.
+ * English note.
+ * English note.
  */
 export function edgeRunUnderlay(
   shape: Shape,
@@ -50,16 +52,16 @@ export function edgeRunUnderlay(
 }
 
 /**
- * Center-run underlay (Phase 2 §3.1 細 satin 用)。
+ * Center-run underlay for narrow satin shapes.
  *
- * `shape` を `PX_PER_MM` 解像度のマスクにラスタライズし、Zhang-Suen thinning で 1px 幅 skeleton
- * を抽出。skeleton の **直径 (BFS 2 回で求める最長単純パス)** を mm 座標に逆変換して
- * `stitchLenMm` で resample する。
+ * English note.
+ * English note.
+ * English note.
  *
- * 退化条件で空配列を返す:
+ * English note.
  *   - `stitchLenMm <= 0`
- *   - shape の面積が `MIN_AREA_MM2` 未満
- *   - skeleton ピクセル数が `MIN_SKELETON_PIXELS` 未満
+ * English note.
+ * English note.
  */
 export function centerRunUnderlay(
   shape: Shape,
@@ -83,15 +85,15 @@ export function centerRunUnderlay(
 }
 
 /**
- * Fill underlay (Phase 2 §3.1 fill object 用)。
+ * Fill underlay for fill objects.
  *
- * 表縫いの方向 `angleDeg` に対して **直交方向** (= `angleDeg + 90°`) で粗い scanline を生成。
- * `spacingMm` 間隔で走査し、各スキャンラインが outer/holes と交わる区間を 2 点セグメント
- * (`[startPoint, endPoint]`) として返す。穴の中には点が落ちないよう even-odd でペア化する。
+ * English note.
+ * English note.
+ * English note.
  *
- * - 戻り値 `Point2D[][]`: 各要素は 2 点ちょうどの線分 (`segments[i].length === 2`)
- * - `outer.length < 3` / `spacingMm <= 0` で空配列
- * - 各 scanline の交点が奇数なら末尾を切り捨てて偶数に揃える (退化保護)
+ * English note.
+ * English note.
+ * English note.
  */
 export function fillUnderlay(
   shape: Shape,
@@ -99,7 +101,7 @@ export function fillUnderlay(
   spacingMm: number,
 ): Point2D[][] {
   if (shape.outer.length < 3 || spacingMm <= 0) return [];
-  // 直交方向に走らせる: stitch dir = angleDeg + 90°
+  // English note.
   const rad = ((angleDeg + 90) * Math.PI) / 180;
   const dir: [number, number] = [Math.cos(rad), Math.sin(rad)];
   const perp: [number, number] = [-dir[1], dir[0]];
@@ -134,14 +136,14 @@ export function fillUnderlay(
 }
 
 /**
- * Zigzag underlay (Phase 2 §3.1 幅広 satin 用)。
+ * Zigzag underlay for wide satin objects.
  *
- * PCA で長軸を取り、両 rail (= 短軸方向に `±(shortSide/2 - insetMm)`) の間を
- * `spacingMm` 刻みで往復する **単一 polyline** を返す。点は左 rail / 右 rail を交互に並ぶ。
+ * English note.
+ * English note.
  *
- * - 退化条件 (`shortSide/2 <= insetMm`) では空配列
- * - `shape.outer.length < 3` / `spacingMm <= 0` で空配列
- * - `shape.holes` は無視 (satin underlay 用途のため)
+ * English note.
+ * English note.
+ * English note.
  */
 export function zigzagUnderlay(
   shape: Shape,
@@ -176,8 +178,8 @@ export function zigzagUnderlay(
 }
 
 /**
- * `obj.props.underlay.kind` に応じて適切な underlay 関数を dispatch し
- * `Stitch[]` (kind="run", colorIndex は obj 由来) に変換して返す。
+ * English note.
+ * English note.
  *
  * - `kind === "none"` or `obj.props.underlay` 未定義: 空配列
  * - `kind === "edge-run"`: `edgeRunUnderlay(obj.shape, insetMm, stitchLenMm).flat()`
@@ -185,7 +187,7 @@ export function zigzagUnderlay(
  * - `kind === "zigzag"`: `zigzagUnderlay(obj.shape, spacingMm, insetMm)`
  * - `kind === "fill"`: `fillUnderlay(obj.shape, angleDeg, spacingMm).flat()`
  *
- * jump/trim 挿入は呼び出し側 (`render.ts`) の責務。
+ * English note.
  */
 export function generateUnderlayStitches(obj: EmbroideryObject): Stitch[] {
   const u = obj.props.underlay;
@@ -202,8 +204,12 @@ export function generateUnderlayStitches(obj: EmbroideryObject): Stitch[] {
       points = zigzagUnderlay(obj.shape, u.spacingMm, u.insetMm);
       break;
     case "fill":
-      points = fillUnderlay(obj.shape, u.angleDeg, u.spacingMm).flat();
-      break;
+      return routeUnderlaySegments(
+        fillUnderlay(obj.shape, u.angleDeg, u.spacingMm),
+        obj.colorIndex,
+        obj.props.maxStitchMm ?? DEFAULT_UNDERLAY_MAX_STITCH_MM,
+        DEFAULT_UNDERLAY_TRIM_THRESHOLD_MM,
+      );
   }
   return points.map(([x, y]) => ({
     x,
@@ -211,6 +217,61 @@ export function generateUnderlayStitches(obj: EmbroideryObject): Stitch[] {
     kind: "run" as const,
     colorIndex: obj.colorIndex,
   }));
+}
+
+function routeUnderlaySegments(
+  segments: Point2D[][],
+  colorIndex: number,
+  maxStitchMm: number,
+  trimThresholdMm: number,
+): Stitch[] {
+  const stitches: Stitch[] = [];
+  for (const segment of segments) {
+    if (segment.length === 0) continue;
+    const first = segment[0];
+    const previous = stitches[stitches.length - 1];
+    if (previous) {
+      const dist = Math.hypot(first[0] - previous.x, first[1] - previous.y);
+      if (dist > maxStitchMm) {
+        if (dist > trimThresholdMm) {
+          stitches.push({ x: previous.x, y: previous.y, kind: "trim", colorIndex });
+        }
+        stitches.push({ x: first[0], y: first[1], kind: "jump", colorIndex });
+      }
+    }
+    appendRunPoints(stitches, segment, colorIndex, maxStitchMm);
+  }
+  return stitches;
+}
+
+function appendRunPoints(
+  stitches: Stitch[],
+  points: Point2D[],
+  colorIndex: number,
+  maxStitchMm: number,
+): void {
+  for (const point of points) {
+    const previous = stitches[stitches.length - 1];
+    if (!previous || previous.kind === "jump" || previous.kind === "trim" || previous.kind === "stop") {
+      stitches.push({ x: point[0], y: point[1], kind: "run", colorIndex });
+      continue;
+    }
+    const dist = Math.hypot(point[0] - previous.x, point[1] - previous.y);
+    if (dist > maxStitchMm) {
+      const steps = Math.ceil(dist / maxStitchMm);
+      for (let step = 1; step <= steps; step++) {
+        const t = step / steps;
+        stitches.push({
+          x: previous.x + (point[0] - previous.x) * t,
+          y: previous.y + (point[1] - previous.y) * t,
+          kind: "run",
+          colorIndex,
+        });
+      }
+    } else {
+      stitches.push({ x: point[0], y: point[1], kind: "run", colorIndex });
+    }
+  }
 }
 
 // --- private helpers ---
@@ -241,9 +302,9 @@ function polygonArea(polygon: Polygon): number {
 }
 
 /**
- * 閉ループ polyline を `stitchLenMm` 間隔で resample する。
- * 出力は始点 (入力の頂点ではなく resampling の起点) から `(perimeter / stitchLenMm)` 個程度の点列。
- * 周長が `stitchLenMm` に満たない場合は始点のみ。
+ * English note.
+ * English note.
+ * English note.
  */
 function resampleClosedRing(ring: Polygon, stitchLenMm: number): Point2D[] {
   if (ring.length < 2 || stitchLenMm <= 0) return ring.length > 0 ? [[ring[0][0], ring[0][1]]] : [];
@@ -257,8 +318,8 @@ function resampleClosedRing(ring: Polygon, stitchLenMm: number): Point2D[] {
   const count = Math.max(2, Math.round(perimeter / stitchLenMm));
   const step = perimeter / count;
   const out: Point2D[] = [];
-  let cursor = 0; // 走査済み長さ
-  let nextEmit = 0; // 次に出力する距離
+  let cursor = 0; // English note.
+  let nextEmit = 0; // English note.
   let edgeIdx = 0;
   let edgeStart = ring[0];
   let edgeEnd = ring[1 % ring.length];
@@ -283,8 +344,8 @@ function resampleClosedRing(ring: Polygon, stitchLenMm: number): Point2D[] {
 }
 
 /**
- * 開いた polyline を `stitchLenMm` 間隔で resample する。
- * 始点と終点を必ず含み、中間点を distance 内挿で配置する。
+ * English note.
+ * English note.
  */
 function resampleOpenLine(line: Polygon, stitchLenMm: number): Point2D[] {
   if (line.length < 2 || stitchLenMm <= 0) return line.length > 0 ? [[line[0][0], line[0][1]]] : [];
@@ -325,9 +386,9 @@ function resampleOpenLine(line: Polygon, stitchLenMm: number): Point2D[] {
 }
 
 /**
- * Shape を `pxPerMm` 解像度のバイナリマスクに焼く。
- * outer 内かつ全 hole 外であるピクセルを 1 にする。
- * 戻り値の `offsetX/Y` は左上原点を mm 座標に戻すためのオフセット。
+ * English note.
+ * English note.
+ * English note.
  */
 function rasterizeShapeToMask(
   shape: Shape,
@@ -355,7 +416,7 @@ function rasterizeShapeToMask(
   const offsetY = minY - 1 / pxPerMm;
   const mask = new Uint8Array(width * height);
   for (let py = 0; py < height; py++) {
-    const wy = offsetY + (py + 0.5) / pxPerMm;
+      const wy = offsetY + (py + 0.5) / pxPerMm;
     for (let px = 0; px < width; px++) {
       const wx = offsetX + (px + 0.5) / pxPerMm;
       if (!pointInPolygon([wx, wy], shape.outer)) continue;
@@ -373,8 +434,8 @@ function rasterizeShapeToMask(
 }
 
 /**
- * Zhang-Suen (1984) thinning。8 近傍ベースの 1px 幅 skeleton 化を破壊的に行う。
- * 入力 mask は変更されない (内部でコピーする)。
+ * English note.
+ * English note.
  */
 function thinMaskZhangSuen(
   mask: Uint8Array,
@@ -447,8 +508,8 @@ function thinMaskZhangSuen(
 }
 
 /**
- * Skeleton の **直径 (最長単純パス)** を BFS 2 回で抽出する。
- * 戻り値はピクセル座標 `[x, y]` の polyline (連結順)。skeleton が空なら空配列。
+ * English note.
+ * English note.
  */
 function traceLongestSkeletonPath(
   skel: Uint8Array,
@@ -565,7 +626,7 @@ function offsetShapeInward(shape: Shape, insetMm: number): Polygon[] {
   return rings;
 }
 
-/** テスト専用に内部ヘルパを公開する (本番コードから参照しないこと)。 */
+/** English note. */
 export const __internal = {
   offsetShapeInward,
   rasterizeShapeToMask,

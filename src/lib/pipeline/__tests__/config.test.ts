@@ -1,13 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  QUALITY_PRESETS,
   applyFabricDefaults,
+  applyQualityPreset,
   makeDefaultConfig,
   type ConversionConfig,
 } from "../config";
 import { FABRIC_PROFILES } from "../fabric";
 
 describe("makeDefaultConfig", () => {
-  it("denim を渡すと fabric='denim' で stitchDensity=0.4 になる", () => {
+  it("translated case", () => {
     const cfg = makeDefaultConfig("denim");
     expect(cfg.fabric).toBe("denim");
     expect(cfg.stitchDensity).toBe(FABRIC_PROFILES.denim.defaultDensityMm);
@@ -15,28 +17,31 @@ describe("makeDefaultConfig", () => {
     expect(cfg.overrides).toEqual({});
   });
 
-  it("terry を渡すと stitchDensity=0.42 になる", () => {
+  it("translated case", () => {
     const cfg = makeDefaultConfig("terry");
     expect(cfg.fabric).toBe("terry");
     expect(cfg.stitchDensity).toBeCloseTo(0.42);
   });
 
-  it("既存フィールド (widthMm, colorCount, format 等) は従来のデフォルトを保つ", () => {
+  it("translated case", () => {
     const cfg = makeDefaultConfig("denim");
     expect(cfg.format).toBe("dst");
+    expect(cfg.digitizingMode).toBe("line-art");
     expect(cfg.widthMm).toBe(100);
     expect(cfg.colorCount).toBe(6);
     expect(cfg.satinMaxWidthMm).toBe(5);
     expect(cfg.smoothing).toBe(2);
     expect(cfg.boundaryDilatePx).toBe(1);
+    expect(cfg.minRegionAreaPx).toBe(12);
+    expect(cfg.removeWhiteBackground).toBe(true);
     expect(cfg.fillAngleDeg).toBe(45);
     expect(cfg.fillAngleByColor).toEqual({});
-    expect(cfg.fillStrategy).toBe("global-angle");
+    expect(cfg.fillStrategy).toBe("shape-long-axis");
   });
 });
 
 describe("applyFabricDefaults", () => {
-  it("未 override の状態で denim → terry に切り替えると stitchDensity が 0.42 に追従する", () => {
+  it("translated case", () => {
     const prev = makeDefaultConfig("denim");
     expect(prev.stitchDensity).toBeCloseTo(0.4);
 
@@ -46,7 +51,7 @@ describe("applyFabricDefaults", () => {
     expect(next.overrides).toEqual({});
   });
 
-  it("fabric 以外のフィールドはそのまま維持される", () => {
+  it("translated case", () => {
     const prev = {
       ...makeDefaultConfig("denim"),
       widthMm: 200,
@@ -59,18 +64,18 @@ describe("applyFabricDefaults", () => {
     expect(next.fillAngleDeg).toBe(30);
   });
 
-  it("同じ fabric を再指定しても idempotent (副作用なし)", () => {
+  it("translated case", () => {
     const prev = makeDefaultConfig("twill");
     const next = applyFabricDefaults(prev, "twill");
     expect(next).toEqual(prev);
   });
 
-  it("同じ fabric を再指定したときは参照同一を返す (React 再レンダー抑制)", () => {
+  it("translated case", () => {
     const prev = makeDefaultConfig("twill");
     expect(applyFabricDefaults(prev, "twill")).toBe(prev);
   });
 
-  it("override 済み stitchDensity を持つ同 fabric 再指定でも参照同一", () => {
+  it("translated case", () => {
     const prev: ConversionConfig = {
       ...makeDefaultConfig("denim"),
       stitchDensity: 0.55,
@@ -81,7 +86,7 @@ describe("applyFabricDefaults", () => {
 });
 
 describe("applyFabricDefaults — override 保持", () => {
-  it("overrides.stitchDensity=true が立っていれば fabric 切替で stitchDensity が消えない", () => {
+  it("translated case", () => {
     const prev: ConversionConfig = {
       ...makeDefaultConfig("denim"),
       stitchDensity: 0.55,
@@ -94,7 +99,7 @@ describe("applyFabricDefaults — override 保持", () => {
     expect(next.overrides.stitchDensity).toBe(true);
   });
 
-  it("override が空 ({}) なら fabric 切替で stitchDensity が追従する (Cycle 2 と整合)", () => {
+  it("translated case", () => {
     const prev: ConversionConfig = {
       ...makeDefaultConfig("denim"),
       stitchDensity: 0.4,
@@ -105,8 +110,8 @@ describe("applyFabricDefaults — override 保持", () => {
   });
 });
 
-describe("UI 統合シナリオ (純関数で再現)", () => {
-  it("シナリオ: denim 起動 → stitchDensity スライダで 0.5 に → fleece に切替 → stitchDensity=0.5 のまま", () => {
+describe("translated case", () => {
+  it("translated case", () => {
     let cfg = makeDefaultConfig("denim");
     expect(cfg.stitchDensity).toBeCloseTo(0.4);
 
@@ -122,7 +127,7 @@ describe("UI 統合シナリオ (純関数で再現)", () => {
     expect(cfg.stitchDensity).toBeCloseTo(0.5);
   });
 
-  it("シナリオ: denim → terry → leather と切替し、いずれも未 override なら defaultDensityMm に追従", () => {
+  it("translated case", () => {
     let cfg = makeDefaultConfig("denim");
     cfg = applyFabricDefaults(cfg, "terry");
     expect(cfg.stitchDensity).toBeCloseTo(0.42);
@@ -131,14 +136,14 @@ describe("UI 統合シナリオ (純関数で再現)", () => {
   });
 });
 
-describe("ConversionConfig Phase 2 disable flags", () => {
-  it("makeDefaultConfig は disableUnderlay=false / disableCompensation=false を返す", () => {
+describe("ConversionConfig disable flags", () => {
+  it("translated case", () => {
     const c = makeDefaultConfig("denim");
     expect(c.disableUnderlay).toBe(false);
     expect(c.disableCompensation).toBe(false);
   });
 
-  it("applyFabricDefaults は disable フラグを保持する", () => {
+  it("translated case", () => {
     const cfg: ReturnType<typeof makeDefaultConfig> = {
       ...makeDefaultConfig("denim"),
       disableUnderlay: true,
@@ -147,5 +152,40 @@ describe("ConversionConfig Phase 2 disable flags", () => {
     const next = applyFabricDefaults(cfg, "terry");
     expect(next.disableUnderlay).toBe(true);
     expect(next.disableCompensation).toBe(true);
+  });
+});
+
+describe("quality presets", () => {
+  it("uses balanced quality by default", () => {
+    const cfg = makeDefaultConfig("denim");
+    expect(cfg.qualityPreset).toBe("balanced");
+  });
+
+  it("maps each quality preset to deterministic processing limits", () => {
+    expect(QUALITY_PRESETS.fast.maxDimension).toBe(256);
+    expect(QUALITY_PRESETS.balanced.maxDimension).toBe(384);
+    expect(QUALITY_PRESETS.high.maxDimension).toBe(640);
+    expect(QUALITY_PRESETS.detail.maxDimension).toBe(768);
+  });
+
+  it("applies preset defaults and clamps colors that exceed the preset limit", () => {
+    const cfg: ConversionConfig = {
+      ...makeDefaultConfig("denim"),
+      colorCount: 12,
+      smoothing: 4,
+    };
+
+    const next = applyQualityPreset(cfg, "fast");
+
+    expect(next.qualityPreset).toBe("fast");
+    expect(next.colorCount).toBe(6);
+    expect(next.smoothing).toBe(1);
+  });
+});
+
+describe("fill quality defaults", () => {
+  it("defaults to automatic long-axis fill direction", () => {
+    const cfg = makeDefaultConfig("denim");
+    expect(cfg.fillStrategy).toBe("shape-long-axis");
   });
 });

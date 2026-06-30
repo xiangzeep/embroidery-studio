@@ -1,10 +1,10 @@
-// Phase 2 計画書 §4 Pull Compensation / §5 Push Compensation。
-// 純関数 API: 入力 EmbroideryObject を破壊せず、shape のみ差し替えた新オブジェクトを返す。
-// 設計順序 (§4.5): underlay は元 shape、top stitches は補正後 shape に対して計算する。
-// PR9 完了状態:
-//   - applyPullCompensation: Satin (自前 normal offset) と Fill (clipper-lib) に対応
-//   - applyPushCompensation: 異色 neighbor との重なり検出時のみ内側オフセット
-// per-side rail 単位の pull comp は Phase 4 (2-rail satin 実装と統合) で対応する。
+// Pull and push compensation helpers.
+// English note.
+// English note.
+// Local implementation status:
+// English note.
+// English note.
+// English note.
 
 import type {
   EmbroideryObject,
@@ -18,15 +18,15 @@ import { analyzeShape } from "./geometry";
 import { offsetShape, polygonsOverlap } from "./polygon-offset";
 
 /**
- * Pull compensation を適用する。
+ * English note.
  *
- * - `kind="run"`: 補正不要、入力をそのまま参照同一で返す
- * - `kind="satin"`: PCA 短軸方向に外側オフセット (自前 normal offset, clipper 不要)
- * - `kind="fill"`: outer を +amount / holes を -amount で clipper オフセット
+ * English note.
+ * English note.
+ * English note.
  *
- * 補正量の解決優先順位:
+ * English note.
  *   1. `props.pullCompMm`
- *   2. `props.pullCompPerSideMm` の `(left + right) / 2`
+ * English note.
  *   3. `pullCompForWidth(fabric, shortSideMm)`
  */
 export function applyPullCompensation(
@@ -43,17 +43,17 @@ export function applyPullCompensation(
 }
 
 /**
- * Push compensation を適用する (Phase 2 §5)。
+ * English note.
  *
- * 異色 neighbor との重なりが検出された場合のみ shape を内側オフセットする。
- * 同色 neighbor の重なりは Phase 3 で branching と統合するため対象外。
+ * English note.
+ * English note.
  *
- * - `kind === "run"`: 重なり判定対象外、参照同一返却
+ * English note.
  * - `amount = obj.props.pushCompMm ?? 0`
- * - `amount <= 0`: 参照同一返却
- * - 異色 neighbor との重なりが無い: 参照同一返却
- * - 異色 neighbor が複数あっても shape の縮みは 1 回ぶんのみ
- * - outer 消失時は `offsetShape` のフォールバックで元 shape を保つ
+ * - `amount <= 0`: return the same reference
+ * English note.
+ * English note.
+ * English note.
  */
 export function applyPushCompensation(
   obj: EmbroideryObject,
@@ -106,7 +106,7 @@ function offsetSatinByNormal(shape: Shape, amountMm: number): Shape {
   return { outer, holes: shape.holes.map((h) => h.map(([x, y]) => [x, y] as Point2D)) };
 }
 
-/** テスト専用に内部ヘルパを公開する (本番コードから参照しないこと)。 */
+/** English note. */
 export const __internal = {
   resolvePullAmount,
   offsetSatinByNormal,

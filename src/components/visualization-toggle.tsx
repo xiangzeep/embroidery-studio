@@ -1,10 +1,10 @@
 "use client";
 
-// visualization-toggle.tsx — Phase 5 PR24 travel/jump/trim 可視化トグル。
+// English note.
 //
-// design-store の visualization (showTravel/showJump/showTrim) を編集する。
-// プレビュー側 (PreviewCanvasEditable) は本 store flag を購読して描画分岐
-// (実 canvas での描画は本 PR スコープ外、follow-up での integration が想定)。
+// English note.
+// English note.
+// English note.
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useDesignStore } from "./design-store";
@@ -16,7 +16,7 @@ export function VisualizationToggle() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">可視化</CardTitle>
+        <CardTitle className="text-base">Visualization</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
         <ToggleRow
@@ -33,6 +33,11 @@ export function VisualizationToggle() {
           label="trim"
           checked={visualization.showTrim}
           onChange={(v) => setVisualization({ showTrim: v })}
+        />
+        <ToggleRow
+          label="stitch types"
+          checked={visualization.showStitchTypes}
+          onChange={(v) => setVisualization({ showStitchTypes: v })}
         />
       </CardContent>
     </Card>

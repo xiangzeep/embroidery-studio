@@ -22,33 +22,33 @@ const ALL_KINDS: FabricKind[] = [
 ];
 
 describe("FABRIC_PROFILES table", () => {
-  it("FABRIC_PROFILES は denim / twill / canvas / knit-light / knit-heavy / terry / fleece / leather / silk / felt の 10 種をキーに持つ", () => {
+  it("translated case", () => {
     expect(Object.keys(FABRIC_PROFILES).sort()).toEqual([...ALL_KINDS].sort());
   });
 
   it.each(ALL_KINDS)(
-    "FABRIC_PROFILES[%s] は defaultDensityMm が Phase 計画書 3.3 の値と一致する",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].defaultDensityMm).toBeCloseTo(EXPECTED[kind].density, 5);
     },
   );
 
   it.each(ALL_KINDS)(
-    "FABRIC_PROFILES[%s] は pullCompPerWidth が Phase 計画書 3.3 の値と一致する",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].pullCompPerWidth).toBeCloseTo(EXPECTED[kind].pullPerWidth, 5);
     },
   );
 
   it.each(ALL_KINDS)(
-    "FABRIC_PROFILES[%s] は minPullCompMm が Phase 計画書 3.3 の値と一致する",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].minPullCompMm).toBeCloseTo(EXPECTED[kind].minPull, 5);
     },
   );
 
   it.each(ALL_KINDS)(
-    "FABRIC_PROFILES[%s] は defaultPushCompMm が 0 以上 0.3 mm 以下の常識的な値",
+    "Translated text",
     (kind) => {
       const v = FABRIC_PROFILES[kind].defaultPushCompMm;
       expect(v).toBeGreaterThanOrEqual(0);
@@ -56,22 +56,22 @@ describe("FABRIC_PROFILES table", () => {
     },
   );
 
-  it.each(ALL_KINDS)("FABRIC_PROFILES[%s].kind は自身のキーと一致する", (kind) => {
+  it.each(ALL_KINDS)("translated case", (kind) => {
     expect(FABRIC_PROFILES[kind].kind).toBe(kind);
   });
 });
 
 describe("getFabricProfile", () => {
-  it("getFabricProfile(\"denim\") は FABRIC_PROFILES.denim と参照同一", () => {
+  it("translated case", () => {
     expect(getFabricProfile("denim")).toBe(FABRIC_PROFILES.denim);
   });
 
-  it("getFabricProfile(\"knit-heavy\") は kind フィールドが \"knit-heavy\"", () => {
+  it("translated case", () => {
     expect(getFabricProfile("knit-heavy").kind).toBe("knit-heavy");
   });
 
-  it("getFabricProfile は型レベルで FabricKind 以外を受け付けない (compile-time check)", () => {
-    // @ts-expect-error — 未知の kind は型エラーになるべき (ランタイム挙動はテストしない)
+  it("translated case", () => {
+    // English note.
     getFabricProfile("unknown-fabric");
     expect(true).toBe(true);
   });
@@ -84,10 +84,10 @@ describe("pullCompForWidth", () => {
   const leather = FABRIC_PROFILES.leather;
 
   it.each<[string, number, number]>([
-    ["denim, 0mm → minPull(0.10) で床打ち", 0, 0.10],
-    ["denim, 2mm → 2*0.025=0.05 < 0.10 で min 側", 2, 0.10],
-    ["denim, 4mm → 4*0.025=0.10 で境界", 4, 0.10],
-    ["denim, 5mm → 5*0.025=0.125 で per-width 側", 5, 0.125],
+    ["Translated text", 0, 0.10],
+    ["Translated text", 2, 0.10],
+    ["Translated text", 4, 0.10],
+    ["Translated text", 5, 0.125],
   ])("pullCompForWidth(%s)", (_label, w, expected) => {
     expect(pullCompForWidth(denim, w)).toBeCloseTo(expected, 5);
   });
@@ -104,27 +104,27 @@ describe("pullCompForWidth", () => {
     expect(pullCompForWidth(leather, 10)).toBeCloseTo(0.15, 5);
   });
 
-  it("pullCompForWidth(denim, 負数) は minPullCompMm にクランプ", () => {
+  it("translated case", () => {
     expect(pullCompForWidth(denim, -5)).toBeCloseTo(denim.minPullCompMm, 5);
   });
 
-  it("pullCompForWidth(denim, NaN) は NaN ではなく minPullCompMm を返す", () => {
+  it("translated case", () => {
     const result = pullCompForWidth(denim, Number.NaN);
     expect(Number.isFinite(result)).toBe(true);
     expect(result).toBeCloseTo(denim.minPullCompMm, 5);
   });
 });
 
-describe("underlayPolicy.satin (幅依存分岐)", () => {
+describe("underlayPolicy.satin (Width依存分岐)", () => {
   // denim family (denim / twill / canvas / felt): center-run → edge-run → zigzag
   it.each<[FabricKind]>([["denim"], ["twill"], ["canvas"], ["felt"]])(
-    "%s.satin(1.5) は center-run",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(1.5).kind).toBe("center-run");
     },
   );
   it.each<[FabricKind]>([["denim"], ["twill"], ["canvas"], ["felt"]])(
-    "%s.satin(3.0) は edge-run",
+    "Translated text",
     (kind) => {
       const u = FABRIC_PROFILES[kind].underlayPolicy.satin(3.0);
       expect(u.kind).toBe("edge-run");
@@ -135,22 +135,22 @@ describe("underlayPolicy.satin (幅依存分岐)", () => {
     },
   );
   it.each<[FabricKind]>([["denim"], ["twill"], ["canvas"], ["felt"]])(
-    "%s.satin(5.0) は zigzag",
+    "Translated text",
     (kind) => {
       const u = FABRIC_PROFILES[kind].underlayPolicy.satin(5.0);
       expect(u.kind).toBe("zigzag");
     },
   );
 
-  // knit family (knit-light / knit-heavy): center-run → edge-run → zigzag (強め)
+  // English note.
   it.each<[FabricKind]>([["knit-light"], ["knit-heavy"]])(
-    "%s.satin(1.5) は center-run",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(1.5).kind).toBe("center-run");
     },
   );
   it.each<[FabricKind]>([["knit-light"], ["knit-heavy"]])(
-    "%s.satin(3.0) は edge-run",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(3.0).kind).toBe("edge-run");
     },
@@ -158,12 +158,12 @@ describe("underlayPolicy.satin (幅依存分岐)", () => {
   it.each<[FabricKind, number]>([
     ["knit-light", 1.0],
     ["knit-heavy", 1.0],
-  ])("%s.satin(5.0) は zigzag で spacingMm = %f (denim より強め)", (kind, expectedSpacing) => {
+  ])("Translated text", (kind, expectedSpacing) => {
     const u = FABRIC_PROFILES[kind].underlayPolicy.satin(5.0);
     expect(u.kind).toBe("zigzag");
     if (u.kind === "zigzag") {
       expect(u.spacingMm).toBeCloseTo(expectedSpacing, 5);
-      // denim の spacing (1.5) より小さい = 強い下打ち
+      // English note.
       const denimZig = FABRIC_PROFILES.denim.underlayPolicy.satin(5.0);
       if (denimZig.kind === "zigzag") {
         expect(u.spacingMm).toBeLessThan(denimZig.spacingMm);
@@ -171,158 +171,158 @@ describe("underlayPolicy.satin (幅依存分岐)", () => {
     }
   });
 
-  // terry family (terry / fleece): 細幅から edge-run, 5mm で zigzag
+  // English note.
   it.each<[FabricKind]>([["terry"], ["fleece"]])(
-    "%s.satin(1.5) は edge-run (毛足が長いので細幅でも center を使わない)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(1.5).kind).toBe("edge-run");
     },
   );
   it.each<[FabricKind]>([["terry"], ["fleece"]])(
-    "%s.satin(3.0) は edge-run",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(3.0).kind).toBe("edge-run");
     },
   );
-  it.each<[FabricKind]>([["terry"], ["fleece"]])("%s.satin(5.0) は zigzag", (kind) => {
+  it.each<[FabricKind]>([["terry"], ["fleece"]])("%s.satin(5.0) returns zigzag", (kind) => {
     expect(FABRIC_PROFILES[kind].underlayPolicy.satin(5.0).kind).toBe("zigzag");
   });
 
   // leather: zigzag 禁止
-  it("leather.satin(1.5) は center-run", () => {
+  it("translated case", () => {
     expect(FABRIC_PROFILES.leather.underlayPolicy.satin(1.5).kind).toBe("center-run");
   });
-  it("leather.satin(3.0) は edge-run", () => {
+  it("translated case", () => {
     expect(FABRIC_PROFILES.leather.underlayPolicy.satin(3.0).kind).toBe("edge-run");
   });
-  it("leather.satin(5.0) は edge-run (zigzag に切り替えない — 針穴跡を最小化)", () => {
+  it("translated case", () => {
     const u = FABRIC_PROFILES.leather.underlayPolicy.satin(5.0);
     expect(u.kind).toBe("edge-run");
     expect(u.kind).not.toBe("zigzag");
   });
 
-  // tier1/tier2 境界 (widthMm == tier1Max): `< tier1Max` のため tier2 に落ちる
-  // twill family は tier1Max=2 / tier2Max=4 — 2.0 と 4.0 は両方とも edge-run のはず
+  // English note.
+  // English note.
   it.each<[FabricKind]>([["denim"], ["twill"], ["canvas"], ["felt"]])(
-    "%s.satin(2.0) は edge-run (tier1/tier2 境界 — `<` ではなく `<=` の側に落ちる)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(2.0).kind).toBe("edge-run");
     },
   );
   it.each<[FabricKind]>([["denim"], ["twill"], ["canvas"], ["felt"]])(
-    "%s.satin(4.0) は edge-run (tier2/tier3 境界 — 4.0 はまだ zigzag ではない)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(4.0).kind).toBe("edge-run");
     },
   );
-  // knit family も同じ境界
+  // English note.
   it.each<[FabricKind]>([["knit-light"], ["knit-heavy"]])(
-    "%s.satin(2.0) は edge-run (境界)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(2.0).kind).toBe("edge-run");
     },
   );
   it.each<[FabricKind]>([["knit-light"], ["knit-heavy"]])(
-    "%s.satin(4.0) は edge-run (境界)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(4.0).kind).toBe("edge-run");
     },
   );
 
-  // silk: 軽め (細幅では none)
-  it("silk.satin(1.5) は none (軽め)", () => {
+  // English note.
+  it("translated case", () => {
     expect(FABRIC_PROFILES.silk.underlayPolicy.satin(1.5).kind).toBe("none");
   });
-  it("silk.satin(3.0) は center-run", () => {
+  it("translated case", () => {
     expect(FABRIC_PROFILES.silk.underlayPolicy.satin(3.0).kind).toBe("center-run");
   });
-  it("silk.satin(5.0) は edge-run (zigzag は使わない)", () => {
+  it("translated case", () => {
     const u = FABRIC_PROFILES.silk.underlayPolicy.satin(5.0);
     expect(u.kind).toBe("edge-run");
     expect(u.kind).not.toBe("zigzag");
   });
 
-  // 防御挙動: 非有限値・負数は最も軽い tier に落ちる (zigzag 等にフォールバックしない)
+  // English note.
   it.each<[FabricKind]>([["denim"], ["knit-light"], ["leather"], ["silk"]])(
-    "%s.satin(NaN) は重い underlay (zigzag) を返さない",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(Number.NaN).kind).not.toBe("zigzag");
     },
   );
   it.each<[FabricKind]>([["denim"], ["knit-light"], ["leather"], ["silk"]])(
-    "%s.satin(-1) は重い underlay (zigzag) を返さない",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.satin(-1).kind).not.toBe("zigzag");
     },
   );
-  it("denim.satin(Infinity) は重い underlay (zigzag) を返さない (非有限値防御)", () => {
+  it("translated case", () => {
     expect(FABRIC_PROFILES.denim.underlayPolicy.satin(Number.POSITIVE_INFINITY).kind).not.toBe(
       "zigzag",
     );
   });
 });
 
-describe("FABRIC_PROFILES は深く freeze されている", () => {
-  it("FABRIC_PROFILES.denim 自体が frozen", () => {
+describe("translated case", () => {
+  it("translated case", () => {
     expect(Object.isFrozen(FABRIC_PROFILES.denim)).toBe(true);
   });
-  it("FABRIC_PROFILES.denim.underlayPolicy が frozen", () => {
+  it("translated case", () => {
     expect(Object.isFrozen(FABRIC_PROFILES.denim.underlayPolicy)).toBe(true);
   });
-  it("frozen プロファイルへの書込みは strict mode で例外、非 strict では silent fail", () => {
-    // テストは vitest の strict mode で動くため、frozen への書込みは TypeError
+  it("translated case", () => {
+    // English note.
     expect(() => {
       (FABRIC_PROFILES.denim as { defaultDensityMm: number }).defaultDensityMm = 99;
     }).toThrow();
   });
 });
 
-describe("underlayPolicy.fill (生地別)", () => {
-  it("denim.fill() は kind=fill, spacingMm=3.0 (粗め)", () => {
+describe("underlayPolicy.fill (Fabric別)", () => {
+  it("translated case", () => {
     const u = FABRIC_PROFILES.denim.underlayPolicy.fill();
     expect(u.kind).toBe("fill");
     if (u.kind === "fill") expect(u.spacingMm).toBeCloseTo(3.0, 5);
   });
 
-  it("knit-light.fill() は kind=fill, spacingMm=2.5 (強め)", () => {
+  it("translated case", () => {
     const u = FABRIC_PROFILES["knit-light"].underlayPolicy.fill();
     expect(u.kind).toBe("fill");
     if (u.kind === "fill") expect(u.spacingMm).toBeCloseTo(2.5, 5);
   });
 
-  it("knit-heavy.fill() は kind=fill, spacingMm=2.2 (さらに強め)", () => {
+  it("translated case", () => {
     const u = FABRIC_PROFILES["knit-heavy"].underlayPolicy.fill();
     expect(u.kind).toBe("fill");
     if (u.kind === "fill") expect(u.spacingMm).toBeCloseTo(2.2, 5);
   });
 
   it.each<[FabricKind]>([["terry"], ["fleece"]])(
-    "%s.fill() は kind=fill (tatami 相当: spacing を密に)",
+    "Translated text",
     (kind) => {
       const u = FABRIC_PROFILES[kind].underlayPolicy.fill();
       expect(u.kind).toBe("fill");
       if (u.kind === "fill") {
-        // tatami 代用として denim より密にしてあること
+        // English note.
         expect(u.spacingMm).toBeLessThan(3.0);
       }
     },
   );
 
-  it("leather.fill() は kind=edge-run (fill underlay は禁止)", () => {
+  it("translated case", () => {
     expect(FABRIC_PROFILES.leather.underlayPolicy.fill().kind).toBe("edge-run");
   });
 
   it.each<[FabricKind]>([["silk"], ["felt"], ["canvas"], ["twill"]])(
-    "%s.fill() は kind=fill (中庸)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.fill().kind).toBe("fill");
     },
   );
 });
 
-describe("underlayPolicy.run (生地別)", () => {
+describe("underlayPolicy.run (Fabric別)", () => {
   it.each<[FabricKind]>(ALL_KINDS.map((k) => [k] as [FabricKind]))(
-    "%s.run() は kind=none (Phase 1 では run 用 underlay は付けない)",
+    "Translated text",
     (kind) => {
       expect(FABRIC_PROFILES[kind].underlayPolicy.run().kind).toBe("none");
     },

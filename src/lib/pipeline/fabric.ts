@@ -1,6 +1,6 @@
 import type { FabricKind, FabricProfile, UnderlayConfig, UnderlayPolicy } from "./types";
 
-// ---- 基本パラメータ (Phase 計画書 3.3) ----
+// English note.
 
 type FabricBaseValues = {
   defaultDensityMm: number;
@@ -23,11 +23,11 @@ const FABRIC_BASE_VALUES: Readonly<Record<FabricKind, FabricBaseValues>> = {
 };
 
 // ---- underlay policy (family-based, table-driven) ----
-// NOTE (Phase 1 暫定):
-//   - zigzag は実機では「zigzag + edge」の合成下打ち。Phase 2 で composite
-//     underlay (例: { kind: "composite", parts: [...] }) に拡張するまでは
-//     UnderlayConfig.kind="zigzag" 単独で代用する。
-//   - terry/fleece の tatami underlay は kind="fill" + 密 spacing で代用する。
+// NOTE:
+// English note.
+// English note.
+// English note.
+// English note.
 
 type SatinFamily = "twill" | "knit" | "terry" | "leather" | "silk";
 type FillFamily = "twill" | "knitLight" | "knitHeavy" | "terry" | "leather" | "silkFelt";
@@ -49,8 +49,8 @@ const FABRIC_TO_FILL_FAMILY: Readonly<Record<FabricKind, FillFamily>> = {
   leather: "leather",
 };
 
-// satin の三段分岐: widthMm < tier1Max → tier1, widthMm <= tier2Max → tier2, else tier3
-// (`<` と `<=` の非対称は元コードの境界挙動を維持するため意図的)
+// English note.
+// English note.
 type SatinTiers = {
   tier1Max: number;
   tier2Max: number;
@@ -72,10 +72,10 @@ const SATIN_TABLE: Readonly<Record<SatinFamily, SatinTiers>> = {
     tier2Max: 4,
     tier1: () => ({ kind: "center-run", stitchLenMm: 1.8 }),
     tier2: () => ({ kind: "edge-run", insetMm: 0.35, stitchLenMm: 1.8 }),
-    tier3: () => ({ kind: "zigzag", spacingMm: 1.0, insetMm: 0.35 }), // denim より強め
+    tier3: () => ({ kind: "zigzag", spacingMm: 1.0, insetMm: 0.35 }), // English note.
   },
   terry: {
-    // 毛足が長いので細幅でも center-run は使わない → tier1Max=0 で tier1 を実質無効化
+    // English note.
     tier1Max: 0,
     tier2Max: 4,
     tier1: () => ({ kind: "edge-run", insetMm: 0.4, stitchLenMm: 1.8 }),
@@ -83,7 +83,7 @@ const SATIN_TABLE: Readonly<Record<SatinFamily, SatinTiers>> = {
     tier3: () => ({ kind: "zigzag", spacingMm: 1.2, insetMm: 0.4 }),
   },
   leather: {
-    // zigzag 不使用 (針穴跡を最小化) → tier2Max=Infinity で tier3 を実質無効化
+    // English note.
     tier1Max: 2,
     tier2Max: Number.POSITIVE_INFINITY,
     tier1: () => ({ kind: "center-run", stitchLenMm: 2.5 }),
@@ -91,7 +91,7 @@ const SATIN_TABLE: Readonly<Record<SatinFamily, SatinTiers>> = {
     tier3: () => ({ kind: "edge-run", insetMm: 0.2, stitchLenMm: 2.5 }),
   },
   silk: {
-    // 軽め (細幅では下打ちなし)
+    // English note.
     tier1Max: 2,
     tier2Max: 4,
     tier1: () => ({ kind: "none" }),
@@ -100,12 +100,12 @@ const SATIN_TABLE: Readonly<Record<SatinFamily, SatinTiers>> = {
   },
 };
 
-const FILL_ANGLE_DEG = 90; // underlay fill は top stitch と直交させる前提
+const FILL_ANGLE_DEG = 90; // English note.
 
 const FILL_TABLE: Readonly<Record<FillFamily, () => UnderlayConfig>> = {
-  twill: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 3.0 }), // 粗め
-  knitLight: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.5 }), // 強め
-  knitHeavy: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.2 }), // さらに強め
+  twill: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 3.0 }), // English note.
+  knitLight: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.5 }), // English note.
+  knitHeavy: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.2 }), // English note.
   terry: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.0 }), // tatami 代用
   leather: () => ({ kind: "edge-run", insetMm: 0.2, stitchLenMm: 2.5 }), // fill 禁止
   silkFelt: () => ({ kind: "fill", angleDeg: FILL_ANGLE_DEG, spacingMm: 2.8 }), // 中庸
@@ -113,9 +113,9 @@ const FILL_TABLE: Readonly<Record<FillFamily, () => UnderlayConfig>> = {
 
 function satinFor(family: SatinFamily, widthMm: number): UnderlayConfig {
   const t = SATIN_TABLE[family];
-  // 非有限値 / 負数は 0 にクランプして「最も軽い tier1 (terry のみ tier2)」に倒す。
-  // pullCompForWidth と防御方針を揃え、不正入力が zigzag/重い underlay に
-  // フォールバックして針穴を増やすのを防ぐ。
+  // English note.
+  // English note.
+  // English note.
   const w = Number.isFinite(widthMm) && widthMm > 0 ? widthMm : 0;
   if (w < t.tier1Max) return t.tier1();
   if (w <= t.tier2Max) return t.tier2();
@@ -138,9 +138,9 @@ function underlayPolicyFor(kind: FabricKind): UnderlayPolicy {
 
 const FABRIC_KINDS = Object.keys(FABRIC_BASE_VALUES) as FabricKind[];
 
-// shallow freeze だと profile / underlayPolicy が mutate 可能だったため、
-// FabricProfile 単位と underlayPolicy 単位でも freeze する。Phase 5 で UI から
-// 値を上書きする際は必ず複製経由で行うことを構造的に保証する。
+// English note.
+// English note.
+// English note.
 export const FABRIC_PROFILES: Readonly<Record<FabricKind, FabricProfile>> = Object.freeze(
   Object.fromEntries(
     FABRIC_KINDS.map((kind): [FabricKind, FabricProfile] => [
@@ -154,15 +154,15 @@ export const FABRIC_PROFILES: Readonly<Record<FabricKind, FabricProfile>> = Obje
   ) as Record<FabricKind, FabricProfile>,
 );
 
-/** FabricKind から対応する FabricProfile を返す純ルックアップ。 */
+/** English note. */
 export function getFabricProfile(kind: FabricKind): FabricProfile {
   return FABRIC_PROFILES[kind];
 }
 
 /**
- * satin 幅依存の pull compensation を返す。
+ * English note.
  * 公式: max(profile.minPullCompMm, widthMm * profile.pullCompPerWidth)
- * 負数 / NaN / 非有限値は minPullCompMm にクランプ。
+ * English note.
  */
 export function pullCompForWidth(profile: FabricProfile, widthMm: number): number {
   const w = Number.isFinite(widthMm) && widthMm > 0 ? widthMm : 0;

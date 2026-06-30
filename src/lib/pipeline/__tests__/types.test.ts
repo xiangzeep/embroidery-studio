@@ -9,14 +9,14 @@ import type {
 } from "../types";
 
 describe("ObjectKind", () => {
-  it("ObjectKind は run/satin/fill の 3 値を受理する", () => {
+  it("translated case", () => {
     const kinds = ["run", "satin", "fill"] as const satisfies readonly ObjectKind[];
     expect(kinds).toHaveLength(3);
   });
 });
 
 describe("EmbroideryObject", () => {
-  it("EmbroideryObject (run) は最小フィールドで構築できる", () => {
+  it("translated case", () => {
     const obj = {
       id: "o1",
       kind: "run",
@@ -29,7 +29,7 @@ describe("EmbroideryObject", () => {
     expect(obj.kind).toBe("run");
   });
 
-  it("EmbroideryObject (satin) は angleDeg を含めて構築できる", () => {
+  it("translated case", () => {
     const obj = {
       id: "o2",
       kind: "satin",
@@ -42,7 +42,7 @@ describe("EmbroideryObject", () => {
     expect(obj.props.angleDeg).toBe(0);
   });
 
-  it("EmbroideryObject (fill) は holes を持つ Shape を保持できる", () => {
+  it("translated case", () => {
     const obj = {
       id: "o3",
       kind: "fill",
@@ -60,7 +60,7 @@ describe("EmbroideryObject", () => {
 });
 
 describe("UnderlayConfig", () => {
-  it("UnderlayConfig は none/edge-run/center-run/zigzag/fill の 5 種別を表現できる", () => {
+  it("translated case", () => {
     const u1 = { kind: "none" } satisfies UnderlayConfig;
     const u2 = { kind: "edge-run", insetMm: 0.5, stitchLenMm: 2 } satisfies UnderlayConfig;
     const u3 = { kind: "center-run", stitchLenMm: 2 } satisfies UnderlayConfig;
@@ -73,7 +73,7 @@ describe("UnderlayConfig", () => {
 });
 
 describe("EmbroideryDesign", () => {
-  it("EmbroideryDesign は widthMm/heightMm/fabric/objects フィールドを持つ", () => {
+  it("translated case", () => {
     const fabric: FabricProfile = {
       kind: "denim",
       defaultDensityMm: 0.4,

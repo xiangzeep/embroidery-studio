@@ -29,7 +29,7 @@ describe("offsetPolygon", () => {
     [0, 1],
   ];
 
-  it("5mm 矩形を +0.2mm 外側オフセットすると bbox 幅が約 5.4mm に広がる", () => {
+  it("translated case", () => {
     const out = offsetPolygon(rect5x1, 0.2);
     expect(out).not.toBeNull();
     expect(out!.length).toBeGreaterThan(0);
@@ -39,7 +39,7 @@ describe("offsetPolygon", () => {
     expect(b.minX).toBeCloseTo(-0.2, 1);
   });
 
-  it("5mm 矩形を -0.2mm 内側オフセットすると bbox 幅が約 4.6mm に縮む", () => {
+  it("translated case", () => {
     const out = offsetPolygon(rect5x1, -0.2);
     expect(out).not.toBeNull();
     const b = bbox(out!);
@@ -47,7 +47,7 @@ describe("offsetPolygon", () => {
     expect(b.h).toBeCloseTo(0.6, 1);
   });
 
-  it("5mm 正方形を -3mm 内側オフセットすると空配列を返す (消失)", () => {
+  it("translated case", () => {
     const sq: Polygon = [
       [0, 0],
       [5, 0],
@@ -57,7 +57,7 @@ describe("offsetPolygon", () => {
     expect(offsetPolygon(sq, -3)).toEqual([]);
   });
 
-  it("3 点未満の polygon は null を返す", () => {
+  it("translated case", () => {
     expect(
       offsetPolygon(
         [
@@ -71,7 +71,7 @@ describe("offsetPolygon", () => {
 });
 
 describe("offsetShape", () => {
-  it("outer を +0.2 / hole を -0.2 でオフセットし outer は拡大 hole は縮小", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -96,7 +96,7 @@ describe("offsetShape", () => {
     expect(hb.w).toBeCloseTo(3.6, 1);
   });
 
-  it("outer が消失する内側オフセットでは元 shape の深いコピーを返す (フォールバック)", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -112,7 +112,7 @@ describe("offsetShape", () => {
     expect(r.outer).not.toBe(shape.outer);
   });
 
-  it("hole が消失したら holes 配列から落とすが outer は維持", () => {
+  it("translated case", () => {
     const shape: Shape = {
       outer: [
         [0, 0],
@@ -138,7 +138,7 @@ describe("offsetShape", () => {
 describe("polygonsOverlap", () => {
   const s = (pts: Polygon): Shape => ({ outer: pts, holes: [] });
 
-  it("完全に分離した 2 矩形は false", () => {
+  it("translated case", () => {
     expect(
       polygonsOverlap(
         s([
@@ -157,7 +157,7 @@ describe("polygonsOverlap", () => {
     ).toBe(false);
   });
 
-  it("bbox は接触するが多角形は重ならないケースは false", () => {
+  it("translated case", () => {
     expect(
       polygonsOverlap(
         s([
@@ -174,7 +174,7 @@ describe("polygonsOverlap", () => {
     ).toBe(false);
   });
 
-  it("半分重なる 2 矩形は true", () => {
+  it("translated case", () => {
     expect(
       polygonsOverlap(
         s([
@@ -193,7 +193,7 @@ describe("polygonsOverlap", () => {
     ).toBe(true);
   });
 
-  it("完全に内包される矩形は true", () => {
+  it("translated case", () => {
     expect(
       polygonsOverlap(
         s([

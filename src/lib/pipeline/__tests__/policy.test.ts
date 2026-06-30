@@ -6,7 +6,7 @@ import {
 } from "../policy";
 
 describe("TRIM_POLICY_BY_FORMAT", () => {
-  it("5 フォーマット (dst/pes/jef/exp/vp3) すべてに値が定義されている", () => {
+  it("translated case", () => {
     expect(Object.keys(TRIM_POLICY_BY_FORMAT).sort()).toEqual([
       "dst",
       "exp",
@@ -16,7 +16,7 @@ describe("TRIM_POLICY_BY_FORMAT", () => {
     ]);
   });
 
-  it("計画書 7 のテーブル初期値: trim=8 / jump=5 / travelRun=5", () => {
+  it("translated case", () => {
     const expected: TrimPolicy = {
       trimThresholdMm: 8,
       jumpThresholdMm: 5,
@@ -27,13 +27,13 @@ describe("TRIM_POLICY_BY_FORMAT", () => {
     }
   });
 
-  it("trim > jump の不変条件", () => {
+  it("translated case", () => {
     for (const p of Object.values(TRIM_POLICY_BY_FORMAT)) {
       expect(p.trimThresholdMm).toBeGreaterThan(p.jumpThresholdMm);
     }
   });
 
-  it("travelRun <= jump の不変条件", () => {
+  it("translated case", () => {
     for (const p of Object.values(TRIM_POLICY_BY_FORMAT)) {
       expect(p.travelRunUntilMm).toBeLessThanOrEqual(p.jumpThresholdMm);
     }

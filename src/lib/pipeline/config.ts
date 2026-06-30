@@ -2,61 +2,110 @@ import type { FabricKind } from "./types";
 import { FABRIC_PROFILES } from "./fabric";
 import type { FillStrategy } from "./render";
 
-/** 対応する刺繍機ファイル形式。 */
+/** English note. */
 export type EmbroideryFormat = "dst" | "pes" | "jef" | "exp" | "vp3";
 
-/** fabric によって既定値が変わるフィールド名。 */
+export type QualityPreset = "fast" | "balanced" | "high" | "detail";
+
+export type DigitizingMode = "line-art" | "photo-stitch";
+export type OutlineFontStrategy = "auto" | "prefer-run" | "prefer-satin";
+
+export const QUALITY_PRESETS: Record<QualityPreset, {
+  label: string;
+  maxDimension: number;
+  defaultSmoothing: number;
+  maxColorCount: number;
+}> = {
+  fast: {
+    label: "Fast",
+    maxDimension: 256,
+    defaultSmoothing: 1,
+    maxColorCount: 6,
+  },
+  balanced: {
+    label: "Balanced",
+    maxDimension: 384,
+    defaultSmoothing: 2,
+    maxColorCount: 12,
+  },
+  high: {
+    label: "High",
+    maxDimension: 640,
+    defaultSmoothing: 2,
+    maxColorCount: 16,
+  },
+  detail: {
+    label: "Detail",
+    maxDimension: 768,
+    defaultSmoothing: 1,
+    maxColorCount: 16,
+  },
+};
+
+/** English note. */
 export type FabricOverrideKey = "stitchDensity";
 
 /**
- * UI で扱う変換設定。pipeline のドメインに属するため、UI コンポーネントには
- * 依存しない (compose.ts や config.ts から import するときに循環参照を避ける)。
+ * English note.
+ * English note.
  */
 export type ConversionConfig = {
   format: EmbroideryFormat;
+  digitizingMode: DigitizingMode;
+  outlineFontStrategy: OutlineFontStrategy;
   fabric: FabricKind;
+  qualityPreset: QualityPreset;
   widthMm: number;
   colorCount: number;
   stitchDensity: number;
   satinMaxWidthMm: number;
   /**
-   * 量子化前の色平滑化強度 (0..4)。bilateralFilter のプリセットにマップされ、
-   * 境界を保ったまま中間色を潰すので影色などの細いクラスタが背景に吸われにくくなる。
+   * English note.
+   * English note.
    */
   smoothing: number;
   /**
-   * 各色レイヤーのマスクを何 px 膨張させてからトレースするか (0..3)。
-   * 隣接色レイヤーが互いに重なって pull gap を埋める。
+   * English note.
+   * English note.
    */
   boundaryDilatePx: number;
-  /** 全体の fill 縫い向き (deg)。0=水平、90=垂直。 */
+  /** Minimum traced region area kept for stitch generation, measured in source pixels. */
+  minRegionAreaPx: number;
+  /** Remove near-white shapes connected to the image edge. */
+  removeWhiteBackground: boolean;
+  /** English note. */
   fillAngleDeg: number;
-  /** 色 (colorIndex) ごとの fill 向き override (deg)。 */
+  /** English note. */
   fillAngleByColor: Record<number, number>;
-  /** shape 形状ベースで fill 方向を決めるかどうか。 */
+  /** English note. */
   fillStrategy: FillStrategy;
-  /** ユーザーが明示的に上書きした fabric-driven フィールドの集合。 */
+  /** English note. */
   overrides: Partial<Record<FabricOverrideKey, true>>;
-  /** Phase 2 §3 Underlay 生成をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableUnderlay: boolean;
-  /** Phase 2 §4 Pull Compensation をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableCompensation: boolean;
 };
 
-/** fabric を指定して初期 ConversionConfig を作る。 */
+/** English note. */
 export function makeDefaultConfig(fabric: FabricKind): ConversionConfig {
   return {
     format: "dst",
+    digitizingMode: "line-art",
+    outlineFontStrategy: "auto",
     fabric,
+    qualityPreset: "balanced",
     widthMm: 100,
     colorCount: 6,
     stitchDensity: FABRIC_PROFILES[fabric].defaultDensityMm,
     satinMaxWidthMm: 5,
     smoothing: 2,
     boundaryDilatePx: 1,
+    minRegionAreaPx: 12,
+    removeWhiteBackground: true,
     fillAngleDeg: 45,
     fillAngleByColor: {},
-    fillStrategy: "global-angle",
+    fillStrategy: "shape-long-axis",
     overrides: {},
     disableUnderlay: false,
     disableCompensation: false,
@@ -64,12 +113,12 @@ export function makeDefaultConfig(fabric: FabricKind): ConversionConfig {
 }
 
 /**
- * fabric 切替時に、ユーザーが触っていない fabric-driven フィールドだけを
- * 新しい fabric の既定値に差し替えた config を返す。
- * overrides に key が立っているフィールドは保持される。
+ * English note.
+ * English note.
+ * English note.
  *
- * 何も変わらない場合 (fabric 同一かつ stitchDensity 同一) は同一参照を返し、
- * 不要な再レンダーを抑える。
+ * English note.
+ * English note.
  */
 export function applyFabricDefaults(
   prev: ConversionConfig,
@@ -86,5 +135,18 @@ export function applyFabricDefaults(
     ...prev,
     fabric: nextFabric,
     stitchDensity,
+  };
+}
+
+export function applyQualityPreset(
+  prev: ConversionConfig,
+  preset: QualityPreset,
+): ConversionConfig {
+  const quality = QUALITY_PRESETS[preset];
+  return {
+    ...prev,
+    qualityPreset: preset,
+    colorCount: Math.min(prev.colorCount, quality.maxColorCount),
+    smoothing: quality.defaultSmoothing,
   };
 }

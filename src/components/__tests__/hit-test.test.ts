@@ -32,21 +32,21 @@ function design(objs: EmbroideryObject[]): EmbroideryDesign {
 }
 
 describe("hitTestObject", () => {
-  it("design=null は常に null", () => {
+  it("translated case", () => {
     expect(hitTestObject(null, [5, 5])).toBe(null);
   });
 
-  it("どの object にも含まれない点は null", () => {
+  it("translated case", () => {
     const d = design([makeObj("a", 0, [[0, 0], [10, 0], [10, 10], [0, 10]])]);
     expect(hitTestObject(d, [50, 50])).toBe(null);
   });
 
-  it("単一 object 内の点はその id を返す", () => {
+  it("translated case", () => {
     const d = design([makeObj("a", 0, [[0, 0], [10, 0], [10, 10], [0, 10]])]);
     expect(hitTestObject(d, [5, 5])).toBe("a");
   });
 
-  it("複数 object が重なる点は order が大きい (= 後に縫う = 上) 方を返す", () => {
+  it("translated case", () => {
     const d = design([
       makeObj("under", 0, [[0, 0], [20, 0], [20, 20], [0, 20]]),
       makeObj("over", 5, [[5, 5], [15, 5], [15, 15], [5, 15]]),
@@ -54,7 +54,7 @@ describe("hitTestObject", () => {
     expect(hitTestObject(d, [10, 10])).toBe("over");
   });
 
-  it("重なる領域外の点は下の object を返す", () => {
+  it("translated case", () => {
     const d = design([
       makeObj("under", 0, [[0, 0], [20, 0], [20, 20], [0, 20]]),
       makeObj("over", 5, [[15, 15], [25, 15], [25, 25], [15, 25]]),

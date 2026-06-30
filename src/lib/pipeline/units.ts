@@ -1,6 +1,6 @@
 export const MM_PER_INCH = 25.4;
 
-/** mm → 1/10 mm (pyembroidery の内部単位) */
+/** English note. */
 export function tenthsMm(mm: number): number {
   return Math.round(mm * 10);
 }

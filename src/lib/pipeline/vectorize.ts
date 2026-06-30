@@ -1,6 +1,6 @@
 import type { Point2D, Polygon, Shape } from "./types";
 
-// imagetracerjs は型定義なしの CommonJS パッケージ
+// English note.
 // @ts-expect-error -- no @types provided
 import ImageTracer from "imagetracerjs";
 
@@ -22,9 +22,9 @@ export type VectorizeInput = {
   alphamax?: number;
   opttolerance?: number;
   /**
-   * 各色レイヤーの 2 値マスクをトレース前に何 px 膨張させるか。
-   * 隣接色のレイヤー境界が pull gap で開かないように、互いに重ねるための補正。
-   * 0 で無効、1〜2 が現実的な値。
+   * English note.
+   * English note.
+   * English note.
    */
   dilatePx?: number;
 };
@@ -33,17 +33,17 @@ export type ColorRegion = {
   colorIndex: number;
   rgb: [number, number, number];
   svgPath: string;
-  /** imagetracerjs の <path> 単位で構造化された領域群 (外形 + 穴) */
+  /** English note. */
   shapes: Shape[];
   /**
-   * @deprecated 後方互換のために残す。Phase 2 で消す予定。
-   *   外形・穴をフラットに並べた配列。
+   * English note.
+   * English note.
    */
   polygons: Polygon[];
 };
 
 export interface Tracer {
-  /** マスク画像から path の d 属性文字列を 1 つ以上返す */
+  /** English note. */
   trace(mask: ImageData, opts: TracerOptions): Promise<string[]>;
 }
 
@@ -54,12 +54,12 @@ export type TracerOptions = {
 };
 
 /**
- * imagetracerjs (MIT, pure JS) で 2 値マスクをトレースする。
- * esm-potrace-wasm は WASM heap 固定で大きい画像でメモリ範囲外エラーになるため不採用。
+ * English note.
+ * English note.
  *
- * imagedataToSVG の出力は:
+ * English note.
  *   <path desc="..." fill="rgb(R,G,B)" stroke="..." ... d="M ... Z" />
- * fill 色が黒寄りのパスだけマスク領域として採用する。
+ * English note.
  */
 const defaultTracer: Tracer = {
   async trace(mask, opts) {
@@ -109,10 +109,10 @@ export async function vectorize(
 
     const dList = await tracer.trace(mask, { turdsize, alphamax, opttolerance });
 
-    // imagetracerjs は「外形 + 直接の穴」を 1 つの <path> にまとめ、
-    // 穴の中の島はさらに別の <path> として独立出力する仕様。
-    // そのため per-color レイヤー全体のサブパスを集めて深さで再分類する必要がある:
-    //   深さ 0/2/... = 塗る領域 (outer)、深さ 1/3/... = 穴 (hole)。
+    // English note.
+    // English note.
+    // English note.
+    // English note.
     const allSubs: Polygon[] = [];
     for (const d of dList) {
       const subs = parsePathD(d);
@@ -138,7 +138,7 @@ export async function vectorize(
   return regions;
 }
 
-/** 符号付き面積（>0: CCW, <0: CW, 0: 退化）。 */
+/** English note. */
 export function signedArea(poly: Polygon): number {
   let a = 0;
   for (let i = 0, n = poly.length; i < n; i++) {
@@ -149,7 +149,7 @@ export function signedArea(poly: Polygon): number {
   return a / 2;
 }
 
-/** 点 p がポリゴン内にあるか（even-odd / ray casting）。 */
+/** English note. */
 export function pointInPolygon(p: Point2D, poly: Polygon): boolean {
   const [x, y] = p;
   let inside = false;
@@ -164,20 +164,20 @@ export function pointInPolygon(p: Point2D, poly: Polygon): boolean {
   return inside;
 }
 
-/** A が B に完全に内包されるか（代表点で判定）。 */
+/** English note. */
 function isInside(inner: Polygon, outer: Polygon): boolean {
   if (inner.length === 0) return false;
   return pointInPolygon(inner[0], outer);
 }
 
-/** Shape の全ての穴が外形に内包されているか。 */
+/** English note. */
 export function holesAreInsideOuter(shape: Shape): boolean {
   return shape.holes.every((h) => isInside(h, shape.outer));
 }
 
 /**
- * 包含グラフを構築し、深さ偶数を outer・奇数を直近 outer の hole として再構成。
- * 想定: 1 つの <path> 内に複数の連結成分があるケース、または出力規約が崩れた異常系。
+ * English note.
+ * English note.
  */
 export function buildShapesByContainment(subs: Polygon[]): Shape[] {
   const n = subs.length;
@@ -214,7 +214,7 @@ export function buildShapesByContainment(subs: Polygon[]): Shape[] {
       const p = parent[i];
       const shapeIdx = outerIdx.indexOf(p);
       if (shapeIdx >= 0) shapes[shapeIdx].holes.push(subs[i]);
-      // shapeIdx < 0 はあり得ない構造（孤立 hole）。捨てる。
+      // English note.
     }
   }
   return shapes;
@@ -244,8 +244,8 @@ function buildMask(
 }
 
 /**
- * RGBA マスクの前景 (R=0) を 4-neighbor で `iterations` 回膨張させる。
- * imagetracerjs に渡す直前の補正なので、隣接色レイヤーが pull gap で開くのを防ぐ。
+ * English note.
+ * English note.
  */
 export function dilateForegroundMask(
   data: Uint8ClampedArray,
@@ -289,7 +289,7 @@ export function dilateForegroundMask(
 
 const BEZIER_SAMPLES = 8;
 
-/** SVG path d 属性をパースして閉ポリゴン群を返す。Bezier は8分割で線形近似。 */
+/** English note. */
 export function parsePathD(d: string): Polygon[] {
   const polygons: Polygon[] = [];
   let current: Polygon = [];

@@ -1,13 +1,13 @@
-// node-hit-test.ts — Phase 5 PR23 ノード編集 (パス編集) 純ロジック。
+// English note.
 //
-// 編集座標は **mm 単位**。polygon は EmbroideryObject.shape.outer。
-// 結果は immutable (入力 polygon は破壊しない、新配列を返す)。
+// English note.
+// English note.
 
 import type { Point2D, Polygon } from "@/lib/pipeline/types";
 
 /**
- * クリック座標 (mm) に最も近い頂点 index を返す。指定半径外なら null。
- * 複数頂点が近接する場合は最初に見つかった最小距離を採用。
+ * English note.
+ * English note.
  */
 export function pickVertex(
   outer: Polygon,
@@ -28,9 +28,9 @@ export function pickVertex(
 }
 
 /**
- * クリック座標 (mm) に最も近い「辺の中点」index を返す。
- * index は **辺の始点 index** = outer[i] と outer[(i+1)%n] を結ぶ辺。
- * 指定半径外なら null。
+ * English note.
+ * English note.
+ * English note.
  */
 export function pickEdgeMidpoint(
   outer: Polygon,
@@ -56,8 +56,8 @@ export function pickEdgeMidpoint(
 }
 
 /**
- * edgeIndex の辺の中点に新頂点を挿入した polygon (immutable)。
- * edgeIndex は [0, outer.length - 1] の範囲。範囲外なら入力を返す (no-op)。
+ * English note.
+ * English note.
  */
 export function insertVertexAt(outer: Polygon, edgeIndex: number): Polygon {
   if (outer.length < 2) return outer.slice();
@@ -72,9 +72,9 @@ export function insertVertexAt(outer: Polygon, edgeIndex: number): Polygon {
 }
 
 /**
- * vertexIndex を削除した polygon (immutable)。
- * 結果が頂点数 3 未満になる場合は null (削除拒否)。
- * 範囲外 vertexIndex は null。
+ * English note.
+ * English note.
+ * English note.
  */
 export function removeVertexAt(
   outer: Polygon,
@@ -88,8 +88,8 @@ export function removeVertexAt(
 }
 
 /**
- * vertexIndex の頂点を新座標 pt に移動した polygon (immutable)。
- * 範囲外 index は入力を返す (no-op)。
+ * English note.
+ * English note.
  */
 export function moveVertexTo(
   outer: Polygon,

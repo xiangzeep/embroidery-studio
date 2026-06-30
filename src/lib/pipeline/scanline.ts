@@ -1,16 +1,16 @@
-// scanline.ts — multi-ring polyline / scanline 交点計算ユーティリティ。
-// render.ts と underlay.ts の両方から参照されるため、両者から独立した下層モジュールに置く
-// (PR12 で render → underlay の依存が入っても循環を避けるための配置)。
+// English note.
+// English note.
+// English note.
 
 import type { Point2D, Polygon } from "./types";
 
 /**
- * 複数リング (outer + holes 等) と、点 `(ox, oy)` を通り方向 `dir` の直線との交点を、
- * その直線上の符号付き距離として返す。
+ * English note.
+ * English note.
  *
- * even-odd 塗りでは、外形と穴の交点を全部集めてソート→ペア化で穴抜き塗りになる。
+ * English note.
  *
- * 戻り値: 各交点までの距離 (`dir` 上で符号付き)。`dir` は単位ベクトルである必要がある。
+ * English note.
  */
 export function intersectScanline(
   rings: Polygon[],

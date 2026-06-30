@@ -1,89 +1,82 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { StitchPattern } from "@/lib/pipeline/types";
+import {
+  buildThreadSegments,
+  getOrthographicView,
+  PREVIEW_3D_FABRIC_HEX,
+  PREVIEW_3D_SCENE_BACKGROUND_HEX,
+  rgbToHex,
+  type ThreadSegment,
+} from "./stitch-preview-3d-helpers";
 
 type Props = { pattern: StitchPattern };
 
 export function StitchPreview3D({ pattern }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
     const el = mountRef.current;
     if (!el) return;
+    setPreviewError(null);
     const w = el.clientWidth || 600;
     const h = el.clientHeight || 480;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf5f3ef);
+    scene.background = new THREE.Color(PREVIEW_3D_SCENE_BACKGROUND_HEX);
 
-    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
-    const distance = Math.max(pattern.widthMm, pattern.heightMm) * 1.4;
-    camera.position.set(0, -distance * 0.6, distance);
+    const view = getOrthographicView(pattern.widthMm, pattern.heightMm, w / h);
+    const camera = new THREE.OrthographicCamera(
+      -view.width / 2,
+      view.width / 2,
+      view.height / 2,
+      -view.height / 2,
+      0.1,
+      5000,
+    );
+    const distance = Math.max(pattern.widthMm, pattern.heightMm, 1) * 2.2;
+    camera.position.set(0, -distance * 0.18, distance);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch {
+      setPreviewError("3D preview is unavailable on this device or browser.");
+      return;
+    }
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NoToneMapping;
     renderer.setSize(w, h);
     renderer.setPixelRatio(window.devicePixelRatio);
     el.appendChild(renderer.domElement);
 
     const fabric = new THREE.Mesh(
-      new THREE.PlaneGeometry(pattern.widthMm * 1.2, pattern.heightMm * 1.2),
-      new THREE.MeshStandardMaterial({
-        color: 0xeeeae0,
-        roughness: 0.95,
-        metalness: 0.0,
+      new THREE.PlaneGeometry(pattern.widthMm * 1.12, pattern.heightMm * 1.12),
+      new THREE.MeshBasicMaterial({
+        color: PREVIEW_3D_FABRIC_HEX,
+        side: THREE.DoubleSide,
       }),
     );
     scene.add(fabric);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
-    dirLight.position.set(40, 40, 80);
-    scene.add(dirLight);
-    scene.add(new THREE.AmbientLight(0xffffff, 0.45));
-
     const meshes: THREE.Mesh[] = [];
-
-    const flushTube = (pts: THREE.Vector3[], rgb: [number, number, number]) => {
-      if (pts.length < 2) {
-        pts.length = 0;
-        return;
-      }
-      try {
-        const curve = new THREE.CatmullRomCurve3(pts.slice(), false, "centripetal");
-        const segments = Math.min(pts.length * 4, 4000);
-        const geom = new THREE.TubeGeometry(curve, segments, 0.22, 6, false);
-        const mat = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255),
-          roughness: 0.55,
-          metalness: 0.0,
-        });
-        const mesh = new THREE.Mesh(geom, mat);
-        scene.add(mesh);
-        meshes.push(mesh);
-      } catch (e) {
-        console.warn("TubeGeometry skipped", e);
-      }
-      pts.length = 0;
-    };
-
-    for (const block of pattern.blocks) {
-      const pts: THREE.Vector3[] = [];
-      for (const s of block.stitches) {
-        if (s.kind === "jump" || s.kind === "trim" || s.kind === "stop") {
-          flushTube(pts, block.rgb);
-          continue;
-        }
-        pts.push(
-          new THREE.Vector3(
-            s.x - pattern.widthMm / 2,
-            -(s.y - pattern.heightMm / 2),
-            0.35,
-          ),
-        );
-      }
-      flushTube(pts, block.rgb);
+    const segmentsByColor = groupSegmentsByColor(buildThreadSegments(pattern));
+    let colorLayer = 0;
+    for (const [key, segments] of segmentsByColor) {
+      const rgb = key.split(",").map(Number) as [number, number, number];
+      const geom = buildRibbonGeometry(segments, 0.38, 0.38 + colorLayer * 0.012);
+      const mat = new THREE.MeshBasicMaterial({
+        color: rgbToHex(rgb),
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      scene.add(mesh);
+      meshes.push(mesh);
+      colorLayer += 1;
     }
 
     let raf = 0;
@@ -132,7 +125,11 @@ export function StitchPreview3D({ pattern }: Props) {
       const nw = el.clientWidth || 600;
       const nh = el.clientHeight || 480;
       renderer.setSize(nw, nh);
-      camera.aspect = nw / nh;
+      const nextView = getOrthographicView(pattern.widthMm, pattern.heightMm, nw / nh);
+      camera.left = -nextView.width / 2;
+      camera.right = nextView.width / 2;
+      camera.top = nextView.height / 2;
+      camera.bottom = -nextView.height / 2;
       camera.updateProjectionMatrix();
     };
     const ro = new ResizeObserver(onResize);
@@ -158,5 +155,72 @@ export function StitchPreview3D({ pattern }: Props) {
     };
   }, [pattern]);
 
-  return <div ref={mountRef} className="size-full min-h-[400px]" />;
+  return (
+    <div className="size-full min-h-[400px]">
+      {previewError ? (
+        <div className="flex size-full min-h-[400px] items-center justify-center rounded-xl border border-neutral-200 bg-[#f5f3ef] px-6 text-center text-sm text-neutral-600">
+          {previewError}
+        </div>
+      ) : (
+        <div ref={mountRef} className="size-full min-h-[400px]" />
+      )}
+    </div>
+  );
+}
+
+function groupSegmentsByColor(segments: ThreadSegment[]): Map<string, ThreadSegment[]> {
+  const grouped = new Map<string, ThreadSegment[]>();
+  for (const segment of segments) {
+    const key = segment.rgb.join(",");
+    const existing = grouped.get(key);
+    if (existing) existing.push(segment);
+    else grouped.set(key, [segment]);
+  }
+  return grouped;
+}
+
+function buildRibbonGeometry(
+  segments: ThreadSegment[],
+  widthMm: number,
+  zMm: number,
+): THREE.BufferGeometry {
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  const normals: number[] = [];
+  const halfWidth = widthMm / 2;
+
+  for (const segment of segments) {
+    const dx = segment.to.x - segment.from.x;
+    const dy = segment.to.y - segment.from.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.01) continue;
+
+    const px = (-dy / len) * halfWidth;
+    const py = (dx / len) * halfWidth;
+    const base = vertices.length / 3;
+
+    vertices.push(
+      segment.from.x - px,
+      segment.from.y - py,
+      zMm,
+      segment.from.x + px,
+      segment.from.y + py,
+      zMm,
+      segment.to.x + px,
+      segment.to.y + py,
+      zMm,
+      segment.to.x - px,
+      segment.to.y - py,
+      zMm,
+    );
+    normals.push(0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
+  geometry.computeBoundingSphere();
+  return geometry;
 }

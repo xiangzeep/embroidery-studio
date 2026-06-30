@@ -21,7 +21,7 @@ function makeDesign(width: number): EmbroideryDesign {
 }
 
 describe("createHistory", () => {
-  it("past/future が空で current=initial", () => {
+  it("translated case", () => {
     const h = createHistory(makeDesign(10));
     expect(h.past).toEqual([]);
     expect(h.future).toEqual([]);
@@ -30,7 +30,7 @@ describe("createHistory", () => {
 });
 
 describe("pushHistory", () => {
-  it("旧 current を past 末尾に積み、新 design を current に置く", () => {
+  it("translated case", () => {
     let h = createHistory(makeDesign(10));
     h = pushHistory(h, makeDesign(20));
     expect(h.past.length).toBe(1);
@@ -38,7 +38,7 @@ describe("pushHistory", () => {
     expect(h.current.widthMm).toBe(20);
   });
 
-  it("future は push でクリア", () => {
+  it("translated case", () => {
     let h = createHistory(makeDesign(10));
     h = pushHistory(h, makeDesign(20));
     h = undo(h);
@@ -48,18 +48,18 @@ describe("pushHistory", () => {
     expect(h.future).toEqual([]);
   });
 
-  it("MAX_HISTORY 超過で past 先頭から捨てる", () => {
+  it("translated case", () => {
     let h = createHistory(makeDesign(0));
     for (let i = 1; i <= MAX_HISTORY + 3; i++) {
       h = pushHistory(h, makeDesign(i));
     }
     expect(h.past.length).toBe(MAX_HISTORY);
-    // 先頭から捨てているので past[0] は古いはずだが残っているのは少なくとも 3 以降
+    // English note.
     expect(h.past[0].widthMm).toBe(3);
     expect(h.current.widthMm).toBe(MAX_HISTORY + 3);
   });
 
-  it("入力 History を破壊しない", () => {
+  it("translated case", () => {
     const h0 = createHistory(makeDesign(10));
     const h1 = pushHistory(h0, makeDesign(20));
     expect(h0.past).toEqual([]);
@@ -69,7 +69,7 @@ describe("pushHistory", () => {
 });
 
 describe("undo / redo", () => {
-  it("undo は past 末尾を current に戻し future 先頭に旧 current を積む", () => {
+  it("translated case", () => {
     let h = createHistory(makeDesign(10));
     h = pushHistory(h, makeDesign(20));
     h = pushHistory(h, makeDesign(30));
@@ -79,7 +79,7 @@ describe("undo / redo", () => {
     expect(h.future[0].widthMm).toBe(30);
   });
 
-  it("redo は future 先頭を current に進め past 末尾に旧 current を積む", () => {
+  it("translated case", () => {
     let h = createHistory(makeDesign(10));
     h = pushHistory(h, makeDesign(20));
     h = undo(h);
@@ -89,12 +89,12 @@ describe("undo / redo", () => {
     expect(h.future).toEqual([]);
   });
 
-  it("past 空での undo は不変", () => {
+  it("translated case", () => {
     const h = createHistory(makeDesign(10));
-    expect(undo(h)).toBe(h); // 同一参照
+    expect(undo(h)).toBe(h); // same reference
   });
 
-  it("future 空での redo は不変", () => {
+  it("translated case", () => {
     const h = createHistory(makeDesign(10));
     expect(redo(h)).toBe(h);
   });

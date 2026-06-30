@@ -1,13 +1,13 @@
-// Phase 2 計画書 §3-§5 で利用する polygon ブール演算 / オフセットの clipper-lib ラッパ。
-// clipper-lib は整数座標で動くため、mm → 1/1000mm にスケールして渡し、戻り値で逆変換する。
-// 53bit safe integer (~9e15) に対し、200mm × 1000 = 2e5 → スケール後の積でも安全。
+// English note.
+// English note.
+// English note.
 
 import ClipperLib, { type IntPoint, type Path, type Paths } from "clipper-lib";
 import type { Point2D, Polygon, Shape } from "./types";
 
 const DEFAULT_SCALE = 1000; // 1 mm = 1000 clipper unit (1µm 精度)
 const DEFAULT_MITER_LIMIT = 2;
-const DEFAULT_ARC_TOLERANCE = 0.25; // clipper 単位、square/miter join では未使用
+const DEFAULT_ARC_TOLERANCE = 0.25; // English note.
 
 const JOIN_TYPE_MAP = {
   miter: ClipperLib.JoinType.jtMiter,
@@ -21,12 +21,12 @@ export type OffsetOpts = {
 };
 
 /**
- * 単一 polygon を `deltaMm` だけオフセットする。
+ * English note.
  *
- * - delta > 0: 外側に拡大
- * - delta < 0: 内側に縮小。結果が消失したら空配列を返す
- * - 入力が 3 点未満、または clipper が例外を投げた場合は `null` を返す
- * - 戻り値は複数 polygon になり得る (鋭角での自己交差解消などで分裂する場合)
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export function offsetPolygon(
   polygon: Polygon,
@@ -51,13 +51,13 @@ export function offsetPolygon(
 }
 
 /**
- * Shape (outer + holes) を一括オフセットする。
+ * English note.
  *
- * - `outerDeltaMm`: outer ring に適用 (正で拡大、負で縮小)
- * - `holeDeltaMm`: 各 hole ring に適用 (正で穴を拡大、負で縮小)
- * - outer 消失時は元 shape を **そのまま参照同一返却** (フォールバック)
- * - outer が分裂した場合は最大面積のもの 1 つだけを採用 (Phase 2 ではシンプル化)
- * - 結果が消失した hole は holes 配列から落とす
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export function offsetShape(
   shape: Shape,
@@ -81,9 +81,9 @@ export function offsetShape(
 }
 
 /**
- * 2 shape の outer ring が重なるかを返す。
- * bbox 先行判定で確実に非重なりを除外し、残りは clipper の Intersection で確認する。
- * `holes` は無視する (Phase 2 では outer 同士の重なり判定で十分)。
+ * English note.
+ * English note.
+ * English note.
  */
 export function polygonsOverlap(a: Shape, b: Shape): boolean {
   if (a.outer.length < 3 || b.outer.length < 3) return false;

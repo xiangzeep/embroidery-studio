@@ -14,7 +14,7 @@ export default function Home() {
                 Embroidery Studio
               </h1>
               <p className="text-xs text-muted-foreground">
-                画像から刺繍ミシン用データを生成・プレビュー
+                Generate and preview embroidery machine data from images
               </p>
             </div>
           </div>

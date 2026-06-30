@@ -12,7 +12,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // OpenCV.js は postinstall でコピーした 10MB の WASM ラッパー、lint 対象外
+    // English note.
     "public/opencv.js",
     "public/*.worker.js",
   ]),

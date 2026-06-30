@@ -14,11 +14,16 @@ import { buildObjects } from "./build-objects";
 import { applyPullCompensation } from "./compensation";
 import { emitTieIn, emitTieOff } from "./lockstitch";
 import { intersectScanline } from "./scanline";
-import { tatamiBrick } from "./fill";
+import { routeFillSegmentsSafely, tatamiBrick } from "./fill";
 import { medialAxisRun } from "./run";
-import { brickSplit, extractRails, renderSatin2Rail } from "./satin";
+import { beanStitchPolyline } from "./bean-stitch";
+import { renderCurvedStrokeSatin } from "./curved-satin";
+import { brickSplit, estimateSatinWidthStats, extractRails, renderSatin2Rail } from "./satin";
 import { generateUnderlayStitches } from "./underlay";
 import type { TrimPolicy } from "./policy";
+import { isSafeTravelBetweenObjects } from "./safe-travel";
+import type { DigitizingMode, OutlineFontStrategy } from "./config";
+import { photoRandomFill } from "./fill";
 
 export type { TrimPolicy } from "./policy";
 
@@ -27,12 +32,20 @@ const SATIN_MIN_ASPECT_RATIO = 4;
 const DEFAULT_MAX_STITCH_MM = 7;
 const DEFAULT_TRIM_THRESHOLD_MM = 8;
 const DEFAULT_RUN_MAX_WIDTH_MM = 0.6;
+const DEFAULT_THIN_RUN_STITCH_MM = 1.4;
+const DEFAULT_THIN_RUN_STITCH_MULTIPLIER = 3.5;
+const MAX_THIN_RUN_STITCH_MM = 2.2;
+const DEFAULT_BEAN_RUN_STITCH_MM = 1.0;
+const DEFAULT_BEAN_RUN_STITCH_MULTIPLIER = 2.5;
+const MAX_BEAN_RUN_STITCH_MM = 1.6;
 const DEFAULT_FILL_ANGLE_DEG = 45;
 const DEFAULT_SHAPE_STRATEGY_MIN_ASPECT = 1.5;
 
 export type StitchInput = {
   regions: ColorRegion[];
-  /** 生地プロファイル。density・underlay・pull comp の派生元として buildObjects / renderDesign に流す。 */
+  digitizingMode?: DigitizingMode;
+  outlineFontStrategy?: OutlineFontStrategy;
+  /** English note. */
   fabric: FabricProfile;
   widthMm: number;
   heightMm: number;
@@ -42,35 +55,35 @@ export type StitchInput = {
   satinMaxWidthMm: number;
   runMaxWidthMm?: number;
   maxStitchMm?: number;
-  /** この距離より長い jump の前に trim (糸切り) を挿入する。PES/JEF/EXP/VP3 で渡り糸を切るのに使う。 */
+  /** English note. */
   trimThresholdMm?: number;
-  /** 全体の fill 角度 (deg)。0 で水平、90 で垂直。 */
+  /** English note. */
   fillAngleDeg?: number;
   /**
-   * 色 (colorIndex) ごとの fill 角度 override (deg)。
-   * 指定があれば `fillStrategy` / `fillAngleDeg` より優先される。
-   * 文字色・キャラ色など、絵柄パーツごとに縫い方向を変えたいときに使う。
+   * English note.
+   * English note.
+   * English note.
    */
   fillAngleByColorIndex?: Record<number, number>;
   /**
-   * shape 形状に基づいた fill 方向の決め方。
-   * - `global-angle`: 全 shape を `fillAngleDeg` で塗る (デフォルト)
-   * - `shape-long-axis`: 各 shape の PCA 長軸に沿って塗る
-   * - `shape-cross-axis`: 長軸に直交して塗る (satin と同じ感覚)
-   * 等方形 (aspectRatio < `shapeStrategyMinAspect`) の shape は不安定なので
-   * `fillAngleDeg` にフォールバックする。
+   * English note.
+   * English note.
+   * English note.
+   * English note.
+   * English note.
+   * English note.
    */
   fillStrategy?: FillStrategy;
   /**
-   * `shape-long-axis` / `shape-cross-axis` で PCA 方向を採用する最小アスペクト比。
-   * デフォルト 1.5。これより低い shape は `fillAngleDeg` にフォールバック。
+   * English note.
+   * English note.
    */
   shapeStrategyMinAspect?: number;
-  /** Phase 2 §3 Underlay 生成をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableUnderlay?: boolean;
-  /** Phase 2 §4 Pull Compensation をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableCompensation?: boolean;
-  /** Phase 2 §6 Lockstitch (tie-in/off) をスキップ (デバッグ / Phase 1 互換用、UI 非露出)。 */
+  /** English note. */
   disableLockstitch?: boolean;
 };
 
@@ -80,17 +93,19 @@ export type FillStrategy =
   | "shape-cross-axis";
 
 /**
- * 既存 `StitchInput` のうち renderer が必要とする「描画パラメータ」だけを残した型。
- * Phase 1 PR4 時点では `StitchInput` とほぼ等価。
- * Phase 1 PR6-8 で `ObjectProps` / `FabricProfile` ベースに置き換える予定。
+ * English note.
+ * English note.
+ * English note.
  *
- * renderer の入力 obj は既に mm 座標 (shape は scaleShape 済み) なので px→mm 換算は不要。
- * よって height 系の px 値は持たない (heightMm は出力 StitchPattern に残すため保持)。
+ * English note.
+ * English note.
  */
 export type RenderOptions = {
   widthMm: number;
   heightMm: number;
   widthPx: number;
+  digitizingMode?: DigitizingMode;
+  outlineFontStrategy?: OutlineFontStrategy;
   stitchDensityMm: number;
   satinMaxWidthMm: number;
   runMaxWidthMm?: number;
@@ -100,29 +115,30 @@ export type RenderOptions = {
   fillAngleByColorIndex?: Record<number, number>;
   fillStrategy?: FillStrategy;
   shapeStrategyMinAspect?: number;
-  /** Phase 2 §4 Pull Compensation を適用する fabric profile。未指定なら無効。 */
+  /** English note. */
   fabric?: FabricProfile;
-  /** Phase 2 §3 Underlay 生成をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableUnderlay?: boolean;
-  /** Phase 2 §4 Pull Compensation をスキップ (デバッグ / Phase 1 互換用)。 */
+  /** English note. */
   disableCompensation?: boolean;
-  /** Phase 2 §6 Lockstitch (tie-in/off) をスキップ (デバッグ / Phase 1 互換用、UI 非露出)。 */
+  /** English note. */
   disableLockstitch?: boolean;
-  /** Phase 4 §3-4 2-rail satin + brick auto-split を無効化 (デバッグ / Phase 1-3 互換用)。
-   *  true のとき renderSatinTopOnly は旧 satinStitches (PCA 単一長軸) 経路に戻る。 */
+  /**
+    */
   disableAutoSplit?: boolean;
-  /** Phase 4 §6 medial-axis run (Zhang-Suen) を無効化 (デバッグ / Phase 1-3 互換用)。
-   *  true のとき renderRunTopOnly は shape.outer をそのまま resample する。 */
+  /**
+    */
   disableMedialAxis?: boolean;
-  /** Phase 3 §7 distance-based routing (travel-run/jump/trim+jump)。未指定なら Phase 1/2 互換 (常に trim+jump)。 */
+  /** English note. */
   policy?: TrimPolicy;
-  /** renderDesign 内で per-object に注入される (renderer 側でのみ参照)。tie-in を抑制する travel-run 連結時用。 */
+  /** English note. */
   suppressTieIn?: boolean;
-  /** renderDesign 内で per-object に注入される。tie-off を抑制する travel-run 連結時用。 */
+  /** English note. */
   suppressTieOff?: boolean;
+  preferredEntry?: Point;
 };
 
-/** 1 オブジェクトを描画するための文脈。 */
+/** English note. */
 export type RenderContext = {
   opts: RenderOptions;
 };
@@ -131,9 +147,9 @@ type Point = [number, number];
 type Polygon = Point[];
 
 /**
- * 1 つの kind="run" オブジェクトを描画して Stitch 配列を返す。
- * `RenderOptions.disable*` フラグに応じて compensation / underlay / lockstitch を合成する。
- * Phase 2 §4.5 順序: underlay は元 shape、top は補正後 shape に対して計算する。
+ * English note.
+ * English note.
+ * English note.
  */
 export function renderRun(
   obj: EmbroideryObject,
@@ -145,8 +161,8 @@ export function renderRun(
 }
 
 /**
- * 1 つの kind="satin" オブジェクトを描画して Stitch 配列を返す。
- * `RenderOptions.disable*` フラグに応じて compensation / underlay / lockstitch を合成する。
+ * English note.
+ * English note.
  */
 export function renderSatin(
   obj: EmbroideryObject,
@@ -158,8 +174,8 @@ export function renderSatin(
 }
 
 /**
- * 1 つの kind="fill" オブジェクトを描画して Stitch 配列を返す。
- * `RenderOptions.disable*` フラグに応じて compensation / underlay / lockstitch を合成する。
+ * English note.
+ * English note.
  */
 export function renderFill(
   obj: EmbroideryObject,
@@ -179,18 +195,26 @@ function renderRunTopOnly(
     rgb: obj.rgb,
     stitches: [],
   };
-  // Phase 4 PR19: medial-axis を優先。退化 shape (面積過小 / 細すぎる) で
-  // 空配列が返ったときは外形 resample にフォールバック (Phase 1-3 互換)。
+  // English note.
+  // English note.
+  const runStitchLenMm = resolveRunStitchLength(obj, ctx);
   let pts: Point[] = ctx.opts.disableMedialAxis
     ? []
-    : medialAxisRun(obj.shape, ctx.opts.stitchDensityMm);
+    : medialAxisRun(obj.shape, runStitchLenMm);
   if (pts.length === 0) {
     pts = resamplePolyline(
       obj.shape.outer as Polygon,
-      ctx.opts.stitchDensityMm,
+      runStitchLenMm,
     );
   }
   if (pts.length === 0) return block.stitches;
+  pts = orientPolylineToPreferredEntry(pts, ctx.opts.preferredEntry);
+  if (obj.strokeKind === "bean-run") {
+    pts = beanStitchPolyline(
+      pts,
+      ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM,
+    );
+  }
   appendStitchesWithJumps(
     block,
     pts,
@@ -201,6 +225,55 @@ function renderRunTopOnly(
     true,
   );
   return block.stitches;
+}
+
+function resolveRunStitchLength(
+  obj: EmbroideryObject,
+  ctx: RenderContext,
+): number {
+  const base = ctx.opts.stitchDensityMm;
+  if (obj.strokeKind === "thin-run") {
+    return clampRunStitchLength(
+      Math.max(base * DEFAULT_THIN_RUN_STITCH_MULTIPLIER, DEFAULT_THIN_RUN_STITCH_MM),
+      obj.props.maxStitchMm ?? DEFAULT_MAX_STITCH_MM,
+      MAX_THIN_RUN_STITCH_MM,
+    );
+  }
+  if (obj.strokeKind === "bean-run") {
+    return clampRunStitchLength(
+      Math.max(base * DEFAULT_BEAN_RUN_STITCH_MULTIPLIER, DEFAULT_BEAN_RUN_STITCH_MM),
+      obj.props.maxStitchMm ?? DEFAULT_MAX_STITCH_MM,
+      MAX_BEAN_RUN_STITCH_MM,
+    );
+  }
+  return base;
+}
+
+function clampRunStitchLength(
+  stitchLenMm: number,
+  maxStitchMm: number,
+  modeCapMm: number,
+): number {
+  return Math.min(Math.max(stitchLenMm, 0.1), Math.min(maxStitchMm, modeCapMm));
+}
+
+function orientPolylineToPreferredEntry(
+  pts: Point[],
+  preferredEntry: Point | undefined,
+): Point[] {
+  if (!preferredEntry || pts.length < 2) return pts;
+  let bestIndex = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const pt = pts[i];
+    const d = distance(pt[0], pt[1], preferredEntry[0], preferredEntry[1]);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIndex = i;
+    }
+  }
+  if (bestIndex === 0) return pts;
+  return pts.slice(bestIndex).concat(pts.slice(0, bestIndex));
 }
 
 function renderSatinTopOnly(
@@ -218,12 +291,29 @@ function renderSatinTopOnly(
 
   let pts: Point[];
   if (ctx.opts.disableAutoSplit) {
-    // 互換経路: Phase 1-3 と完全一致の satinStitches (PCA 単一長軸)
+    // English note.
     const { longAxis, center } = analyzeShape(outer);
     pts = satinStitches(outer, ctx.opts.stitchDensityMm, longAxis, center);
+  } else if (obj.strokeKind === "narrow-satin") {
+    pts = renderCurvedStrokeSatin(
+      obj.shape,
+      ctx.opts.stitchDensityMm,
+      maxStitchMm,
+      ctx.opts.preferredEntry,
+    );
+    if (pts.length === 0) {
+      return renderRunTopOnly(
+        { ...obj, kind: "run", strokeKind: "thin-run" },
+        ctx,
+      );
+    }
   } else {
-    // 新経路 (Phase 4): 2-rail satin + brick auto-split
+    // Current satin flow: 2-rail satin plus brick auto-split.
     const rails = extractRails(obj.shape);
+    const widthStats = estimateSatinWidthStats(rails);
+    if (widthStats.maxWidthMm > ctx.opts.satinMaxWidthMm) {
+      return renderFillTopOnly(obj, ctx);
+    }
     const zigzag = renderSatin2Rail(rails, ctx.opts.stitchDensityMm, maxStitchMm);
     pts = applyBrickSplit(zigzag, maxStitchMm);
   }
@@ -242,9 +332,9 @@ function renderSatinTopOnly(
 }
 
 /**
- * renderSatin2Rail のジグザグ出力を 2 点ペアに区切り、ペアごとに brickSplit
- * を適用して中間点を挿入した 1 本の Point[] に flatten する。
- * 隣接ペアで端点が重複する場合は除去する。
+ * English note.
+ * English note.
+ * English note.
  */
 function applyBrickSplit(zigzag: Point[], maxStitchMm: number): Point[] {
   const out: Point[] = [];
@@ -294,31 +384,37 @@ function renderFillTopOnly(
     shapeAngleDeg,
     maxStitchMm,
   );
+  const photoSegments = photoRandomFill(
+    obj.shape,
+    ctx.opts.stitchDensityMm,
+    shapeAngleDeg,
+    maxStitchMm,
+    obj.order + obj.colorIndex * 101 + 17,
+  );
+  const routedSegments = ctx.opts.digitizingMode === "photo-stitch"
+    ? photoSegments
+    : segments;
   const trimThresholdMm =
     ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
-  for (const seg of segments) {
-    if (seg.length === 0) continue;
-    appendStitchesWithJumps(
-      block,
-      seg,
-      "fill",
-      obj.colorIndex,
-      maxStitchMm,
-      trimThresholdMm,
-      true,
-    );
-  }
+  block.stitches.push(...routeFillSegmentsSafely({
+    shape: obj.shape,
+    segments: routedSegments,
+    colorIndex: obj.colorIndex,
+    kind: "fill",
+    maxStitchMm,
+    trimThresholdMm,
+  }));
   return block.stitches;
 }
 
 /**
- * top-only renderer の戻り値に underlay と tie-in/off を合成する。
+ * English note.
  *
- * `RenderOptions.disableUnderlay` / `disableLockstitch` が true なら該当部分をスキップ。
- * - underlay 計算は **元 shape** (補正前) で行う (§4.5)
- * - tie-in/off は color 内 travel run で繋がっている場合は将来抑制可能 (Phase 3 fork point)
+ * English note.
+ * English note.
+ * English note.
  *
- * 戻り値順序: `[tie-in, ...underlay, ...top, tie-off]` (各 disableXxx で個別除外)。
+ * English note.
  */
 function assembleWithUnderlayAndLockstitch(
   obj: EmbroideryObject,
@@ -329,12 +425,14 @@ function assembleWithUnderlayAndLockstitch(
   const underlay = ctx.opts.disableUnderlay
     ? []
     : generateUnderlayStitches(obj);
-  if (ctx.opts.disableLockstitch) {
-    return [...underlay, ...top];
+  const maxStitchMm = ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM;
+  const trimThresholdMm = ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
+  if (ctx.opts.disableLockstitch || obj.props.lockstitch === false) {
+    return joinStitchSections([underlay, top], obj.colorIndex, maxStitchMm, trimThresholdMm);
   }
-  // Phase 3 §5 travel-run 連結時の抑制: color 内で前 object と travel run で連結している
-  // 場合は tie-in を、次が travel run で連結する場合は tie-off を、それぞれスキップする。
-  // renderDesign が opts.suppressTieIn / suppressTieOff を per-object に注入する。
+  // English note.
+  // English note.
+  // English note.
   const first = top[0];
   const second = top[1] ?? first;
   const last = top[top.length - 1];
@@ -351,12 +449,37 @@ function assembleWithUnderlayAndLockstitch(
   const tieOff = ctx.opts.suppressTieOff
     ? []
     : emitTieOff([last.x, last.y], lastDir, obj.colorIndex);
-  return [...tieIn, ...underlay, ...top, ...tieOff];
+  return joinStitchSections([underlay, tieIn, top, tieOff], obj.colorIndex, maxStitchMm, trimThresholdMm);
+}
+
+function joinStitchSections(
+  sections: Stitch[][],
+  colorIndex: number,
+  maxStitchMm: number,
+  trimThresholdMm: number,
+): Stitch[] {
+  const out: Stitch[] = [];
+  for (const section of sections) {
+    if (section.length === 0) continue;
+    if (out.length > 0) {
+      const prev = out[out.length - 1];
+      const first = section[0];
+      const dist = distance(prev.x, prev.y, first.x, first.y);
+      if (dist > maxStitchMm) {
+        if (dist > trimThresholdMm) {
+          out.push({ x: prev.x, y: prev.y, kind: "trim", colorIndex });
+        }
+        out.push({ x: first.x, y: first.y, kind: "jump", colorIndex });
+      }
+    }
+    out.push(...section);
+  }
+  return out;
 }
 
 /**
- * `RenderOptions.disableCompensation` と `fabric` の有無に応じて Pull Compensation を
- * 適用した EmbroideryObject を返す (top 計算用)。compensation 無効時は入力 obj をそのまま返す。
+ * English note.
+ * English note.
  */
 function applyCompForRender(
   obj: EmbroideryObject,
@@ -368,13 +491,13 @@ function applyCompForRender(
 }
 
 /**
- * Phase 3 §5 オブジェクト間繋ぎ。`prevExit` → `nextEntry` を距離に応じて以下のいずれかで繋ぐ:
+ * English note.
  *
- *   - 距離 < `policy.travelRunUntilMm`           → 1 stitch (kind="run"、座標=nextEntry)
- *   - `travelRunUntilMm` <= 距離 < `trimThresholdMm` → 1 stitch (kind="jump"、座標=nextEntry)
+ *   - distance < `policy.travelRunUntilMm` -> one stitch (kind="run", coordinate=nextEntry)
+ *   - `travelRunUntilMm` <= distance < `trimThresholdMm` -> one stitch (kind="jump", coordinate=nextEntry)
  *   - 距離 >= `trimThresholdMm`                  → 2 stitch (kind="trim" @prevExit, kind="jump" @nextEntry)
  *
- * 戻り値の colorIndex は **次 object** のものを使う (糸切り替え後の糸として扱う)。
+ * English note.
  */
 export function connectObjects(
   prevExit: Point,
@@ -402,11 +525,37 @@ export function connectObjects(
   ];
 }
 
+export function connectObjectsWithSafety(
+  prevObj: EmbroideryObject,
+  nextObj: EmbroideryObject,
+  prevExit: Point,
+  nextEntry: Point,
+  nextColorIndex: number,
+  policy: TrimPolicy,
+): Stitch[] {
+  const safe = isSafeTravelBetweenObjects({
+    fromObject: prevObj,
+    toObject: nextObj,
+    from: prevExit,
+    to: nextEntry,
+  });
+  if (safe) {
+    return connectObjects(prevExit, nextEntry, nextColorIndex, {
+      ...policy,
+      travelRunUntilMm: Math.max(policy.travelRunUntilMm, policy.trimThresholdMm),
+    });
+  }
+  return connectObjects(prevExit, nextEntry, nextColorIndex, {
+    ...policy,
+    travelRunUntilMm: 0,
+  });
+}
+
 /**
- * `EmbroideryDesign` を pure に `StitchPattern` に変換する。
- * - colorIndex で objects をグルーピングし、同色は 1 block にまとめる
- * - block 内では order 昇順で renderRun/Satin/Fill にディスパッチ
- * - block 間には kind="stop" を末尾に挿入
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export function renderDesign(
   design: EmbroideryDesign,
@@ -416,8 +565,8 @@ export function renderDesign(
   const trimThresholdMm =
     opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
 
-  // order の昇順で並べてから colorIndex でグルーピングする。
-  // colorIndex 内の順序が order と一致するので、block 内の描画順も order に従う。
+  // English note.
+  // English note.
   const byColor = new Map<number, EmbroideryObject[]>();
   for (const obj of [...design.objects].sort((a, b) => a.order - b.order)) {
     const arr = byColor.get(obj.colorIndex) ?? [];
@@ -439,7 +588,7 @@ export function renderDesign(
     if (opts.policy) {
       renderColorBlockWithPolicy(block, objs, ctx, opts.policy);
     } else {
-      // Phase 1/2 互換経路: 各 object を独立に renderXxx → trim+jump 挿入
+      // English note.
       for (const obj of objs) {
         const stitches = renderObjectByKind(obj, ctx);
         appendObjectStitches(block, stitches, c, trimThresholdMm);
@@ -481,11 +630,11 @@ function renderObjectByKind(
 }
 
 /**
- * Phase 3 §5 policy 経路: 同色 block 内で連続 object 間を `connectObjects` で繋ぎ、
- * travel-run 連結時は前 object の tie-off と次 object の tie-in を抑制する。
+ * English note.
+ * English note.
  *
- * 抑制方式: 各 object の renderer に opts.suppressTieIn/suppressTieOff を per-object に
- * 注入する 2-pass 構造 (pass 1: 連結モード計算、pass 2: 抑制フラグ付きで render)。
+ * English note.
+ * English note.
  */
 function renderColorBlockWithPolicy(
   block: StitchBlock,
@@ -495,16 +644,16 @@ function renderColorBlockWithPolicy(
 ): void {
   if (objs.length === 0) return;
 
-  // Pass 1 (dry run): tie-in/off 抑制なしで一旦 render し、各 object の実際の
-  //   first/last stitch 座標を取得する。outer 頂点近似は精度不足のため、
-  //   実 renderer の出力位置で隣接 pair 距離を判定する必要がある。
+  // English note.
+  // English note.
+  // English note.
   const dryRuns = objs.map((obj) =>
     renderObjectByKind(obj, {
       opts: { ...ctx.opts, suppressTieIn: false, suppressTieOff: false },
     }),
   );
 
-  // Pass 2: 隣接 pair の距離をもとに travel-run / jump / trim+jump を決定。
+  // English note.
   const isTravelRunToNext: boolean[] = new Array(objs.length).fill(false);
   for (let i = 0; i < objs.length - 1; i++) {
     const prevStitches = dryRuns[i];
@@ -513,20 +662,32 @@ function renderColorBlockWithPolicy(
     const prev = prevStitches[prevStitches.length - 1];
     const next = nextStitches[0];
     const dist = Math.hypot(next.x - prev.x, next.y - prev.y);
-    isTravelRunToNext[i] = dist < policy.travelRunUntilMm;
+    isTravelRunToNext[i] =
+      dist < policy.travelRunUntilMm &&
+      isSafeTravelBetweenObjects({
+        fromObject: objs[i],
+        toObject: objs[i + 1],
+        from: [prev.x, prev.y],
+        to: [next.x, next.y],
+      });
   }
 
-  // Pass 3: 抑制フラグが必要な object だけ再 render、他は dry-run 結果を再利用。
-  //   suppressTieIn/Off の有無で stitch 列が変わるため、フラグが立つ object は
-  //   個別に renderObjectByKind を再呼びする (コスト ~2× だが PR15 では許容)。
+  // English note.
+  // English note.
+  // English note.
+  let previousRenderedObject: EmbroideryObject | null = null;
   for (let i = 0; i < objs.length; i++) {
     const obj = objs[i];
     const suppressTieIn = i > 0 && isTravelRunToNext[i - 1];
     const suppressTieOff = i < objs.length - 1 && isTravelRunToNext[i];
+    const previous = block.stitches[block.stitches.length - 1];
+    const preferredEntry: Point | undefined = previous
+      ? [previous.x, previous.y]
+      : undefined;
     let stitches: Stitch[];
-    if (suppressTieIn || suppressTieOff) {
+    if (suppressTieIn || suppressTieOff || preferredEntry) {
       stitches = renderObjectByKind(obj, {
-        opts: { ...ctx.opts, suppressTieIn, suppressTieOff },
+        opts: { ...ctx.opts, suppressTieIn, suppressTieOff, preferredEntry },
       });
     } else {
       stitches = dryRuns[i];
@@ -535,30 +696,42 @@ function renderColorBlockWithPolicy(
     if (block.stitches.length > 0) {
       const prev = block.stitches[block.stitches.length - 1];
       const first = stitches[0];
-      const connect = connectObjects(
+      const connect = previousRenderedObject
+        ? connectObjectsWithSafety(
+          previousRenderedObject,
+          obj,
+          [prev.x, prev.y],
+          [first.x, first.y],
+          obj.colorIndex,
+          policy,
+        )
+        : connectObjects(
         [prev.x, prev.y],
         [first.x, first.y],
         obj.colorIndex,
         policy,
-      );
+        );
       for (const s of connect) block.stitches.push(s);
     }
     for (const s of stitches) block.stitches.push(s);
+    previousRenderedObject = obj;
   }
 }
 
 /**
- * 旧 API。内部で `buildObjects` → `renderDesign` に委譲する。
- * fabric は呼び出し側 (`compose.ts`) で `config.fabric` から導出して渡す。
- * 現状の renderDesign は RenderOptions の数値パラメータで描画するため fabric の
- * 中身は `buildObjects` 経由の `EmbroideryObject.props` (underlay 等) にのみ影響するが、
- * Phase 2 で underlay rendering が入った時点で fabric が rendering 側にも届くよう
- * StitchInput.fabric を経由させておく。
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export function generateStitches(input: StitchInput): StitchPattern {
   const {
     regions,
     fabric,
+    digitizingMode = "line-art",
+    outlineFontStrategy = "auto",
     widthMm,
     heightMm,
     widthPx,
@@ -581,7 +754,10 @@ export function generateStitches(input: StitchInput): StitchPattern {
     regions,
     widthMm,
     widthPx,
+    heightPx,
     fabric,
+    digitizingMode,
+    outlineFontStrategy,
     runMaxWidthMm,
     satinMaxWidthMm,
     satinMinAspectRatio: SATIN_MIN_ASPECT_RATIO,
@@ -596,6 +772,7 @@ export function generateStitches(input: StitchInput): StitchPattern {
     widthMm,
     heightMm,
     widthPx,
+    digitizingMode,
     stitchDensityMm,
     satinMaxWidthMm,
     runMaxWidthMm,
@@ -614,11 +791,11 @@ export function generateStitches(input: StitchInput): StitchPattern {
 }
 
 /**
- * renderer から返ってきた 1 オブジェクト分の Stitch[] を block 末尾に追加する。
- * block に既存 stitches があれば、前 object の last 点と新 object の先頭点との間に
- * 必ず jump (必要なら trim も) を挿入する。これは original generateStitches で
- * 「次 shape の first appendStitchesWithJumps が forceJumpAtStart=true で
- *  動いていた挙動」を bridge レベルで再現するもの。
+ * English note.
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 function appendObjectStitches(
   block: StitchBlock,
@@ -670,8 +847,8 @@ function appendStitchesWithJumps(
   let lastY: number;
 
   if (needJump && prev) {
-    // 渡り糸が長い場合は jump 前に trim を挿入して、糸切り対応機種で確実に切る。
-    // trim 自体は座標を進めず、現在位置 (prev) で「糸を切る」コマンドとして扱われる。
+    // English note.
+    // English note.
     if (dist > trimThresholdMm) {
       block.stitches.push({
         x: prev.x,
@@ -680,17 +857,17 @@ function appendStitchesWithJumps(
         colorIndex,
       });
     }
-    // jump は pts[0] への移動そのもの。針位置を pts[0] に進める。
+    // English note.
     block.stitches.push({
       x: pts[0][0],
       y: pts[0][1],
       kind: "jump",
       colorIndex,
     });
-    // lastX/Y を pts[0] に揃えることで、ループ最初の pts[0] 処理は d=0 となり、
-    // prev → pts[0] のギャップに kind 縫い目が細分化されて挿入されない。
-    // 一方で pts[0] 自体は STITCH として 1 点 push されるため、JUMP 後の
-    // セグメント開始点 (scanline の pa など) がアンカーとして刺繍ファイルに記録される。
+    // English note.
+    // English note.
+    // English note.
+    // English note.
     lastX = pts[0][0];
     lastY = pts[0][1];
   } else {
@@ -737,8 +914,8 @@ function distance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.hypot(x2 - x1, y2 - y1);
 }
 
-// analyzeShape / computeAspectRatio は ./geometry に移動済み。
-// __internal 経由でテストから参照されているため、re-export を維持する。
+// English note.
+// English note.
 
 export function resamplePolyline(polyline: Polygon, densityMm: number): Point[] {
   if (polyline.length === 0) return [];
@@ -807,10 +984,10 @@ function satinStitches(
 }
 
 /**
- * 穴を抜いた fill ステッチを「セグメント配列」として返す。
- * 各セグメントは穴を跨がない 1 区間の塗り (= 2 点で表現)。
- * セグメント境界には呼び出し側で必ず jump を挿入する想定なので、
- * 穴跨ぎ部分も scanline 行間遷移もまとめて jump 扱いになる。
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 function fillStitches(
   shape: Shape,
@@ -821,7 +998,7 @@ function fillStitches(
   const dir: Point = [Math.cos(rad), Math.sin(rad)];
   const perp: Point = [-dir[1], dir[0]];
 
-  // バウンディングは外形だけで十分
+  // English note.
   let minS = Infinity;
   let maxS = -Infinity;
   for (const [x, y] of shape.outer) {
@@ -864,10 +1041,10 @@ function fillStitches(
   return segments;
 }
 
-// intersectScanline は ./scanline.ts に切り出して両方から import するよう変更
-// (PR12 で render → underlay の依存が入っても循環を避けるための配置)。
+// English note.
+// English note.
 
-/** Stitch を作るユーティリティ (テスト用) */
+/** English note. */
 export function makeStitch(
   x: number,
   y: number,
@@ -877,7 +1054,7 @@ export function makeStitch(
   return { x, y, kind, colorIndex };
 }
 
-/** PCA 結果を test 用に export */
+/** English note. */
 export const __internal = {
   analyzeShape,
   computeAspectRatio,

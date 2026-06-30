@@ -5,6 +5,7 @@ import {
   serializeDesign,
   deserializeDesign,
 } from "../design";
+import { makeDefaultConfig } from "../config";
 import type {
   ObjectProps,
   FabricKind,
@@ -27,24 +28,29 @@ const stubFabric: FabricProfile = {
 };
 
 describe("createDefaultObjectProps", () => {
-  it("createDefaultObjectProps(\"run\") は angleDeg を含まない", () => {
+  it("adds outlineFontStrategy to default conversion config", () => {
+    const config = makeDefaultConfig("denim");
+    expect(config.outlineFontStrategy).toBe("auto");
+  });
+
+  it("translated case", () => {
     const p = createDefaultObjectProps("run") satisfies ObjectProps;
     expect(p.angleDeg).toBeUndefined();
     expect(p.densityMm).toBeGreaterThan(0);
     expect(p.maxStitchMm).toBeGreaterThan(0);
   });
 
-  it("createDefaultObjectProps(\"satin\") は angleDeg=0 を含む", () => {
+  it("translated case", () => {
     const p = createDefaultObjectProps("satin");
     expect(p.angleDeg).toBe(0);
   });
 
-  it("createDefaultObjectProps(\"fill\") は angleDeg=45 を含む", () => {
+  it("translated case", () => {
     const p = createDefaultObjectProps("fill");
     expect(p.angleDeg).toBe(45);
   });
 
-  it("createDefaultObjectProps の戻り値は呼び出しごとに別オブジェクト", () => {
+  it("translated case", () => {
     const a = createDefaultObjectProps("fill");
     const b = createDefaultObjectProps("fill");
     expect(a).not.toBe(b);
@@ -54,19 +60,19 @@ describe("createDefaultObjectProps", () => {
 });
 
 describe("createEmptyDesign", () => {
-  it("createEmptyDesign は objects=[] の Design を返す", () => {
+  it("translated case", () => {
     const d = createEmptyDesign({ widthMm: 100, heightMm: 80, fabric: stubFabric }) satisfies EmbroideryDesign;
     expect(d.widthMm).toBe(100);
     expect(d.heightMm).toBe(80);
     expect(d.objects).toEqual([]);
   });
 
-  it("createEmptyDesign は渡した fabric をそのまま保持する", () => {
+  it("translated case", () => {
     const d = createEmptyDesign({ widthMm: 50, heightMm: 50, fabric: stubFabric });
     expect(d.fabric).toBe(stubFabric);
   });
 
-  it("createEmptyDesign の戻り値の objects は呼び出しごとに独立", () => {
+  it("translated case", () => {
     const d1 = createEmptyDesign({ widthMm: 1, heightMm: 1, fabric: stubFabric });
     const d2 = createEmptyDesign({ widthMm: 1, heightMm: 1, fabric: stubFabric });
     expect(d1.objects).not.toBe(d2.objects);
@@ -103,17 +109,17 @@ describe("serializeDesign / deserializeDesign", () => {
     ],
   };
 
-  it("serializeDesign の結果は JSON.stringify 可能", () => {
+  it("translated case", () => {
     const s = serializeDesign(sample);
     expect(() => JSON.stringify(s)).not.toThrow();
   });
 
-  it("serializeDesign は fabric.kind のみ残し underlayPolicy を含まない", () => {
+  it("translated case", () => {
     const s = serializeDesign(sample);
     expect(s.fabric).toEqual({ kind: "denim" });
   });
 
-  it("serializeDesign → JSON.parse → deserializeDesign で objects が完全一致", () => {
+  it("translated case", () => {
     const s = serializeDesign(sample);
     const json = JSON.stringify(s);
     const restored = deserializeDesign(JSON.parse(json), fabricResolver);
@@ -123,7 +129,42 @@ describe("serializeDesign / deserializeDesign", () => {
     expect(restored.fabric).toBe(stubFabric);
   });
 
-  it("ラウンドトリップで UnderlayConfig の 5 種別が保持される", () => {
+  it("preserves strokeRole and strokeOverride in pipeline design serialization", () => {
+    const sampleWithStroke: EmbroideryDesign = {
+      widthMm: 100,
+      heightMm: 80,
+      fabric: stubFabric,
+      objects: [
+        {
+          id: "stroke-a",
+          kind: "run",
+          colorIndex: 0,
+          rgb: [10, 20, 30],
+          shape: {
+            outer: [[0, 0], [10, 0], [10, 1], [0, 1]],
+            holes: [],
+          },
+          props: {
+            densityMm: 0.4,
+            maxStitchMm: 4,
+          },
+          strokeRole: "outline",
+          strokeOverride: "force-run",
+          order: 0,
+        },
+      ],
+    };
+
+    const restored = deserializeDesign(
+      JSON.parse(JSON.stringify(serializeDesign(sampleWithStroke))),
+      fabricResolver,
+    );
+
+    expect(restored.objects[0].strokeRole).toBe("outline");
+    expect(restored.objects[0].strokeOverride).toBe("force-run");
+  });
+
+  it("translated case", () => {
     const variants: UnderlayConfig[] = [
       { kind: "none" },
       { kind: "edge-run", insetMm: 0.5, stitchLenMm: 2 },
@@ -141,13 +182,13 @@ describe("serializeDesign / deserializeDesign", () => {
     }
   });
 
-  it("ラウンドトリップで pullCompPerSideMm が保持される", () => {
+  it("translated case", () => {
     const s = serializeDesign(sample);
     const r = deserializeDesign(JSON.parse(JSON.stringify(s)), fabricResolver);
     expect(r.objects[0].props.pullCompPerSideMm).toEqual({ left: 0.1, right: 0.2 });
   });
 
-  it("deserializeDesign は s.objects を deep copy する（呼び出し元 mutation が漏れない）", () => {
+  it("translated case", () => {
     const s = serializeDesign(sample);
     const restored = deserializeDesign(s, fabricResolver);
     expect(restored.objects).not.toBe(s.objects);

@@ -1,14 +1,14 @@
 "use client";
 
-// object-inspector.tsx — Phase 5 PR21 選択中 object のプロパティ編集 UI。
+// English note.
 //
-// design-store の selectedObjectId が指す EmbroideryObject に対し、kind /
-// angleDeg / densityMm / pullCompMm / underlay.kind を編集する。変更は
-// updateObject(id, patch) 経由で store に反映する。未選択時はプレースホルダ。
+// English note.
+// English note.
+// English note.
 //
-// 本 PR では Sewing Order との結線 / レイアウト統合は対象外。
-// 純ロジック (patch ビルダ) は applyKindChange / applyPropsChange に切り出して
-// store 経由のテストで挙動を担保する。
+// English note.
+// English note.
+// English note.
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -24,29 +24,39 @@ import { useDesignStore } from "./design-store";
 import {
   applyKindChange,
   applyPropsChange,
+  applyStrokeOverrideChange,
   applyUnderlayKindChange,
 } from "./object-inspector-bindings";
+import type { ConversionConfig } from "@/lib/pipeline/config";
 import type {
   EmbroideryObject,
   ObjectKind,
+  StrokeOverride,
   UnderlayConfig,
 } from "@/lib/pipeline/types";
 
 const KIND_OPTIONS: { value: ObjectKind; label: string }[] = [
-  { value: "run", label: "run (細線)" },
-  { value: "satin", label: "satin (帯)" },
-  { value: "fill", label: "fill (塗り)" },
+  { value: "run", label: "run (thin line)" },
+  { value: "satin", label: "satin (band)" },
+  { value: "fill", label: "fill (area)" },
 ];
 
 const UNDERLAY_OPTIONS: { value: UnderlayConfig["kind"]; label: string }[] = [
-  { value: "none", label: "なし" },
+  { value: "none", label: "None" },
   { value: "edge-run", label: "edge-run" },
   { value: "center-run", label: "center-run" },
   { value: "zigzag", label: "zigzag" },
   { value: "fill", label: "fill" },
 ];
 
-export function ObjectInspector() {
+const STROKE_OVERRIDE_OPTIONS: { value: StrokeOverride; label: string }[] = [
+  { value: "use-global", label: "Use Global" },
+  { value: "force-run", label: "Force Run" },
+  { value: "force-satin", label: "Force Satin" },
+  { value: "force-fill", label: "Force Fill" },
+];
+
+export function ObjectInspector({ config }: { config: ConversionConfig }) {
   const selectedObjectId = useDesignStore((s) => s.selectedObjectId);
   const object = useDesignStore((s) =>
     s.selectedObjectId && s.design
@@ -59,11 +69,11 @@ export function ObjectInspector() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">オブジェクト</CardTitle>
+          <CardTitle className="text-base">Object</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            プレビュー上でオブジェクトをクリックして選択してください。
+            Click an object in the preview to select it.
           </p>
         </CardContent>
       </Card>
@@ -74,15 +84,23 @@ export function ObjectInspector() {
     <Card>
       <CardHeader>
         <CardTitle className="text-base">
-          オブジェクト ({object.id})
+          Object ({object.id})
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
         <KindRow object={object} onChange={(kind) =>
           updateObject(object.id, applyKindChange(kind))} />
 
+        {object.strokeRole && object.strokeRole !== "area" ? (
+          <StrokeOverrideRow
+            value={object.strokeOverride ?? "use-global"}
+            onChange={(strokeOverride) =>
+              updateObject(object.id, applyStrokeOverrideChange(object, strokeOverride, config))}
+          />
+        ) : null}
+
         <SliderRow
-          label="角度"
+          label="Angle"
           value={object.props.angleDeg ?? 0}
           min={0}
           max={180}
@@ -93,7 +111,7 @@ export function ObjectInspector() {
         />
 
         <SliderRow
-          label="密度"
+          label="Density"
           value={object.props.densityMm}
           min={0.2}
           max={2.0}
@@ -104,7 +122,7 @@ export function ObjectInspector() {
         />
 
         <SliderRow
-          label="Pull 補正"
+          label="Pull Compensation"
           value={object.props.pullCompMm ?? 0}
           min={0}
           max={1.0}
@@ -124,6 +142,30 @@ export function ObjectInspector() {
   );
 }
 
+function StrokeOverrideRow({
+  value,
+  onChange,
+}: {
+  value: StrokeOverride;
+  onChange: (value: StrokeOverride) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label>Stroke Override</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as StrokeOverride)}>
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {STROKE_OVERRIDE_OPTIONS.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 function KindRow({
   object,
   onChange,
@@ -133,7 +175,7 @@ function KindRow({
 }) {
   return (
     <div className="space-y-2">
-      <Label>種別</Label>
+      <Label>Type</Label>
       <Select value={object.kind} onValueChange={(v) => onChange(v as ObjectKind)}>
         <SelectTrigger><SelectValue /></SelectTrigger>
         <SelectContent>
@@ -195,7 +237,7 @@ function UnderlayRow({
 }) {
   return (
     <div className="space-y-2">
-      <Label>下縫い (underlay)</Label>
+      <Label>Underlay</Label>
       <Select value={value} onValueChange={(v) =>
         onChange(v as UnderlayConfig["kind"])}>
         <SelectTrigger><SelectValue /></SelectTrigger>

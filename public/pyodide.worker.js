@@ -1,8 +1,8 @@
-// pyodide を Web Worker で動かして pyembroidery 出力を生成する。
-// メインスレッドからのメッセージプロトコルは
-// src/lib/pipeline/pyodide-worker.ts の PyodideWorkerRequest/Response を参照。
+// English note.
+// English note.
+// English note.
 //
-// このファイルは plain JS。public/ に置いて static 配信される。
+// English note.
 
 const PYODIDE_VERSION = "0.29.4";
 const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -24,9 +24,9 @@ KIND_TO_CMD = {
 }
 
 def build_pattern(pattern_json: str, fmt: str) -> bytes:
-    # pyembroidery は内部座標を Y-down (画像座標系) として扱い、
-    # 各フォーマット writer が必要な Y 反転を自動で行う。
-    # こちらの stitch データも既に Y-down (mm) なので、そのまま渡す。
+    # English note.
+    # English note.
+    # English note.
     p = json.loads(pattern_json)
     emb = EmbPattern()
     for bi, block in enumerate(p["blocks"]):

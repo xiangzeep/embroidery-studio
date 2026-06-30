@@ -1,20 +1,26 @@
 export type StitchKind = "run" | "satin" | "fill" | "jump" | "trim" | "stop";
 
-/** px 単位の 2D 座標 */
+/** English note. */
 export type Point2D = [number, number];
 
-/** 閉ポリゴン。先頭と末尾は同一点でも非同一でも可。最低 3 点。 */
+/** English note. */
 export type Polygon = Point2D[];
 
 /**
- * 1 個の連結領域 = 外形 + 0 個以上の穴。
- * imagetracerjs における 1 つの <path d="..."> に対応する。
- * - outer: 外形リング（向きは正規化しない。fill/scanline は向き非依存）
- * - holes: 穴リング。外形に完全に内包される前提（fallback で補正）。
+ * English note.
+ * English note.
+ * English note.
+ * English note.
  */
 export type Shape = {
   outer: Polygon;
   holes: Polygon[];
+};
+
+export type BinaryMask = {
+  data: Uint8Array;
+  width: number;
+  height: number;
 };
 
 export type Stitch = {
@@ -37,11 +43,39 @@ export type StitchPattern = {
   totalStitches: number;
 };
 
-// ---- Object-based model (Phase 1) ----
-// EmbroideryObject 配下は純データのみ。関数フィールドを足す場合は
-// design.ts の serializeDesign を必ず見直すこと (JSON.parse/stringify deep copy 依存)。
+// ---- Object-based local design model ----
+// English note.
+// English note.
 
 export type ObjectKind = "run" | "satin" | "fill";
+
+export type StrokeKind =
+  | "none"
+  | "thin-run"
+  | "bean-run"
+  | "narrow-satin"
+  | "border-satin";
+
+export type StrokeRole =
+  | "none"
+  | "outline"
+  | "font"
+  | "decorative-band"
+  | "area";
+
+export type StrokeOverride =
+  | "use-global"
+  | "force-run"
+  | "force-satin"
+  | "force-fill";
+
+export type ObjectLayerKind =
+  | "background"
+  | "base-fill"
+  | "detail"
+  | "outline"
+  | "highlight"
+  | "noise";
 
 export type UnderlayConfig =
   | { kind: "none" }
@@ -61,17 +95,54 @@ export type ObjectProps = {
   lockstitch?: boolean;
 };
 
+export type ShapeMetrics = {
+  areaMm2: number;
+  perimeterMm: number;
+  bboxWidthMm: number;
+  bboxHeightMm: number;
+  compactness: number;
+  aspectRatio: number;
+  holeCount: number;
+};
+
+export type StrokeMetrics = {
+  areaMm2: number;
+  perimeterMm: number;
+  bboxWidthMm: number;
+  bboxHeightMm: number;
+  estimatedWidthMm: number;
+  estimatedLengthMm: number;
+  slenderness: number;
+  compactness: number;
+  holeCount: number;
+  widthMinMm?: number;
+  widthAvgMm?: number;
+  widthMaxMm?: number;
+  hasStableSkeleton?: boolean;
+  branchCount?: number;
+  junctionCount?: number;
+  loopCount?: number;
+  isStrokeLike: boolean;
+};
+
 export type EmbroideryObject = {
   id: string;
   kind: ObjectKind;
+  baseKind?: ObjectKind;
+  layer?: ObjectLayerKind;
   colorIndex: number;
   rgb: [number, number, number];
   shape: Shape;
   props: ObjectProps;
+  metrics?: ShapeMetrics;
+  strokeKind?: StrokeKind;
+  strokeRole?: StrokeRole;
+  strokeMetrics?: StrokeMetrics;
+  strokeOverride?: StrokeOverride;
   order: number;
   locked?: boolean;
-  /** Phase 5 PR22: UI 上の visibility 切替。undefined は表示 (= true) 扱い。
-   *  renderer は visibility を見ないため stitch 生成には影響しない (UI 専用)。 */
+  /**
+    */
   visible?: boolean;
 };
 
@@ -103,10 +174,39 @@ export type EmbroideryDesign = {
 };
 
 /**
- * Phase 3 §4 Branching: 同色で互いに接触する EmbroideryObject 群。
- * `objectIds` は同 group 内の入力 index 昇順、`colorIndex` は group 共通色。
+ * English note.
+ * English note.
  */
 export type BranchGroup = {
   objectIds: string[];
   colorIndex: number;
+};
+
+export type SkeletonNode = {
+  id: string;
+  x: number;
+  y: number;
+  degree: number;
+};
+
+export type SkeletonBranch = {
+  id: string;
+  points: Point2D[];
+  isLoop: boolean;
+  startNodeId: string | null;
+  endNodeId: string | null;
+};
+
+export type SkeletonGraph = {
+  width: number;
+  height: number;
+  nodes: SkeletonNode[];
+  branches: SkeletonBranch[];
+};
+
+export type WidthSample = {
+  x: number;
+  y: number;
+  radiusMm: number;
+  widthMm: number;
 };

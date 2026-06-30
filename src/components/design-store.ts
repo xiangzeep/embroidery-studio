@@ -1,14 +1,14 @@
-// design-store.ts — Phase 5 PR20 design store。
+// design-store.ts - local design store state.
 //
-// Zustand store として下記の state / action を提供する:
-//   - design: EmbroideryDesign | null   現在編集中のデザイン
-//   - selectedObjectId: string | null    選択中 object id
+// English note.
+// English note.
+//   - selectedObjectId: string | null    selected object id
 //   - editMode: "select" | "node" | "pen"
-// 既存 embroidery-studio.tsx の useState ベース実装は破壊せず、Phase 5 後続 PR で
-// 順次差し替える想定の並行導入。
+// English note.
+// English note.
 //
-// 純ロジック (React 非依存) は vanilla store (`zustand/vanilla`) で表現し、
-// `useDesignStore` React hook も同 store を共有する。テストは vanilla 側で完結。
+// English note.
+// English note.
 
 import { createStore } from "zustand/vanilla";
 import { useStore } from "zustand";
@@ -30,15 +30,16 @@ export type VisualizationFlags = {
   showTravel: boolean;
   showJump: boolean;
   showTrim: boolean;
+  showStitchTypes: boolean;
 };
 
 export type DesignState = {
   design: EmbroideryDesign | null;
   selectedObjectId: string | null;
   editMode: EditMode;
-  /** Phase 5 PR24 undo/redo 用 history。design=null のとき null。 */
+  /** English note. */
   history: History | null;
-  /** Phase 5 PR24 travel/jump/trim 可視化トグル。 */
+  /** English note. */
   visualization: VisualizationFlags;
 };
 
@@ -51,15 +52,15 @@ export type DesignActions = {
     patch: Partial<Omit<EmbroideryObject, "id">>,
   ) => void;
   reorderObjects: (newOrder: string[]) => void;
-  /** 指定 id の object を削除。selectedObjectId が消えれば null にリセット。design=null は no-op。 */
+  /** English note. */
   removeObject: (id: string) => void;
-  /** Phase 3 PR14 の optimizeOrder を design に適用 (locked は元 order を保持)。design=null は no-op。 */
+  /** English note. */
   applyOptimizeOrder: () => void;
-  /** Phase 5 PR24 undo: history.past 末尾に戻る。past 空 / design=null は no-op。 */
+  /** English note. */
   undo: () => void;
-  /** Phase 5 PR24 redo: history.future 先頭に進む。future 空 / design=null は no-op。 */
+  /** English note. */
   redo: () => void;
-  /** Phase 5 PR24 visualization flag patch。 */
+  /** Controls local visualization overlays. */
   setVisualization: (patch: Partial<VisualizationFlags>) => void;
 };
 
@@ -70,25 +71,25 @@ const initialState: DesignState = {
   selectedObjectId: null,
   editMode: "select",
   history: null,
-  visualization: { showTravel: false, showJump: false, showTrim: false },
+  visualization: { showTravel: false, showJump: false, showTrim: false, showStitchTypes: false },
 };
 
 /**
- * vanilla Zustand store。React 非依存。テストから直接 `getState` / `setState`
- * で操作可能。React からは `useDesignStore` 経由で購読する。
+ * English note.
+ * English note.
  */
 export const designStore = createStore<DesignStore>((set, get) => ({
   ...initialState,
 
   setDesign: (design) => {
     const prev = get();
-    // 選択中 id が新 design に存在しなければ null にリセット
+    // English note.
     const stillExists =
       design !== null &&
       prev.selectedObjectId !== null &&
       design.objects.some((o) => o.id === prev.selectedObjectId);
-    // setDesign は「初期化 / ファイル読込 / 大きな差し替え」の入口。
-    // history は新規作成 (= 過去を捨てる)。
+    // English note.
+    // English note.
     set({
       design,
       selectedObjectId: stillExists ? prev.selectedObjectId : null,
@@ -103,7 +104,7 @@ export const designStore = createStore<DesignStore>((set, get) => ({
     }
     const { design } = get();
     if (design === null) return;
-    if (!design.objects.some((o) => o.id === id)) return; // 不正 id は no-op
+    if (!design.objects.some((o) => o.id === id)) return; // English note.
     set({ selectedObjectId: id });
   },
 
@@ -129,7 +130,7 @@ export const designStore = createStore<DesignStore>((set, get) => ({
     const current = design.objects;
     if (newOrder.length !== current.length) {
       throw new Error(
-        `reorderObjects: id 配列長 ${newOrder.length} が design.objects.length ${current.length} と不一致`,
+        `reorderObjects: id array length ${newOrder.length} does not match design.objects.length ${current.length}`,
       );
     }
     const lookup = new Map(current.map((o) => [o.id, o] as const));
@@ -139,7 +140,7 @@ export const designStore = createStore<DesignStore>((set, get) => ({
       }
     }
     if (new Set(newOrder).size !== newOrder.length) {
-      throw new Error("reorderObjects: newOrder に重複 id が含まれている");
+      throw new Error("reorderObjects: newOrder contains duplicate ids");
     }
     const reordered = newOrder.map((id, i) => ({
       ...lookup.get(id)!,
@@ -157,7 +158,7 @@ export const designStore = createStore<DesignStore>((set, get) => ({
     const { design, selectedObjectId, history } = get();
     if (design === null) return;
     const next = design.objects.filter((o) => o.id !== id);
-    if (next.length === design.objects.length) return; // 不在 id は no-op
+    if (next.length === design.objects.length) return; // English note.
     const nextDesign: EmbroideryDesign = { ...design, objects: next };
     set({
       design: nextDesign,
@@ -196,7 +197,7 @@ export const designStore = createStore<DesignStore>((set, get) => ({
   },
 }));
 
-/** React 側 hook。state slice を selector で取り出す既存 Zustand 流儀に合わせる。 */
+/** English note. */
 export function useDesignStore<T>(selector: (state: DesignStore) => T): T {
   return useStore(designStore, selector);
 }

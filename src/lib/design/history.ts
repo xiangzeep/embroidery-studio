@@ -1,10 +1,10 @@
-// history.ts — Phase 5 PR24 Undo / Redo 純データ構造。
+// English note.
 //
-// past / current / future の 3 リストで history stack を表現する。すべての
-// 状態遷移は純関数で表現し、入力 History は破壊しない (immer の produce で
-// 新オブジェクトを作る)。
+// English note.
+// English note.
+// English note.
 //
-// past は古い順 (末尾が直近)、future は redo 順 (先頭が次の redo 対象)。
+// English note.
 
 import { produce } from "immer";
 import type { EmbroideryDesign } from "@/lib/pipeline/types";
@@ -22,8 +22,8 @@ export function createHistory(initial: EmbroideryDesign): History {
 }
 
 /**
- * 新しい design を current に置き、旧 current を past 末尾に積む。
- * future はクリア (分岐放棄)、past が MAX_HISTORY 超過なら先頭から捨てる。
+ * English note.
+ * English note.
  */
 export function pushHistory(
   h: History,
@@ -37,7 +37,7 @@ export function pushHistory(
   });
 }
 
-/** past 末尾を current に戻し、旧 current を future 先頭に積む。past 空なら不変。 */
+/** English note. */
 export function undo(h: History): History {
   if (h.past.length === 0) return h;
   return produce(h, (draft) => {
@@ -47,7 +47,7 @@ export function undo(h: History): History {
   });
 }
 
-/** future 先頭を current に進め、旧 current を past 末尾に積む。future 空なら不変。 */
+/** English note. */
 export function redo(h: History): History {
   if (h.future.length === 0) return h;
   return produce(h, (draft) => {

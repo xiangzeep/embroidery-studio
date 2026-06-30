@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Pyodide + pyembroidery を Web Worker に隔離して呼ぶクライアント。
- * 設計は src/lib/pipeline/opencv-worker.ts と同一 (seq ベース postMessage)。
- * Worker は /public/pyodide.worker.js。
+ * English note.
+ * English note.
+ * English note.
  */
 
 import type { StitchPattern } from "./types";
@@ -25,14 +25,22 @@ export type PyodideWorkerResponse =
   | { type: "result"; seq: number; buffer: ArrayBuffer }
   | { type: "error"; seq?: number; message: string };
 
+export type PyodideWorkerStatus =
+  | { state: "idle" }
+  | { state: "warming" }
+  | { state: "ready" }
+  | { state: "error"; message: string };
+
 let workerPromise: Promise<Worker> | null = null;
+let workerStatus: PyodideWorkerStatus = { state: "idle" };
 let seqCounter = 0;
 
 function getWorker(): Promise<Worker> {
   if (workerPromise) return workerPromise;
+  workerStatus = { state: "warming" };
   workerPromise = new Promise<Worker>((resolve, reject) => {
     if (typeof window === "undefined") {
-      reject(new Error("Pyodide worker は ブラウザでのみ起動可能"));
+      reject(new Error("Pyodide worker can only run in the browser"));
       return;
     }
     let w: Worker;
@@ -46,7 +54,7 @@ function getWorker(): Promise<Worker> {
       w.terminate();
       reject(
         new Error(
-          `Pyodide Worker の初期化が ${INIT_TIMEOUT_MS}ms でタイムアウトしました`,
+          `Pyodide Worker initialization timed out after ${INIT_TIMEOUT_MS}ms`,
         ),
       );
     }, INIT_TIMEOUT_MS);
@@ -56,23 +64,29 @@ function getWorker(): Promise<Worker> {
       if (d.type === "ready") {
         clearTimeout(timer);
         w.removeEventListener("message", onReady);
+        workerStatus = { state: "ready" };
         resolve(w);
       } else if (d.type === "error") {
         clearTimeout(timer);
         w.removeEventListener("message", onReady);
+        workerStatus = { state: "error", message: d.message };
         reject(new Error(d.message));
       }
     };
     w.addEventListener("message", onReady);
     w.addEventListener("error", (ev) => {
       clearTimeout(timer);
-      reject(
-        new Error(`Pyodide Worker load error: ${ev.message || "unknown"}`),
-      );
+      const message = `Pyodide Worker load error: ${ev.message || "unknown"}`;
+      workerStatus = { state: "error", message };
+      reject(new Error(message));
     });
   });
-  workerPromise.catch(() => {
+  workerPromise.catch((err) => {
     workerPromise = null;
+    workerStatus = {
+      state: "error",
+      message: err instanceof Error ? err.message : String(err),
+    };
   });
   return workerPromise;
 }
@@ -124,14 +138,22 @@ export async function writeEmbroideryViaWorker(
   });
 }
 
-/** UI 表示後にバックグラウンドで Worker を起動して初期化を進める */
+export function getPyodideWorkerStatus(): PyodideWorkerStatus {
+  return workerStatus;
+}
+
+/** English note. */
 export function warmupPyodide(): Promise<Worker> {
   return getWorker();
 }
 
-/** テスト/再起動用 */
+/** English note. */
 export function terminatePyodide(): void {
-  if (!workerPromise) return;
+  if (!workerPromise) {
+    workerStatus = { state: "idle" };
+    return;
+  }
   void workerPromise.then((w) => w.terminate());
   workerPromise = null;
+  workerStatus = { state: "idle" };
 }
