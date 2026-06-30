@@ -980,6 +980,47 @@ describe("renderRun", () => {
     expect(stitchKinds.has("run")).toBe(true);
     expect(stitchKinds.has("satin")).toBe(false);
   });
+
+  it("separates closed loop run segments from attached trunk paths with jumps", () => {
+    const obj: EmbroideryObject = {
+      id: "0-0",
+      kind: "run",
+      strokeKind: "bean-run",
+      colorIndex: 0,
+      rgb: [0, 0, 0],
+      shape: {
+        outer: [
+          [4, 0], [8, 0], [8, 4], [13, 4], [13, 5], [8, 5], [8, 12], [0, 12], [0, 4], [4, 4],
+        ],
+        holes: [
+          [[5, 7], [7, 7], [7, 10], [5, 10]],
+        ],
+      },
+      props: DUMMY_PROPS,
+      strokeMetrics: {
+        areaMm2: 80,
+        perimeterMm: 60,
+        bboxWidthMm: 13,
+        bboxHeightMm: 12,
+        estimatedWidthMm: 0.5,
+        estimatedLengthMm: 40,
+        slenderness: 4,
+        compactness: 0.2,
+        holeCount: 1,
+        loopCount: 1,
+        branchCount: 2,
+        junctionCount: 1,
+        isStrokeLike: true,
+      },
+      order: 0,
+    };
+
+    const stitches = renderRun(obj, makeCtx({ stitchDensityMm: 0.5 }));
+    const kinds = stitches.map((stitch) => stitch.kind);
+
+    expect(kinds).toContain("jump");
+    expect(maxRealStitchDistance(stitches)).toBeLessThanOrEqual(7);
+  });
 });
 
 describe("renderSatin", () => {
@@ -2053,6 +2094,63 @@ describe("translated case", () => {
 
     expect(r).toEqual([
       { x: 10, y: 1, kind: "run", colorIndex: 0 },
+    ]);
+  });
+
+  it("uses strict jump and trim travel between stroke run objects", () => {
+    const runObject = (
+      id: string,
+      outer: [number, number][],
+      order: number,
+      loopCount = 0,
+    ): EmbroideryObject => ({
+      id,
+      kind: "run",
+      strokeKind: "bean-run",
+      colorIndex: 0,
+      rgb: [0, 0, 0],
+      shape: { outer, holes: [] },
+      props: { densityMm: 0.4, maxStitchMm: 7, underlay: { kind: "none" } },
+      strokeMetrics: {
+        areaMm2: 5,
+        perimeterMm: 20,
+        bboxWidthMm: 10,
+        bboxHeightMm: 1,
+        estimatedWidthMm: 0.5,
+        estimatedLengthMm: 10,
+        slenderness: 10,
+        compactness: 0.1,
+        holeCount: 0,
+        loopCount,
+        isStrokeLike: true,
+      },
+      order,
+      layer: "outline",
+    });
+
+    const from = runObject("a", [[0, 0], [10, 0], [10, 1], [0, 1]], 0);
+    const to = runObject("b", [[10, 0], [20, 0], [20, 1], [10, 1]], 1);
+    const jump = connectObjectsWithSafety(
+      from,
+      to,
+      [4, 0.5],
+      [7, 0.5],
+      0,
+      TRIM_POLICY_BY_FORMAT.dst,
+    );
+    const trim = connectObjectsWithSafety(
+      runObject("loop", [[0, 0], [4, 0], [4, 4], [0, 4]], 0, 1),
+      to,
+      [0, 0],
+      [5, 0],
+      0,
+      TRIM_POLICY_BY_FORMAT.dst,
+    );
+
+    expect(jump).toEqual([{ x: 7, y: 0.5, kind: "jump", colorIndex: 0 }]);
+    expect(trim).toEqual([
+      { x: 0, y: 0, kind: "trim", colorIndex: 0 },
+      { x: 5, y: 0, kind: "jump", colorIndex: 0 },
     ]);
   });
 

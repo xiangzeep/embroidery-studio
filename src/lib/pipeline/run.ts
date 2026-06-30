@@ -34,15 +34,21 @@ const SKELETON_NEIGHBOR_OFFSETS: Array<[number, number]> = [
  * English note.
  */
 export function medialAxisRun(shape: Shape, stitchLenMm: number): Point2D[] {
-  const routed = branchAwareSkeletonRun(shape, stitchLenMm);
-  if (routed.length >= 2) return routed;
-  const skeleton = centerRunUnderlay(shape, stitchLenMm);
-  if (skeleton.length >= 2) return finalizeRunPath(skeleton, shape);
-  const rail = railMidlineRun(shape, stitchLenMm);
-  return rail.length >= 2 ? finalizeRunPath(rail, shape) : rail;
+  const routed = medialAxisRunSegments(shape, stitchLenMm);
+  if (routed.length > 0) return flattenRunSegments(routed);
+  return [];
 }
 
-function branchAwareSkeletonRun(shape: Shape, stitchLenMm: number): Point2D[] {
+export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
+  const routed = branchAwareSkeletonRunSegments(shape, stitchLenMm);
+  if (routed.length > 0) return routed;
+  const skeleton = centerRunUnderlay(shape, stitchLenMm);
+  if (skeleton.length >= 2) return [finalizeRunPath(skeleton, shape)];
+  const rail = railMidlineRun(shape, stitchLenMm);
+  return rail.length >= 2 ? [finalizeRunPath(rail, shape)] : [];
+}
+
+function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
   if (stitchLenMm <= 0 || shape.outer.length < 3) return [];
   if (Math.abs(polygonArea(shape.outer)) < MIN_RAIL_MIDLINE_AREA_MM2) return [];
 
@@ -53,12 +59,18 @@ function branchAwareSkeletonRun(shape: Shape, stitchLenMm: number): Point2D[] {
     width: raster.width,
     height: raster.height,
   });
-  const sampled = routeSkeletonGraphBranches(graph, raster, stitchLenMm, shape);
-  if (sampled.length < 2) return [];
+  const sampled = routeSkeletonGraphBranchSegments(graph, raster, stitchLenMm, shape);
+  if (sampled.length === 0) return [];
 
-  return shouldExtendBranchAwarePath(shape, thin, raster.width, raster.height)
-    ? extendOpenPathToShape(sampled, shape)
-    : sampled;
+  if (!shouldExtendBranchAwarePath(shape, thin, raster.width, raster.height)) {
+    return sampled;
+  }
+  return sampled.map((segment) => {
+    const first = segment[0];
+    const last = segment[segment.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) <= 1e-3) return segment;
+    return extendOpenPathToShape(segment, shape);
+  });
 }
 
 function railMidlineRun(shape: Shape, stitchLenMm: number): Point2D[] {
@@ -435,12 +447,12 @@ type SkeletonRasterInfo = {
   offsetY: number;
 };
 
-function routeSkeletonGraphBranches(
+function routeSkeletonGraphBranchSegments(
   graph: SkeletonGraph,
   raster: SkeletonRasterInfo,
   stitchLenMm: number,
   shape: Shape,
-): Point2D[] {
+): Point2D[][] {
   if (graph.branches.length === 0) return [];
 
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -453,12 +465,12 @@ function routeSkeletonGraphBranches(
 
   if (graph.branches.length === 1) {
     const only = prepared.get(graph.branches[0].id);
-    return only ? only.map(([x, y]) => [x, y]) : [];
+    return only ? [only.map(([x, y]) => [x, y])] : [];
   }
 
   const adjacency = buildSkeletonAdjacency(graph);
   const visitedBranches = new Set<string>();
-  const routed: Point2D[] = [];
+  const routed: Point2D[][] = [];
   const startNodes = graph.nodes
     .slice()
     .sort((a, b) => nodeStartRank(a) - nodeStartRank(b) || a.y - b.y || a.x - b.x);
@@ -477,9 +489,8 @@ function routeSkeletonGraphBranches(
       const forward = orientPreparedBranch(edge.branch, nodeId, prepared);
       if (forward.length < 2) continue;
       visitedBranches.add(edge.branch.id);
-      appendPoints(routed, forward);
+      routed.push(forward);
       visitNode(edge.nextNodeId);
-      appendPoints(routed, forward.slice().reverse());
     }
   };
 
@@ -494,10 +505,10 @@ function routeSkeletonGraphBranches(
     const line = prepared.get(branch.id);
     if (!line || line.length < 2) continue;
     visitedBranches.add(branch.id);
-    appendPoints(routed, line);
+    routed.push(line.map(([x, y]) => [x, y]));
   }
 
-  return dedupeSequential(routed);
+  return routed;
 }
 
 function prepareSkeletonBranch(
@@ -582,6 +593,14 @@ function appendPoints(target: Point2D[], points: Point2D[]): void {
     if (prev && prev[0] === point[0] && prev[1] === point[1]) continue;
     target.push([point[0], point[1]]);
   }
+}
+
+function flattenRunSegments(segments: Point2D[][]): Point2D[] {
+  const routed: Point2D[] = [];
+  for (const segment of segments) {
+    appendPoints(routed, segment);
+  }
+  return dedupeSequential(routed);
 }
 
 function activeSkeletonNeighbors(

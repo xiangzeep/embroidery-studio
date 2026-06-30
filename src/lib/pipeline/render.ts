@@ -15,7 +15,7 @@ import { applyPullCompensation } from "./compensation";
 import { emitTieIn, emitTieOff } from "./lockstitch";
 import { intersectScanline } from "./scanline";
 import { routeFillSegmentsSafely, tatamiBrick } from "./fill";
-import { medialAxisRun } from "./run";
+import { medialAxisRunSegments } from "./run";
 import { beanStitchPolyline } from "./bean-stitch";
 import { renderCurvedStrokeSatin } from "./curved-satin";
 import { brickSplit, estimateSatinWidthStats, extractRails, renderSatin2Rail } from "./satin";
@@ -38,6 +38,8 @@ const MAX_THIN_RUN_STITCH_MM = 2.2;
 const DEFAULT_BEAN_RUN_STITCH_MM = 1.0;
 const DEFAULT_BEAN_RUN_STITCH_MULTIPLIER = 2.5;
 const MAX_BEAN_RUN_STITCH_MM = 1.6;
+const STRICT_RUN_TRAVEL_THRESHOLD_MM = 2;
+const STRICT_RUN_TRIM_THRESHOLD_MM = 4;
 const DEFAULT_FILL_ANGLE_DEG = 45;
 const DEFAULT_SHAPE_STRATEGY_MIN_ASPECT = 1.5;
 
@@ -198,32 +200,39 @@ function renderRunTopOnly(
   // English note.
   // English note.
   const runStitchLenMm = resolveRunStitchLength(obj, ctx);
-  let pts: Point[] = ctx.opts.disableMedialAxis
+  let segments: Point[][] = ctx.opts.disableMedialAxis
     ? []
-    : medialAxisRun(obj.shape, runStitchLenMm);
-  if (pts.length === 0) {
-    pts = resamplePolyline(
+    : medialAxisRunSegments(obj.shape, runStitchLenMm);
+  if (segments.length === 0) {
+    const fallback = resamplePolyline(
       obj.shape.outer as Polygon,
       runStitchLenMm,
     );
+    if (fallback.length > 0) segments = [fallback];
   }
-  if (pts.length === 0) return block.stitches;
-  pts = orientPolylineToPreferredEntry(pts, ctx.opts.preferredEntry);
-  if (obj.strokeKind === "bean-run") {
-    pts = beanStitchPolyline(
+  if (segments.length === 0) return block.stitches;
+  const maxStitchMm = ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM;
+  const trimThresholdMm = strictRunObject(obj)
+    ? Math.min(ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM, STRICT_RUN_TRIM_THRESHOLD_MM)
+    : ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
+  for (const segment of orientRunSegments(segments, ctx.opts.preferredEntry)) {
+    let pts = segment;
+    if (obj.strokeKind === "bean-run") {
+      pts = beanStitchPolyline(
+        pts,
+        maxStitchMm,
+      );
+    }
+    appendStitchesWithJumps(
+      block,
       pts,
-      ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM,
+      "run",
+      obj.colorIndex,
+      maxStitchMm,
+      trimThresholdMm,
+      true,
     );
   }
-  appendStitchesWithJumps(
-    block,
-    pts,
-    "run",
-    obj.colorIndex,
-    ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM,
-    ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM,
-    true,
-  );
   return block.stitches;
 }
 
@@ -274,6 +283,57 @@ function orientPolylineToPreferredEntry(
   }
   if (bestIndex === 0) return pts;
   return pts.slice(bestIndex).concat(pts.slice(0, bestIndex));
+}
+
+function orientRunSegments(
+  segments: Point[][],
+  preferredEntry: Point | undefined,
+): Point[][] {
+  const remaining = segments
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.map(([x, y]) => [x, y] as Point));
+  const oriented: Point[][] = [];
+
+  if (remaining.length === 0) return oriented;
+  const first = remaining.shift() as Point[];
+  const firstOriented = orientPolylineToPreferredEntry(first, preferredEntry);
+  oriented.push(firstOriented);
+  let cursor = firstOriented[firstOriented.length - 1];
+
+  while (remaining.length > 0) {
+    let bestIndex = 0;
+    let bestReverse = false;
+    let bestDistance = Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const segment = remaining[i];
+      const start = segment[0];
+      const end = segment[segment.length - 1];
+      const startDistance = distance(cursor[0], cursor[1], start[0], start[1]);
+      const endDistance = distance(cursor[0], cursor[1], end[0], end[1]);
+      if (startDistance < bestDistance) {
+        bestDistance = startDistance;
+        bestIndex = i;
+        bestReverse = false;
+      }
+      if (endDistance < bestDistance) {
+        bestDistance = endDistance;
+        bestIndex = i;
+        bestReverse = true;
+      }
+    }
+    const [segment] = remaining.splice(bestIndex, 1);
+    const next = bestReverse ? segment.slice().reverse() : segment;
+    oriented.push(next);
+    cursor = next[next.length - 1];
+  }
+
+  return oriented;
+}
+
+function strictRunObject(obj: EmbroideryObject): boolean {
+  if (obj.kind !== "run") return false;
+  if (obj.strokeKind === "thin-run" || obj.strokeKind === "bean-run") return true;
+  return obj.strokeMetrics?.isStrokeLike === true;
 }
 
 function renderSatinTopOnly(
@@ -533,6 +593,15 @@ export function connectObjectsWithSafety(
   nextColorIndex: number,
   policy: TrimPolicy,
 ): Stitch[] {
+  if (strictRunObject(prevObj) || strictRunObject(nextObj)) {
+    const closedLoopTravel = closedRunLoopObject(prevObj) || closedRunLoopObject(nextObj);
+    return connectObjects(prevExit, nextEntry, nextColorIndex, {
+      ...policy,
+      travelRunUntilMm: closedLoopTravel ? 0 : Math.min(policy.travelRunUntilMm, STRICT_RUN_TRAVEL_THRESHOLD_MM),
+      trimThresholdMm: Math.min(policy.trimThresholdMm, STRICT_RUN_TRIM_THRESHOLD_MM),
+    });
+  }
+
   const safe = isSafeTravelBetweenObjects({
     fromObject: prevObj,
     toObject: nextObj,
@@ -549,6 +618,11 @@ export function connectObjectsWithSafety(
     ...policy,
     travelRunUntilMm: 0,
   });
+}
+
+function closedRunLoopObject(obj: EmbroideryObject): boolean {
+  if (!strictRunObject(obj)) return false;
+  return (obj.strokeMetrics?.loopCount ?? 0) > 0 || obj.shape.holes.length > 0;
 }
 
 /**

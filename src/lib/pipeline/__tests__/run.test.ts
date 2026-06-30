@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { medialAxisRun } from "../run";
+import { medialAxisRun, medialAxisRunSegments } from "../run";
 import type { Shape } from "../types";
 
 describe("medialAxisRun", () => {
@@ -232,5 +232,31 @@ describe("medialAxisRun", () => {
     expect(Math.min(...ys)).toBeLessThan(1.0);
     expect(Math.max(...ys)).toBeGreaterThan(10.6);
     expect(shortSteps.length).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps closed loops and trunk branches as separate run segments", () => {
+    const shape: Shape = {
+      outer: [
+        [4, 0], [8, 0], [8, 4], [13, 4], [13, 5], [8, 5], [8, 12], [0, 12], [0, 4], [4, 4],
+      ],
+      holes: [
+        [[5, 7], [7, 7], [7, 10], [5, 10]],
+      ],
+    };
+
+    const segments = medialAxisRunSegments(shape, 2.0);
+
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments.some((segment) => Math.min(...segment.map(([x]) => x)) < 2.7)).toBe(true);
+    expect(segments.some((segment) => Math.max(...segment.map(([x]) => x)) > 11.6)).toBe(true);
+
+    const loopOnly: Shape = {
+      outer: [[0, 0], [12, 0], [12, 8], [0, 8]],
+      holes: [[[3, 2], [9, 2], [9, 6], [3, 6]]],
+    };
+    const [loopSegment] = medialAxisRunSegments(loopOnly, 2.0);
+    const first = loopSegment[0];
+    const last = loopSegment[loopSegment.length - 1];
+    expect(Math.hypot(first[0] - last[0], first[1] - last[1])).toBeLessThanOrEqual(0.35);
   });
 });
