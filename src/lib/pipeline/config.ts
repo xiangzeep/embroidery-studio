@@ -100,7 +100,7 @@ export function makeDefaultConfig(fabric: FabricKind): ConversionConfig {
     stitchDensity: FABRIC_PROFILES[fabric].defaultDensityMm,
     satinMaxWidthMm: 5,
     smoothing: 2,
-    boundaryDilatePx: 1,
+    boundaryDilatePx: 0,
     minRegionAreaPx: 12,
     removeWhiteBackground: true,
     fillAngleDeg: 45,
