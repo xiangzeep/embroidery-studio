@@ -136,6 +136,23 @@ describe("orderStrokeBranchObjects", () => {
       "detour",
     ]);
   });
+
+  test("ranks edge continuity over a slightly nearer sharp turn", () => {
+    const main = lineStroke("main", [[0, 0], [4, 0], [6, 0]], 6);
+    const sharpTurn = lineStroke("sharp-turn", [[6.1, 0.4], [6.1, 2.2], [6.1, 4]], 3.6);
+    const smoothContinuation = lineStroke("smooth", [[6.8, 0], [9, 0], [12, 0]], 5.2);
+
+    const ordered = orderStrokeBranchObjects(
+      [sharpTurn, smoothContinuation, main],
+      [0, 0],
+    );
+
+    expect(ordered.map((obj) => obj.id)).toEqual([
+      "main",
+      "smooth",
+      "sharp-turn",
+    ]);
+  });
 });
 
 describe("optimizeOrder stroke branch integration", () => {

@@ -1,10 +1,38 @@
 import { describe, expect, it } from "vitest";
 import { analyzeDstBytes } from "../dst-analyzer";
-import { writeDstBytes } from "../dst-writer";
+import { buildStitchCommands, writeDstBytes } from "../dst-writer";
 import { optimizePatternCommands } from "../command-optimizer";
 import type { StitchPattern } from "../types";
 
 describe("DST writer validation", () => {
+  it("builds an explicit command stream before DST encoding", () => {
+    const pattern: StitchPattern = {
+      widthMm: 20,
+      heightMm: 20,
+      totalStitches: 2,
+      blocks: [
+        {
+          colorIndex: 0,
+          rgb: [0, 0, 0],
+          stitches: [
+            { x: 1, y: 0, kind: "run", colorIndex: 0 },
+            { x: 5, y: 0, kind: "jump", colorIndex: 0 },
+            { x: 5, y: 0, kind: "stop", colorIndex: 0 },
+            { x: 6, y: 0, kind: "fill", colorIndex: 1 },
+          ],
+        },
+      ],
+    };
+
+    expect(buildStitchCommands(pattern).map((command) => command.type)).toEqual([
+      "MOVE",
+      "STITCH",
+      "JUMP",
+      "COLOR_CHANGE",
+      "STITCH",
+    ]);
+  });
+
   it("does not reintroduce zero-distance function codes after command optimization", () => {
     const pattern: StitchPattern = {
       widthMm: 20,

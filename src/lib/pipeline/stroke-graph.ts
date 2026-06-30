@@ -3,6 +3,8 @@ import { isSafeTravelBetweenObjects } from "./safe-travel";
 
 const EXACT_STROKE_ROUTE_OBJECT_CAP = 12;
 const SAFE_TRAVEL_COST_MULTIPLIER = 0.2;
+const CONTINUITY_TURN_PENALTY_MM = 8;
+const CURVATURE_PENALTY_MM = 0.6;
 
 export function isStrokeBranchGroup(objects: EmbroideryObject[]): boolean {
   return objects.length > 0 && objects.every((obj) =>
@@ -219,12 +221,82 @@ function strokeTransitionCost(
   to: Point2D,
 ): number {
   const distance = Math.hypot(to[0] - from[0], to[1] - from[1]);
-  if (distance <= 1e-7) return 0;
   const safe = isSafeTravelBetweenObjects({
     fromObject: fromObj,
     toObject: toObj,
     from,
     to,
   });
-  return safe ? distance * SAFE_TRAVEL_COST_MULTIPLIER : distance;
+  const travelCost = safe ? distance * SAFE_TRAVEL_COST_MULTIPLIER : distance;
+  return travelCost +
+    continuityPenalty(fromObj, toObj, from, to) +
+    curvaturePenalty(toObj);
+}
+
+function continuityPenalty(
+  fromObj: EmbroideryObject,
+  toObj: EmbroideryObject,
+  from: Point2D,
+  to: Point2D,
+): number {
+  const exitTangent = strokeTangentAtEndpoint(fromObj, from, "exit");
+  const entryTangent = strokeTangentAtEndpoint(toObj, to, "entry");
+  if (!exitTangent || !entryTangent) return 0;
+  const turn = angleBetween(exitTangent, entryTangent);
+  return (turn / Math.PI) * CONTINUITY_TURN_PENALTY_MM;
+}
+
+function curvaturePenalty(obj: EmbroideryObject): number {
+  return strokeCurvature(obj.shape.outer) * CURVATURE_PENALTY_MM;
+}
+
+function strokeTangentAtEndpoint(
+  obj: EmbroideryObject,
+  endpoint: Point2D,
+  role: "entry" | "exit",
+): Point2D | null {
+  const points = obj.shape.outer;
+  if (points.length < 2) return null;
+  let bestIndex = 0;
+  let bestDistance = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const distance = distSq(points[i], endpoint);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+
+  const neighborIndex = bestIndex === 0 ? 1 : bestIndex - 1;
+  const a = points[bestIndex];
+  const b = points[neighborIndex];
+  const tangent: Point2D = role === "entry"
+    ? [b[0] - a[0], b[1] - a[1]]
+    : [a[0] - b[0], a[1] - b[1]];
+  return normalize(tangent);
+}
+
+function strokeCurvature(points: Point2D[]): number {
+  if (points.length < 3) return 0;
+  let total = 0;
+  let turns = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const a = normalize([points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]]);
+    const b = normalize([points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]]);
+    if (!a || !b) continue;
+    total += angleBetween(a, b);
+    turns++;
+  }
+  return turns === 0 ? 0 : total / turns / Math.PI;
+}
+
+function normalize(vector: Point2D): Point2D | null {
+  const length = Math.hypot(vector[0], vector[1]);
+  if (length <= 1e-7) return null;
+  return [vector[0] / length, vector[1] / length];
+}
+
+function angleBetween(a: Point2D, b: Point2D): number {
+  const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1]));
+  return Math.acos(dot);
 }

@@ -7,6 +7,15 @@ const MAX_DST_MOVE = 100;
 
 type Command = "stitch" | "jump" | "stop";
 
+export type StitchCommandType = "MOVE" | "STITCH" | "JUMP" | "COLOR_CHANGE";
+
+export type StitchCommand = {
+  type: StitchCommandType;
+  x: number;
+  y: number;
+  colorIndex: number;
+};
+
 export function writeDst(pattern: StitchPattern): Blob {
   const bytes = writeDstBytes(pattern);
   const buffer = new ArrayBuffer(bytes.byteLength);
@@ -21,21 +30,25 @@ export function writeDstBytes(pattern: StitchPattern): Uint8Array {
   let stitchRecords = 0;
   let colorChanges = 0;
 
-  for (const block of pattern.blocks) {
-    for (const stitch of block.stitches) {
-      const targetX = Math.round(stitch.x * 10);
-      const targetY = Math.round(stitch.y * 10);
-      const command = commandForStitch(stitch);
-      const moves = splitDelta(targetX - currentX, targetY - currentY);
-      for (let i = 0; i < moves.length; i++) {
-        const [dx, dy] = moves[i];
-        const partCommand = i === moves.length - 1 ? command : "jump";
-        records.push(...encodeRecord(dx, dy, partCommand));
-        currentX += dx;
-        currentY += dy;
-        if (partCommand === "stop") colorChanges += 1;
-        else stitchRecords += 1;
-      }
+  for (const stitchCommand of buildStitchCommands(pattern)) {
+    if (stitchCommand.type === "MOVE") {
+      currentX = Math.round(stitchCommand.x * 10);
+      currentY = Math.round(stitchCommand.y * 10);
+      continue;
+    }
+
+    const targetX = Math.round(stitchCommand.x * 10);
+    const targetY = Math.round(stitchCommand.y * 10);
+    const command = dstCommandForStitchCommand(stitchCommand);
+    const moves = splitDelta(targetX - currentX, targetY - currentY);
+    for (let i = 0; i < moves.length; i++) {
+      const [dx, dy] = moves[i];
+      const partCommand = i === moves.length - 1 ? command : "jump";
+      records.push(...encodeRecord(dx, dy, partCommand));
+      currentX += dx;
+      currentY += dy;
+      if (partCommand === "stop") colorChanges += 1;
+      else stitchRecords += 1;
     }
   }
 
@@ -47,9 +60,34 @@ export function writeDstBytes(pattern: StitchPattern): Uint8Array {
   return out;
 }
 
-function commandForStitch(stitch: Stitch): Command {
-  if (stitch.kind === "stop") return "stop";
-  if (stitch.kind === "jump" || stitch.kind === "trim") return "jump";
+export function buildStitchCommands(pattern: StitchPattern): StitchCommand[] {
+  const commands: StitchCommand[] = [{ type: "MOVE", x: 0, y: 0, colorIndex: 0 }];
+  for (const block of pattern.blocks) {
+    for (const stitch of block.stitches) {
+      commands.push(stitchToCommand(stitch));
+    }
+  }
+  return commands;
+}
+
+function stitchToCommand(stitch: Stitch): StitchCommand {
+  return {
+    type: commandTypeForStitch(stitch),
+    x: stitch.x,
+    y: stitch.y,
+    colorIndex: stitch.colorIndex,
+  };
+}
+
+function commandTypeForStitch(stitch: Stitch): StitchCommandType {
+  if (stitch.kind === "stop") return "COLOR_CHANGE";
+  if (stitch.kind === "jump" || stitch.kind === "trim") return "JUMP";
+  return "STITCH";
+}
+
+function dstCommandForStitchCommand(command: StitchCommand): Command {
+  if (command.type === "COLOR_CHANGE") return "stop";
+  if (command.type === "JUMP") return "jump";
   return "stitch";
 }
 
