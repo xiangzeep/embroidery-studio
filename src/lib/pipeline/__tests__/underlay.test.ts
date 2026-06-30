@@ -284,7 +284,7 @@ describe("fillUnderlay", () => {
     for (const seg of segs) {
       expect(seg.length).toBe(2);
       const [p0, p1] = seg;
-      expect(p0[0]).toBeCloseTo(p1[0], 4); // 垂直 = x 同一
+      expect(p0[0]).toBeCloseTo(p1[0], 4); // 垂直 = x 相同
       const ys = [p0[1], p1[1]].sort((a, b) => a - b);
       expect(ys[0]).toBeCloseTo(0, 4);
       expect(ys[1]).toBeCloseTo(10, 4);

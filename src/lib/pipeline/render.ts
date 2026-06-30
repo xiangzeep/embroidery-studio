@@ -495,7 +495,7 @@ function applyCompForRender(
  *
  *   - distance < `policy.travelRunUntilMm` -> one stitch (kind="run", coordinate=nextEntry)
  *   - `travelRunUntilMm` <= distance < `trimThresholdMm` -> one stitch (kind="jump", coordinate=nextEntry)
- *   - 距離 >= `trimThresholdMm`                  → 2 stitch (kind="trim" @prevExit, kind="jump" @nextEntry)
+ *   - 距离 >= `trimThresholdMm`                  → 2 stitch (kind="trim" @prevExit, kind="jump" @nextEntry)
  *
  * English note.
  */

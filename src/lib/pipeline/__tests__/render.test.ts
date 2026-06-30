@@ -1912,7 +1912,7 @@ describe("translated case", () => {
     expect(r[1]).toMatchObject({ x: 10, y: 0, kind: "jump", colorIndex: 4 });
   });
 
-  it("Euclidean 距離 (3-4-5)", () => {
+  it("Euclidean 距离 (3-4-5)", () => {
     const r = connectObjects([0, 0], [3, 4], 1, policy);
     expect(r).toHaveLength(1);
     expect(r[0].kind).toBe("jump");
