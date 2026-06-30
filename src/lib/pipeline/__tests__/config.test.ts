@@ -31,7 +31,7 @@ describe("makeDefaultConfig", () => {
     expect(cfg.colorCount).toBe(6);
     expect(cfg.satinMaxWidthMm).toBe(5);
     expect(cfg.smoothing).toBe(2);
-    expect(cfg.boundaryDilatePx).toBe(0);
+    expect(cfg.boundaryDilatePx).toBe(1);
     expect(cfg.minRegionAreaPx).toBe(12);
     expect(cfg.removeWhiteBackground).toBe(true);
     expect(cfg.fillAngleDeg).toBe(45);
