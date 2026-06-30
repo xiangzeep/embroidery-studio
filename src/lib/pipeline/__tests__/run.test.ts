@@ -193,4 +193,44 @@ describe("medialAxisRun", () => {
     expect(minStep).toBeGreaterThan(0.7);
     expect(maxStep).toBeLessThan(3.2);
   });
+
+  it("preserves a closed run route for loop-only skeleton components", () => {
+    const shape: Shape = {
+      outer: [[0, 0], [12, 0], [12, 8], [0, 8]],
+      holes: [[[3, 2], [9, 2], [9, 6], [3, 6]]],
+    };
+
+    const pts = medialAxisRun(shape, 2.0);
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const endGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
+
+    expect(pts.length).toBeGreaterThanOrEqual(8);
+    expect(endGap).toBeLessThanOrEqual(0.35);
+  });
+
+  it("routes loop and branch strokes without falling back to pixel-density skeleton points", () => {
+    const shape: Shape = {
+      outer: [
+        [4, 0], [8, 0], [8, 4], [13, 4], [13, 5], [8, 5], [8, 12], [0, 12], [0, 4], [4, 4],
+      ],
+      holes: [
+        [[5, 7], [7, 7], [7, 10], [5, 10]],
+      ],
+    };
+
+    const pts = medialAxisRun(shape, 2.0);
+    const xs = pts.map(([x]) => x);
+    const ys = pts.map(([, y]) => y);
+    const shortSteps = pts.slice(1).filter((point, index) => {
+      const prev = pts[index];
+      return Math.hypot(point[0] - prev[0], point[1] - prev[1]) < 0.75;
+    });
+
+    expect(Math.min(...xs)).toBeLessThan(2.7);
+    expect(Math.max(...xs)).toBeGreaterThan(11.6);
+    expect(Math.min(...ys)).toBeLessThan(1.0);
+    expect(Math.max(...ys)).toBeGreaterThan(10.6);
+    expect(shortSteps.length).toBeLessThanOrEqual(4);
+  });
 });

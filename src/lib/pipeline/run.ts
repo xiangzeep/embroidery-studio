@@ -53,18 +53,9 @@ function branchAwareSkeletonRun(shape: Shape, stitchLenMm: number): Point2D[] {
     width: raster.width,
     height: raster.height,
   });
-  const pathPx = isRoutableBranchGraph(graph)
-    ? routeSkeletonTree(graph)
-    : shape.holes.length > 0
-      ? routeSkeletonPixelNetwork(thin, raster.width, raster.height)
-      : [];
-  if (pathPx.length < 2) return [];
+  const sampled = routeSkeletonGraphBranches(graph, raster, stitchLenMm, shape);
+  if (sampled.length < 2) return [];
 
-  const pathMm: Point2D[] = pathPx.map(([px, py]) => [
-    raster.offsetX + (px + 0.5) / SKELETON_RUN_PX_PER_MM,
-    raster.offsetY + (py + 0.5) / SKELETON_RUN_PX_PER_MM,
-  ]);
-  const sampled = resampleOpenLine(dedupeSequential(pathMm), stitchLenMm);
   return shouldExtendBranchAwarePath(shape, thin, raster.width, raster.height)
     ? extendOpenPathToShape(sampled, shape)
     : sampled;
@@ -439,116 +430,130 @@ type RoutedAdj = {
   length: number;
 };
 
-function isRoutableBranchGraph(graph: SkeletonGraph): boolean {
-  if (graph.branches.length < 2 || graph.nodes.length < 2) return false;
-  if (graph.branches.some((branch) => branch.isLoop)) return false;
-  if (graph.branches.some((branch) => !branch.startNodeId || !branch.endNodeId)) return false;
+type SkeletonRasterInfo = {
+  offsetX: number;
+  offsetY: number;
+};
 
-  const adjacency = buildSkeletonAdjacency(graph);
-  const startNode = graph.nodes[0]?.id;
-  if (!startNode) return false;
-
-  const visited = new Set<string>();
-  const stack = [startNode];
-  while (stack.length > 0) {
-    const nodeId = stack.pop()!;
-    if (visited.has(nodeId)) continue;
-    visited.add(nodeId);
-    for (const edge of adjacency.get(nodeId) ?? []) {
-      if (!visited.has(edge.nextNodeId)) stack.push(edge.nextNodeId);
-    }
-  }
-
-  return visited.size === graph.nodes.length && graph.branches.length === graph.nodes.length - 1;
-}
-
-function routeSkeletonTree(graph: SkeletonGraph): Point2D[] {
-  const adjacency = buildSkeletonAdjacency(graph);
-  const branchMap = new Map(graph.branches.map((branch) => [branch.id, branch]));
-  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
-  const leafIds = graph.nodes.filter((node) => node.degree <= 1).map((node) => node.id);
-  if (leafIds.length < 2) return [];
-
-  const firstLeaf = leafIds[0];
-  const diameterStart = farthestNodeFrom(firstLeaf, adjacency).nodeId;
-  const { nodeId: diameterEnd, previous } = farthestNodeFrom(diameterStart, adjacency);
-  const diameterBranchIds = recoverDiameterBranchIds(diameterStart, diameterEnd, previous);
-  if (diameterBranchIds.length === 0) return [];
-
-  const diameterBranchSet = new Set(diameterBranchIds);
-  const routed: Point2D[] = [];
-  const backboneNodeIds = recoverBackboneNodes(
-    diameterStart,
-    diameterEnd,
-    diameterBranchIds,
-    branchMap,
-  );
-
-  for (let i = 0; i < backboneNodeIds.length; i++) {
-    const nodeId = backboneNodeIds[i];
-    const blocked = new Set<string>();
-    if (i > 0) blocked.add(diameterBranchIds[i - 1]);
-    if (i < diameterBranchIds.length) blocked.add(diameterBranchIds[i]);
-    exploreSideBranches(nodeId, blocked, adjacency, diameterBranchSet, routed);
-
-    if (i < diameterBranchIds.length) {
-      const branch = branchMap.get(diameterBranchIds[i]);
-      if (!branch) continue;
-      appendPoints(routed, orientBranchPoints(branch, nodeId));
-    }
-  }
-
-  if (routed.length === 0 && backboneNodeIds.length > 0) {
-    const node = nodeMap.get(backboneNodeIds[0]);
-    if (node) routed.push([node.x, node.y]);
-  }
-
-  return routed;
-}
-
-function routeSkeletonPixelNetwork(
-  skel: Uint8Array,
-  width: number,
-  height: number,
+function routeSkeletonGraphBranches(
+  graph: SkeletonGraph,
+  raster: SkeletonRasterInfo,
+  stitchLenMm: number,
+  shape: Shape,
 ): Point2D[] {
-  const component = largestSkeletonComponent(skel, width, height);
-  if (component.length < 2) return [];
+  if (graph.branches.length === 0) return [];
 
-  const componentSet = new Set(component.map(([x, y]) => pixelKey(x, y)));
-  const adjacency = new Map<string, string[]>();
-  for (const [x, y] of component) {
-    const key = pixelKey(x, y);
-    const neighbors: string[] = [];
-    for (const [dx, dy] of SKELETON_NEIGHBOR_OFFSETS) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-      const neighborKey = pixelKey(nx, ny);
-      if (componentSet.has(neighborKey)) neighbors.push(neighborKey);
+  const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+  const prepared = new Map<string, Point2D[]>();
+  for (const branch of graph.branches) {
+    const line = prepareSkeletonBranch(branch, raster, stitchLenMm, shape, nodeMap);
+    if (line.length >= 2) prepared.set(branch.id, line);
+  }
+  if (prepared.size === 0) return [];
+
+  if (graph.branches.length === 1) {
+    const only = prepared.get(graph.branches[0].id);
+    return only ? only.map(([x, y]) => [x, y]) : [];
+  }
+
+  const adjacency = buildSkeletonAdjacency(graph);
+  const visitedBranches = new Set<string>();
+  const routed: Point2D[] = [];
+  const startNodes = graph.nodes
+    .slice()
+    .sort((a, b) => nodeStartRank(a) - nodeStartRank(b) || a.y - b.y || a.x - b.x);
+
+  const visitNode = (nodeId: string): void => {
+    const edges = (adjacency.get(nodeId) ?? [])
+      .filter((edge) => !visitedBranches.has(edge.branch.id))
+      .sort((a, b) => {
+        const an = nodeMap.get(a.nextNodeId);
+        const bn = nodeMap.get(b.nextNodeId);
+        return (an?.y ?? 0) - (bn?.y ?? 0) || (an?.x ?? 0) - (bn?.x ?? 0) || a.length - b.length;
+      });
+
+    for (const edge of edges) {
+      if (visitedBranches.has(edge.branch.id)) continue;
+      const forward = orientPreparedBranch(edge.branch, nodeId, prepared);
+      if (forward.length < 2) continue;
+      visitedBranches.add(edge.branch.id);
+      appendPoints(routed, forward);
+      visitNode(edge.nextNodeId);
+      appendPoints(routed, forward.slice().reverse());
     }
-    adjacency.set(key, neighbors);
+  };
+
+  for (const node of startNodes) {
+    if ((adjacency.get(node.id) ?? []).some((edge) => !visitedBranches.has(edge.branch.id))) {
+      visitNode(node.id);
+    }
   }
 
-  const startSeed = component.find(([x, y]) => (adjacency.get(pixelKey(x, y))?.length ?? 0) <= 1) ?? component[0];
-  const startKey = farthestPixelFrom(pixelKey(startSeed[0], startSeed[1]), adjacency).key;
-  const farthest = farthestPixelFrom(startKey, adjacency);
-  const endKey = farthest.key;
-  const backbone = recoverPixelPath(startKey, endKey, farthest.previous);
-  if (backbone.length < 2) return component.map(([x, y]) => [x, y] as Point2D);
-  const treeAdjacency = buildPixelTreeAdjacency(startKey, farthest.previous);
-
-  const backboneSet = new Set(backbone);
-  const routed: string[] = [];
-  for (let i = 0; i < backbone.length; i++) {
-    const nodeKey = backbone[i];
-    const blocked = new Set<string>();
-    if (i > 0) blocked.add(backbone[i - 1]);
-    if (i + 1 < backbone.length) blocked.add(backbone[i + 1]);
-    explorePixelSideBranches(nodeKey, blocked, treeAdjacency, backboneSet, routed);
-    appendPixelKey(routed, nodeKey);
+  for (const branch of graph.branches) {
+    if (visitedBranches.has(branch.id)) continue;
+    const line = prepared.get(branch.id);
+    if (!line || line.length < 2) continue;
+    visitedBranches.add(branch.id);
+    appendPoints(routed, line);
   }
 
-  return dedupeSequential(routed.map((key) => parsePixelKey(key)));
+  return dedupeSequential(routed);
+}
+
+function prepareSkeletonBranch(
+  branch: SkeletonBranch,
+  raster: SkeletonRasterInfo,
+  stitchLenMm: number,
+  shape: Shape,
+  nodeMap: Map<string, { degree: number }>,
+): Point2D[] {
+  const points = branch.points.map(([px, py]) => pixelToMm(px, py, raster));
+  if (branch.isLoop && points.length >= 2) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-6) {
+      points.push([first[0], first[1]]);
+    }
+  } else if (points.length >= 2) {
+    const startNode = branch.startNodeId ? nodeMap.get(branch.startNodeId) : undefined;
+    const endNode = branch.endNodeId ? nodeMap.get(branch.endNodeId) : undefined;
+    if (startNode && startNode.degree <= 1) {
+      points[0] = extendEndpointTowardBoundary(points[0], points[1], shape);
+    }
+    if (endNode && endNode.degree <= 1) {
+      const lastIndex = points.length - 1;
+      points[lastIndex] = extendEndpointTowardBoundary(points[lastIndex], points[lastIndex - 1], shape);
+    }
+  }
+  return processRunPolyline(points, stitchLenMm);
+}
+
+function processRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
+  if (line.length < 2) return line.map(([x, y]) => [x, y]);
+  const prepared = prepareRunPolyline(dedupeSequential(line), stitchLenMm);
+  return resampleAdaptiveOpenLine(prepared, stitchLenMm);
+}
+
+function pixelToMm(px: number, py: number, raster: SkeletonRasterInfo): Point2D {
+  return [
+    raster.offsetX + (px + 0.5) / SKELETON_RUN_PX_PER_MM,
+    raster.offsetY + (py + 0.5) / SKELETON_RUN_PX_PER_MM,
+  ];
+}
+
+function nodeStartRank(node: { degree: number }): number {
+  if (node.degree <= 1) return 0;
+  return 1;
+}
+
+function orientPreparedBranch(
+  branch: SkeletonBranch,
+  fromNodeId: string,
+  prepared: Map<string, Point2D[]>,
+): Point2D[] {
+  const points = prepared.get(branch.id) ?? [];
+  if (branch.startNodeId === fromNodeId) return points.map(([x, y]) => [x, y]);
+  return points.slice().reverse().map(([x, y]) => [x, y]);
 }
 
 function buildSkeletonAdjacency(graph: SkeletonGraph): Map<string, RoutedAdj[]> {
@@ -571,255 +576,12 @@ function buildSkeletonAdjacency(graph: SkeletonGraph): Map<string, RoutedAdj[]> 
   return adjacency;
 }
 
-function farthestNodeFrom(
-  startNodeId: string,
-  adjacency: Map<string, RoutedAdj[]>,
-): {
-  nodeId: string;
-  distance: number;
-  previous: Map<string, { prevNodeId: string; branchId: string }>;
-} {
-  const previous = new Map<string, { prevNodeId: string; branchId: string }>();
-  let bestNodeId = startNodeId;
-  let bestDistance = 0;
-
-  const visit = (nodeId: string, parentId: string | null, distance: number): void => {
-    if (distance > bestDistance) {
-      bestDistance = distance;
-      bestNodeId = nodeId;
-    }
-    for (const edge of adjacency.get(nodeId) ?? []) {
-      if (edge.nextNodeId === parentId) continue;
-      previous.set(edge.nextNodeId, { prevNodeId: nodeId, branchId: edge.branch.id });
-      visit(edge.nextNodeId, nodeId, distance + edge.length);
-    }
-  };
-
-  visit(startNodeId, null, 0);
-  return { nodeId: bestNodeId, distance: bestDistance, previous };
-}
-
-function recoverDiameterBranchIds(
-  startNodeId: string,
-  endNodeId: string,
-  previous: Map<string, { prevNodeId: string; branchId: string }>,
-): string[] {
-  const reversed: string[] = [];
-  let cursor = endNodeId;
-  while (cursor !== startNodeId) {
-    const prev = previous.get(cursor);
-    if (!prev) return [];
-    reversed.push(prev.branchId);
-    cursor = prev.prevNodeId;
-  }
-  return reversed.reverse();
-}
-
-function recoverBackboneNodes(
-  startNodeId: string,
-  endNodeId: string,
-  branchIds: string[],
-  branchMap: Map<string, SkeletonBranch>,
-): string[] {
-  const nodes = [startNodeId];
-  let current = startNodeId;
-  for (const branchId of branchIds) {
-    const branch = branchMap.get(branchId);
-    if (!branch || !branch.startNodeId || !branch.endNodeId) return [startNodeId, endNodeId];
-    current = branch.startNodeId === current ? branch.endNodeId : branch.startNodeId;
-    nodes.push(current);
-  }
-  return nodes;
-}
-
-function exploreSideBranches(
-  nodeId: string,
-  blockedBranchIds: Set<string>,
-  adjacency: Map<string, RoutedAdj[]>,
-  backboneBranchIds: Set<string>,
-  routed: Point2D[],
-): void {
-  for (const edge of adjacency.get(nodeId) ?? []) {
-    if (blockedBranchIds.has(edge.branch.id)) continue;
-    if (backboneBranchIds.has(edge.branch.id)) continue;
-    blockedBranchIds.add(edge.branch.id);
-
-    const forward = orientBranchPoints(edge.branch, nodeId);
-    appendPoints(routed, forward);
-    exploreSideBranches(
-      edge.nextNodeId,
-      blockedBranchIds,
-      adjacency,
-      backboneBranchIds,
-      routed,
-    );
-    appendPoints(routed, forward.slice().reverse());
-  }
-}
-
-function orientBranchPoints(branch: SkeletonBranch, fromNodeId: string): Point2D[] {
-  if (branch.startNodeId === fromNodeId) return branch.points.map(([x, y]) => [x, y]);
-  return branch.points.slice().reverse().map(([x, y]) => [x, y]);
-}
-
 function appendPoints(target: Point2D[], points: Point2D[]): void {
   for (const point of points) {
     const prev = target[target.length - 1];
     if (prev && prev[0] === point[0] && prev[1] === point[1]) continue;
     target.push([point[0], point[1]]);
   }
-}
-
-function largestSkeletonComponent(
-  skel: Uint8Array,
-  width: number,
-  height: number,
-): Array<[number, number]> {
-  const visited = new Set<string>();
-  let best: Array<[number, number]> = [];
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (skel[y * width + x] !== 1) continue;
-      const startKey = pixelKey(x, y);
-      if (visited.has(startKey)) continue;
-      const stack: Array<[number, number]> = [[x, y]];
-      const component: Array<[number, number]> = [];
-      visited.add(startKey);
-      while (stack.length > 0) {
-        const [cx, cy] = stack.pop()!;
-        component.push([cx, cy]);
-        for (const [dx, dy] of SKELETON_NEIGHBOR_OFFSETS) {
-          const nx = cx + dx;
-          const ny = cy + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-          if (skel[ny * width + nx] !== 1) continue;
-          const nextKey = pixelKey(nx, ny);
-          if (visited.has(nextKey)) continue;
-          visited.add(nextKey);
-          stack.push([nx, ny]);
-        }
-      }
-      if (component.length > best.length) best = component;
-    }
-  }
-
-  return best;
-}
-
-function farthestPixelFrom(
-  startKey: string,
-  adjacency: Map<string, string[]>,
-): { key: string; previous: Map<string, string>; distance: Map<string, number> } {
-  const previous = new Map<string, string>();
-  const distance = new Map<string, number>([[startKey, 0]]);
-  const queue = [startKey];
-  let cursor = 0;
-  let farthestKey = startKey;
-
-  while (cursor < queue.length) {
-    const key = queue[cursor++];
-    const base = distance.get(key) ?? 0;
-    if (base > (distance.get(farthestKey) ?? 0)) farthestKey = key;
-    for (const next of adjacency.get(key) ?? []) {
-      if (distance.has(next)) continue;
-      distance.set(next, base + 1);
-      previous.set(next, key);
-      queue.push(next);
-    }
-  }
-
-  return { key: farthestKey, previous, distance };
-}
-
-function recoverPixelPath(
-  startKey: string,
-  endKey: string,
-  previous: Map<string, string>,
-): string[] {
-  const reversed = [endKey];
-  let cursor = endKey;
-  while (cursor !== startKey) {
-    const prev = previous.get(cursor);
-    if (!prev) return [startKey];
-    reversed.push(prev);
-    cursor = prev;
-  }
-  return reversed.reverse();
-}
-
-function explorePixelSideBranches(
-  nodeKey: string,
-  blockedNeighbors: Set<string>,
-  treeAdjacency: Map<string, string[]>,
-  backboneSet: Set<string>,
-  routed: string[],
-): void {
-  for (const nextKey of treeAdjacency.get(nodeKey) ?? []) {
-    if (blockedNeighbors.has(nextKey)) continue;
-    if (backboneSet.has(nextKey)) continue;
-    blockedNeighbors.add(nextKey);
-    const branchTrail = tracePixelBranch(nodeKey, nextKey, treeAdjacency, backboneSet);
-    for (const key of branchTrail) appendPixelKey(routed, key);
-    for (let i = branchTrail.length - 2; i >= 0; i--) {
-      appendPixelKey(routed, branchTrail[i]);
-    }
-  }
-}
-
-function tracePixelBranch(
-  originKey: string,
-  nextKey: string,
-  treeAdjacency: Map<string, string[]>,
-  backboneSet: Set<string>,
-): string[] {
-  const trail = [originKey, nextKey];
-  let prev = originKey;
-  let current = nextKey;
-
-  while (true) {
-    const candidates = (treeAdjacency.get(current) ?? []).filter((candidate) => candidate !== prev);
-    const offBackbone = candidates.filter((candidate) => !backboneSet.has(candidate));
-    const next = offBackbone[0];
-    if (!next) break;
-    trail.push(next);
-    prev = current;
-    current = next;
-  }
-
-  return trail;
-}
-
-function appendPixelKey(target: string[], key: string): void {
-  if (target[target.length - 1] === key) return;
-  target.push(key);
-}
-
-function buildPixelTreeAdjacency(
-  startKey: string,
-  previous: Map<string, string>,
-): Map<string, string[]> {
-  const adjacency = new Map<string, string[]>();
-  const ensure = (key: string) => {
-    if (!adjacency.has(key)) adjacency.set(key, []);
-  };
-  ensure(startKey);
-  for (const [nodeKey, parentKey] of previous) {
-    ensure(nodeKey);
-    ensure(parentKey);
-    adjacency.get(nodeKey)!.push(parentKey);
-    adjacency.get(parentKey)!.push(nodeKey);
-  }
-  return adjacency;
-}
-
-function pixelKey(x: number, y: number): string {
-  return `${x},${y}`;
-}
-
-function parsePixelKey(key: string): Point2D {
-  const [x, y] = key.split(",").map(Number);
-  return [x, y];
 }
 
 function activeSkeletonNeighbors(

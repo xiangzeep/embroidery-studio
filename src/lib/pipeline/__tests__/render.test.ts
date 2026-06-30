@@ -1488,7 +1488,7 @@ describe("renderDesign", () => {
 
     expect(pattern.widthMm).toBe(50);
     expect(pattern.heightMm).toBe(50);
-    expect(pattern.totalStitches).toBe(184);
+    expect(pattern.totalStitches).toBe(182);
     expect(pattern.blocks).toHaveLength(3);
 
     // English note.
@@ -1601,9 +1601,9 @@ describe("renderDesign", () => {
       disableCompensation: true,
       disableLockstitch: true,
     });
-    expect(pattern.totalStitches).toBe(184);
+    expect(pattern.totalStitches).toBe(182);
     // English note.
-    expect(pattern.blocks.map((b) => b.stitches.length)).toEqual([132, 53, 8]);
+    expect(pattern.blocks.map((b) => b.stitches.length)).toEqual([132, 53, 6]);
   });
 });
 

@@ -66,4 +66,28 @@ describe("skeletonizeMask", () => {
     expect(junctions).toHaveLength(1);
     expect(graph.branches.length).toBeGreaterThanOrEqual(4);
   });
+
+  it("keeps separate connected components as separate branch groups", () => {
+    const mask = makeMask([
+      "................",
+      "..#####.........",
+      "..#...#.........",
+      "..#####.........",
+      "..........#.....",
+      "..........#.....",
+      ".......#######..",
+      "..........#.....",
+      "..........#.....",
+      "................",
+    ]);
+
+    const graph = skeletonizeMask(mask);
+    const loops = graph.branches.filter((branch) => branch.isLoop);
+    const openBranches = graph.branches.filter((branch) => !branch.isLoop);
+    const junctions = graph.nodes.filter((node) => node.degree >= 3);
+
+    expect(loops).toHaveLength(1);
+    expect(openBranches.length).toBeGreaterThanOrEqual(4);
+    expect(junctions).toHaveLength(1);
+  });
 });
