@@ -259,4 +259,29 @@ describe("medialAxisRun", () => {
     const last = loopSegment[loopSegment.length - 1];
     expect(Math.hypot(first[0] - last[0], first[1] - last[1])).toBeLessThanOrEqual(0.35);
   });
+
+  it("does not extend split junction edges through neighboring branches", () => {
+    const shape: Shape = {
+      outer: [
+        [0, 0],
+        [6, 0],
+        [6, 1],
+        [3.5, 1],
+        [3.5, 6],
+        [2.5, 6],
+        [2.5, 1],
+        [0, 1],
+      ],
+      holes: [],
+    };
+
+    const segments = medialAxisRunSegments(shape, 0.8);
+
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments.some((segment) => {
+      const xs = segment.map(([x]) => x);
+      const ys = segment.map(([, y]) => y);
+      return Math.min(...xs) < 0.8 && Math.max(...xs) > 5.2 && Math.max(...ys) < 1.4;
+    })).toBe(false);
+  });
 });

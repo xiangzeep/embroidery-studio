@@ -19,11 +19,6 @@ import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
 const SKELETON_RUN_PX_PER_MM = 10;
-const SKELETON_NEIGHBOR_OFFSETS: Array<[number, number]> = [
-  [-1, -1], [0, -1], [1, -1],
-  [-1, 0],            [1, 0],
-  [-1, 1],  [0, 1],  [1, 1],
-];
 
 /**
  * English note.
@@ -53,7 +48,6 @@ function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Poin
   if (Math.abs(polygonArea(shape.outer)) < MIN_RAIL_MIDLINE_AREA_MM2) return [];
 
   const raster = underlayInternal.rasterizeShapeToMask(shape, SKELETON_RUN_PX_PER_MM);
-  const thin = underlayInternal.thinMaskZhangSuen(raster.mask, raster.width, raster.height);
   const graph = skeletonizeMask({
     data: raster.mask,
     width: raster.width,
@@ -61,16 +55,7 @@ function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Poin
   });
   const sampled = routeSkeletonGraphBranchSegments(graph, raster, stitchLenMm, shape);
   if (sampled.length === 0) return [];
-
-  if (!shouldExtendBranchAwarePath(shape, thin, raster.width, raster.height)) {
-    return sampled;
-  }
-  return sampled.map((segment) => {
-    const first = segment[0];
-    const last = segment[segment.length - 1];
-    if (Math.hypot(first[0] - last[0], first[1] - last[1]) <= 1e-3) return segment;
-    return extendOpenPathToShape(segment, shape);
-  });
+  return sampled;
 }
 
 function railMidlineRun(shape: Shape, stitchLenMm: number): Point2D[] {
@@ -166,26 +151,6 @@ function dedupeSequential(points: Point2D[]): Point2D[] {
 
 function finalizeRunPath(points: Point2D[], shape: Shape): Point2D[] {
   return extendOpenPathToShape(dedupeSequential(points), shape);
-}
-
-function shouldExtendBranchAwarePath(
-  shape: Shape,
-  skel: Uint8Array,
-  width: number,
-  height: number,
-): boolean {
-  if (shape.holes.length === 0) return true;
-  let leafCount = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (skel[y * width + x] !== 1) continue;
-      if (activeSkeletonNeighbors(skel, width, height, x, y).length <= 1) {
-        leafCount++;
-        if (leafCount > 0) return true;
-      }
-    }
-  }
-  return false;
 }
 
 function resampleOpenLine(line: Point2D[], stitchLenMm: number): Point2D[] {
@@ -601,24 +566,6 @@ function flattenRunSegments(segments: Point2D[][]): Point2D[] {
     appendPoints(routed, segment);
   }
   return dedupeSequential(routed);
-}
-
-function activeSkeletonNeighbors(
-  skel: Uint8Array,
-  width: number,
-  height: number,
-  x: number,
-  y: number,
-): Array<[number, number]> {
-  const neighbors: Array<[number, number]> = [];
-  for (const [dx, dy] of SKELETON_NEIGHBOR_OFFSETS) {
-    const nx = x + dx;
-    const ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-    if (skel[ny * width + nx] !== 1) continue;
-    neighbors.push([nx, ny]);
-  }
-  return neighbors;
 }
 
 function pointInShape(shape: Shape, point: Point2D): boolean {
