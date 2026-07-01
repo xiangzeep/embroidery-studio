@@ -5,7 +5,11 @@ import type { PrepipelineResult, PipelineResult } from "./compose";
 import { deserializeDesign, type SerializedDesign } from "./design";
 import { getFabricProfile } from "./fabric";
 
-const DEFAULT_TIMEOUT_MS = 20_000;
+const BASE_TIMEOUT_MS = 30_000;
+const COMPLEX_LINE_ART_TIMEOUT_MS = 45_000;
+const MAX_TIMEOUT_MS = 60_000;
+const COMPLEX_LINE_ART_SHAPES = 40;
+const COMPLEX_LINE_ART_POINTS = 3_000;
 
 type StitchWorkerRequest = {
   type: "stitch";
@@ -44,7 +48,12 @@ export async function runStitchAndWriteViaWorker(
   options: StitchWorkerOptions = {},
 ): Promise<PipelineResult> {
   const worker = (options.workerFactory ?? createWorker)();
-  const result = await requestStitch(worker, pre, config, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const result = await requestStitch(
+    worker,
+    pre,
+    config,
+    options.timeoutMs ?? resolveStitchWorkerTimeoutMs(pre, config),
+  );
   return {
     pattern: result.pattern,
     design: deserializeDesign(result.design, getFabricProfile),
@@ -53,6 +62,40 @@ export async function runStitchAndWriteViaWorker(
       type: "application/octet-stream",
     }),
   };
+}
+
+export function resolveStitchWorkerTimeoutMs(
+  pre: PrepipelineResult,
+  config: ConversionConfig,
+): number {
+  if (config.digitizingMode !== "line-art") return BASE_TIMEOUT_MS;
+  const complexity = summarizePrepipelineComplexity(pre);
+  let timeoutMs = BASE_TIMEOUT_MS;
+  if (
+    complexity.shapeCount >= COMPLEX_LINE_ART_SHAPES ||
+    complexity.pointCount >= COMPLEX_LINE_ART_POINTS
+  ) {
+    timeoutMs = COMPLEX_LINE_ART_TIMEOUT_MS;
+  }
+  const extraShapeBuckets = Math.floor(Math.max(0, complexity.shapeCount - COMPLEX_LINE_ART_SHAPES) / 40);
+  const extraPointBuckets = Math.floor(Math.max(0, complexity.pointCount - COMPLEX_LINE_ART_POINTS) / 3_000);
+  return Math.min(MAX_TIMEOUT_MS, timeoutMs + Math.max(extraShapeBuckets, extraPointBuckets) * 15_000);
+}
+
+function summarizePrepipelineComplexity(pre: PrepipelineResult): {
+  shapeCount: number;
+  pointCount: number;
+} {
+  let shapeCount = 0;
+  let pointCount = 0;
+  for (const region of pre.regions) {
+    shapeCount += region.shapes.length;
+    for (const shape of region.shapes) {
+      pointCount += shape.outer.length;
+      for (const hole of shape.holes) pointCount += hole.length;
+    }
+  }
+  return { shapeCount, pointCount };
 }
 
 function createWorker(): Worker {

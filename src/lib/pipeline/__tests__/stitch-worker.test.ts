@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runStitchAndWriteViaWorker } from "../stitch-worker";
+import { resolveStitchWorkerTimeoutMs, runStitchAndWriteViaWorker } from "../stitch-worker";
 import { makeDefaultConfig } from "../config";
 import type { PrepipelineResult } from "../compose";
 
@@ -21,6 +21,22 @@ const pre: PrepipelineResult = {
 };
 
 describe("runStitchAndWriteViaWorker", () => {
+  it("uses a bounded timeout for complex line-art stitch jobs", () => {
+    const complexPre: PrepipelineResult = {
+      ...pre,
+      regions: [{
+        ...pre.regions[0],
+        shapes: Array.from({ length: 80 }, (_, index) => ({
+          outer: [[index, 0], [index + 0.8, 0], [index + 0.8, 0.8], [index, 0.8]],
+          holes: [],
+        })),
+      }],
+    };
+
+    expect(resolveStitchWorkerTimeoutMs(pre, makeDefaultConfig("denim"))).toBe(30_000);
+    expect(resolveStitchWorkerTimeoutMs(complexPre, makeDefaultConfig("denim"))).toBe(60_000);
+  });
+
   it("uses a worker result instead of running the stitch stage on the caller thread", async () => {
     const result = await runStitchAndWriteViaWorker(pre, makeDefaultConfig("denim"), {
       workerFactory: () => new SuccessWorker() as unknown as Worker,
