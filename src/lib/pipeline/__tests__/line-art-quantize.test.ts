@@ -88,4 +88,24 @@ describe("quantizeLineArt", () => {
     expect(result.palette).toHaveLength(2);
     expect(result.labels[1]).not.toBe(result.labels[2]);
   });
+
+  it("keeps very pale blue strokes created by line-art downsampling", () => {
+    const imageData = new ImageData(
+      new Uint8ClampedArray([
+        255, 255, 255, 255,
+        240, 248, 255, 255,
+      ]),
+      2,
+      1,
+    );
+
+    const result = quantizeLineArt({
+      imageData,
+      colorCount: 2,
+      removeWhiteBackground: true,
+    });
+
+    expect(result.labels[0]).toBe(BACKGROUND_LABEL);
+    expect(result.labels[1]).not.toBe(BACKGROUND_LABEL);
+  });
 });

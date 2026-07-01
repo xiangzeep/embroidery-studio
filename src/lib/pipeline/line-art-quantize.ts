@@ -4,7 +4,7 @@ type LineArtQuantizeInput = QuantizeInput & {
   removeWhiteBackground?: boolean;
 };
 
-const WHITE_THRESHOLD = 244;
+const WHITE_THRESHOLD = 248;
 const SAME_COLOR_DISTANCE = 110;
 
 export function quantizeLineArt(input: LineArtQuantizeInput): QuantizedImage {
