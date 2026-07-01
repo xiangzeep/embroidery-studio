@@ -8,6 +8,7 @@ export type { StrokeMetrics } from "./types";
 const STROKE_MIN_SLENDERNESS = 3;
 const STROKE_MAX_COMPACTNESS = 0.45;
 const STROKE_WIDTH_SAMPLE_PX_PER_MM = 10;
+const MAX_STROKE_WIDTH_SAMPLE_PIXELS = 180_000;
 
 export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
   const outerArea = Math.abs(polygonArea(shape.outer));
@@ -23,18 +24,13 @@ export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
   const estimatedLengthMm = estimatedWidthMm <= 1e-9 ? 0 : areaMm2 / estimatedWidthMm;
   const compactness = perimeterMm <= 1e-9 ? 0 :
     (4 * Math.PI * areaMm2) / (perimeterMm * perimeterMm);
-  const raster = underlayInternal.rasterizeShapeToMask(shape, STROKE_WIDTH_SAMPLE_PX_PER_MM);
-  const binaryMask = {
-    data: raster.mask,
-    width: raster.width,
-    height: raster.height,
-  };
-  const skeleton = skeletonizeMask(binaryMask);
-  const widthSamples = measureSkeletonWidths(
-    skeleton,
-    computeDistanceMap(binaryMask),
-    1 / STROKE_WIDTH_SAMPLE_PX_PER_MM,
-  );
+  const canSampleSkeleton =
+    estimatedRasterPixels(width, height, STROKE_WIDTH_SAMPLE_PX_PER_MM) <=
+    MAX_STROKE_WIDTH_SAMPLE_PIXELS;
+  const skeletonData = canSampleSkeleton
+    ? sampleSkeletonWidths(shape)
+    : { widthSamples: [], loopCount: 0, junctionCount: 0, branchCount: 0 };
+  const widthSamples = skeletonData.widthSamples;
   const widthMinMm = widthSamples.length > 0
     ? Math.min(...widthSamples.map((sample) => sample.widthMm))
     : undefined;
@@ -45,8 +41,8 @@ export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
     ? widthSamples.reduce((sum, sample) => sum + sample.widthMm, 0) / widthSamples.length
     : undefined;
   const preferredWidthMm = widthAvgMm ?? estimatedWidthMm;
-  const loopCount = skeleton.branches.filter((branch) => branch.isLoop).length;
-  const junctionCount = skeleton.nodes.filter((node) => node.degree > 2).length;
+  const loopCount = skeletonData.loopCount;
+  const junctionCount = skeletonData.junctionCount;
   const hasStableSkeleton = widthSamples.length >= 3;
   const hasNarrowLoopStroke =
     hasStableSkeleton &&
@@ -78,7 +74,7 @@ export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
     widthAvgMm,
     widthMaxMm,
     hasStableSkeleton,
-    branchCount: skeleton.branches.length,
+    branchCount: skeletonData.branchCount,
     junctionCount,
     loopCount,
     isStrokeLike:
@@ -93,6 +89,36 @@ export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
         )
       ),
   };
+}
+
+function sampleSkeletonWidths(shape: Shape): {
+  widthSamples: Array<{ widthMm: number }>;
+  loopCount: number;
+  junctionCount: number;
+  branchCount: number;
+} {
+  const raster = underlayInternal.rasterizeShapeToMask(shape, STROKE_WIDTH_SAMPLE_PX_PER_MM);
+  const binaryMask = {
+    data: raster.mask,
+    width: raster.width,
+    height: raster.height,
+  };
+  const skeleton = skeletonizeMask(binaryMask);
+  return {
+    widthSamples: measureSkeletonWidths(
+      skeleton,
+      computeDistanceMap(binaryMask),
+      1 / STROKE_WIDTH_SAMPLE_PX_PER_MM,
+    ),
+    loopCount: skeleton.branches.filter((branch) => branch.isLoop).length,
+    junctionCount: skeleton.nodes.filter((node) => node.degree > 2).length,
+    branchCount: skeleton.branches.length,
+  };
+}
+
+function estimatedRasterPixels(widthMm: number, heightMm: number, pxPerMm: number): number {
+  return Math.max(1, Math.ceil(widthMm * pxPerMm) + 4) *
+    Math.max(1, Math.ceil(heightMm * pxPerMm) + 4);
 }
 
 function polygonArea(poly: Point2D[]): number {

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildObjects } from "../build-objects";
 import { generateStitches } from "../stitch";
 import { FABRIC_PROFILES } from "../fabric";
+import { analyzeStrokeMetrics } from "../stroke-metrics";
 import type { ColorRegion } from "../vectorize";
 import type { StitchKind } from "../types";
 
@@ -743,6 +744,18 @@ describe("buildObjects shape metrics classification", () => {
 
     expect(result[0].kind).toBe("run");
     expect(result[0].metrics?.aspectRatio).toBeGreaterThan(10);
+  });
+});
+
+describe("buildObjects stroke metric performance guards", () => {
+  it("skips stable skeleton sampling for oversized stroke masks", () => {
+    const metrics = analyzeStrokeMetrics({
+      outer: [[0, 0], [1000, 0], [1000, 2], [0, 2]],
+      holes: [],
+    });
+
+    expect(metrics.hasStableSkeleton).toBe(false);
+    expect(metrics.isStrokeLike).toBe(true);
   });
 });
 

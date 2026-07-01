@@ -336,6 +336,18 @@ describe("medialAxisRun", () => {
 
     expect(nearestEndpoint).toBeGreaterThan(0.28);
   });
+
+  it("falls back without high-resolution skeleton routing for oversized run masks", () => {
+    const shape: Shape = {
+      outer: [[0, 0], [90, 0], [90, 2], [0, 2]],
+      holes: [],
+    };
+
+    const segments = medialAxisRunSegments(shape, 2.0);
+
+    expect(segments.length).toBeGreaterThan(0);
+    expect(segments[0].length).toBeLessThan(80);
+  });
 });
 
 function maxTurnAngle(points: Array<[number, number]>, closed: boolean): number {

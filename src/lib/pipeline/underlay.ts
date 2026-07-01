@@ -16,6 +16,7 @@ import { pointInPolygon } from "./vectorize";
 const PX_PER_MM = 10; // English note.
 const MIN_SKELETON_PIXELS = 12; // English note.
 const MIN_AREA_MM2 = 0.25; // English note.
+const MAX_CENTER_RUN_RASTER_PIXELS = 220_000;
 const DEFAULT_UNDERLAY_MAX_STITCH_MM = 7;
 const DEFAULT_UNDERLAY_TRIM_THRESHOLD_MM = 8;
 
@@ -69,6 +70,9 @@ export function centerRunUnderlay(
 ): Point2D[] {
   if (stitchLenMm <= 0) return [];
   if (polygonArea(shape.outer) < MIN_AREA_MM2) return [];
+  if (estimatedRasterPixelsForShape(shape, PX_PER_MM) > MAX_CENTER_RUN_RASTER_PIXELS) {
+    return [];
+  }
 
   const raster = rasterizeShapeToMask(shape, PX_PER_MM);
   const skel = thinMaskZhangSuen(raster.mask, raster.width, raster.height);
@@ -82,6 +86,15 @@ export function centerRunUnderlay(
     raster.offsetY + (py + 0.5) / PX_PER_MM,
   ]);
   return resampleOpenLine(pathMm, stitchLenMm);
+}
+
+function estimatedRasterPixelsForShape(shape: Shape, pxPerMm: number): number {
+  const xs = shape.outer.map(([x]) => x);
+  const ys = shape.outer.map(([, y]) => y);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  return Math.max(1, Math.ceil(width * pxPerMm) + 4) *
+    Math.max(1, Math.ceil(height * pxPerMm) + 4);
 }
 
 /**

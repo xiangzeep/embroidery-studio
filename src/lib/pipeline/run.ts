@@ -19,6 +19,7 @@ import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
 const SKELETON_RUN_PX_PER_MM = 10;
+const MAX_SKELETON_RUN_RASTER_PIXELS = 220_000;
 const JUNCTION_RETRACT_MM = 0.38;
 const LOOP_CLOSE_THRESHOLD_MM = 0.85;
 
@@ -48,6 +49,9 @@ export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2
 function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
   if (stitchLenMm <= 0 || shape.outer.length < 3) return [];
   if (Math.abs(polygonArea(shape.outer)) < MIN_RAIL_MIDLINE_AREA_MM2) return [];
+  if (estimatedRasterPixelsForShape(shape, SKELETON_RUN_PX_PER_MM) > MAX_SKELETON_RUN_RASTER_PIXELS) {
+    return [];
+  }
 
   const raster = underlayInternal.rasterizeShapeToMask(shape, SKELETON_RUN_PX_PER_MM);
   const graph = skeletonizeMask({
@@ -87,6 +91,15 @@ function railMidlineRun(shape: Shape, stitchLenMm: number): Point2D[] {
     midline.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
   }
   return dedupeSequential(midline);
+}
+
+function estimatedRasterPixelsForShape(shape: Shape, pxPerMm: number): number {
+  const xs = shape.outer.map(([x]) => x);
+  const ys = shape.outer.map(([, y]) => y);
+  const width = Math.max(...xs) - Math.min(...xs);
+  const height = Math.max(...ys) - Math.min(...ys);
+  return Math.max(1, Math.ceil(width * pxPerMm) + 4) *
+    Math.max(1, Math.ceil(height * pxPerMm) + 4);
 }
 
 function stripClosingDuplicate(points: Point2D[]): Point2D[] {

@@ -1,6 +1,6 @@
 import type { StitchPattern } from "./types";
 import { analyzePattern, type PatternStats } from "./stats";
-import { QUALITY_PRESETS, type ConversionConfig } from "./config";
+import { QUALITY_PRESETS, type ConversionConfig, type QualityPreset } from "./config";
 import { optimizeOrder } from "./pathing";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { buildObjects } from "./build-objects";
@@ -15,6 +15,7 @@ import { generateStitches } from "./render";
 import { writeEmbroidery } from "./writer";
 import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
+import { runStitchAndWriteViaWorker } from "./stitch-worker";
 
 export type PipelineStage =
   | "loading-cv"
@@ -81,7 +82,7 @@ export async function runPrepipeline(
 
   const { imageData, opaqueMask } = bitmapToImageData(
     imageBitmap,
-    QUALITY_PRESETS[config.qualityPreset].maxDimension,
+    resolvePreprocessMaxDimension(config.digitizingMode, config.qualityPreset),
   );
   const aspect = imageBitmap.height / imageBitmap.width;
   const widthMm = config.widthMm;
@@ -127,11 +128,31 @@ export function resolveVectorizeDilatePx(
   return digitizingMode === "line-art" ? 0 : configuredDilatePx;
 }
 
+export function resolvePreprocessMaxDimension(
+  digitizingMode: DigitizingMode,
+  qualityPreset: QualityPreset,
+): number {
+  const configured = QUALITY_PRESETS[qualityPreset].maxDimension;
+  return digitizingMode === "line-art" ? Math.min(configured, 256) : configured;
+}
+
 /**
  * English note.
  * English note.
  */
 export async function runStitchAndWrite(
+  pre: PrepipelineResult,
+  config: ConversionConfig,
+  onProgress?: (p: PipelineProgress) => void,
+): Promise<PipelineResult> {
+  onProgress?.({ stage: "stitch", percent: 75 });
+  if (typeof Worker !== "undefined" && config.format === "dst") {
+    return runStitchAndWriteViaWorker(pre, config);
+  }
+  return runStitchAndWriteDirect(pre, config, onProgress);
+}
+
+export async function runStitchAndWriteDirect(
   pre: PrepipelineResult,
   config: ConversionConfig,
   onProgress?: (p: PipelineProgress) => void,

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   convertImageToEmbroideryDirect,
   rerenderDesignAndWrite,
+  resolvePreprocessMaxDimension,
   resolveVectorizeDilatePx,
   runPrepipeline,
   runStitchAndWrite,
@@ -34,6 +35,12 @@ describe("compose", () => {
   it("disables mask dilation for line-art prepipeline to avoid joining nearby thin strokes", () => {
     expect(resolveVectorizeDilatePx("line-art", 2)).toBe(0);
     expect(resolveVectorizeDilatePx("photo-stitch", 2)).toBe(2);
+  });
+
+  it("caps line-art preprocessing size to keep generation responsive", () => {
+    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(256);
+    expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(256);
+    expect(resolvePreprocessMaxDimension("photo-stitch", "balanced")).toBe(384);
   });
 
   it("rerenders from edited design instead of rebuilding from source regions", async () => {
