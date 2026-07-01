@@ -39,6 +39,32 @@ describe("quantizeLineArt", () => {
     expect(result.labels[1]).not.toBe(BACKGROUND_LABEL);
     expect(result.labels[2]).not.toBe(BACKGROUND_LABEL);
     expect(result.labels[3]).not.toBe(BACKGROUND_LABEL);
+    expect(result.palette.length).toBeGreaterThan(0);
+    expect(result.palette.length).toBeLessThanOrEqual(2);
+  });
+
+  it("merges anti-aliased shades of the same line color into one label", () => {
+    const imageData = new ImageData(
+      new Uint8ClampedArray([
+        255, 255, 255, 255,
+        38, 132, 238, 255,
+        88, 166, 247, 255,
+        14, 72, 202, 255,
+        232, 48, 50, 255,
+      ]),
+      5,
+      1,
+    );
+
+    const result = quantizeLineArt({
+      imageData,
+      colorCount: 6,
+      removeWhiteBackground: true,
+    });
+
     expect(result.palette).toHaveLength(2);
+    expect(result.labels[1]).toBe(result.labels[2]);
+    expect(result.labels[2]).toBe(result.labels[3]);
+    expect(result.labels[4]).not.toBe(result.labels[1]);
   });
 });

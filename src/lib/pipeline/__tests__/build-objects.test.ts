@@ -164,6 +164,32 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].kind).toBe("run");
   });
 
+  it("routes long medium-width line-art decorative strokes to run refinement instead of satin", () => {
+    const longStroke: ColorRegion = {
+      colorIndex: 0,
+      rgb: [0, 0, 0],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [520, 0], [520, 13], [0, 13]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [longStroke],
+      widthMm: 52,
+      widthPx: 520,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(["thin-run", "bean-run"]).toContain(result[0].strokeKind);
+    expect(result[0].strokeRole).toBe("outline");
+    expect(result[0].kind).toBe("run");
+  });
+
   it("routes narrow closed line-art loops to run using sampled skeleton width", () => {
     const contourLoop: ColorRegion = {
       colorIndex: 0,

@@ -8,6 +8,7 @@ import { renderDesign } from "./render";
 import type { EmbroideryDesign } from "./types";
 import { getFabricProfile } from "./fabric";
 import { quantize, warmupOpenCV } from "./quantize";
+import { quantizeLineArt } from "./line-art-quantize";
 import { vectorizeViaWorker } from "./vectorize-worker";
 import type { ColorRegion } from "./vectorize";
 import { generateStitches } from "./render";
@@ -73,7 +74,9 @@ export async function runPrepipeline(
   onProgress?: (p: PipelineProgress) => void,
 ): Promise<PrepipelineResult> {
   onProgress?.({ stage: "loading-cv", percent: 5 });
-  await warmupOpenCV();
+  if (config.digitizingMode !== "line-art") {
+    await warmupOpenCV();
+  }
 
   const { imageData, opaqueMask } = bitmapToImageData(
     imageBitmap,
@@ -84,12 +87,19 @@ export async function runPrepipeline(
   const heightMm = widthMm * aspect;
 
   onProgress?.({ stage: "quantize", percent: 25 });
-  const quantized = await quantize({
-    imageData,
-    opaqueMask,
-    colorCount: config.colorCount,
-    smoothing: config.smoothing,
-  });
+  const quantized = config.digitizingMode === "line-art"
+    ? quantizeLineArt({
+        imageData,
+        opaqueMask,
+        colorCount: config.colorCount,
+        removeWhiteBackground: config.removeWhiteBackground,
+      })
+    : await quantize({
+        imageData,
+        opaqueMask,
+        colorCount: config.colorCount,
+        smoothing: config.smoothing,
+      });
 
   onProgress?.({ stage: "vectorize", percent: 50 });
   const regions = await vectorizeViaWorker({
