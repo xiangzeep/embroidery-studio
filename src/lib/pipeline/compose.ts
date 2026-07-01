@@ -16,6 +16,14 @@ import { writeEmbroidery } from "./writer";
 import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
 import { runStitchAndWriteViaWorker } from "./stitch-worker";
+export {
+  resolveBuildMinRegionAreaPx,
+  resolveVectorizeTurdsize,
+} from "./line-art-settings";
+import {
+  resolveBuildMinRegionAreaPx,
+  resolveVectorizeTurdsize,
+} from "./line-art-settings";
 
 export type PipelineStage =
   | "loading-cv"
@@ -109,6 +117,7 @@ export async function runPrepipeline(
     width: imageData.width,
     height: imageData.height,
     palette: quantized.palette,
+    turdsize: resolveVectorizeTurdsize(config.digitizingMode),
     dilatePx: resolveVectorizeDilatePx(config.digitizingMode, config.boundaryDilatePx),
   });
 
@@ -134,7 +143,7 @@ export function resolvePreprocessMaxDimension(
 ): number {
   const configured = QUALITY_PRESETS[qualityPreset].maxDimension;
   if (digitizingMode !== "line-art") return configured;
-  const lineArtCap = qualityPreset === "detail" ? 256 : 192;
+  const lineArtCap = qualityPreset === "detail" ? 256 : qualityPreset === "high" ? 192 : 128;
   return Math.min(configured, lineArtCap);
 }
 
@@ -173,7 +182,7 @@ export async function runStitchAndWriteDirect(
     digitizingMode: config.digitizingMode,
     outlineFontStrategy: config.outlineFontStrategy,
     satinMaxWidthMm: config.satinMaxWidthMm,
-    minRegionAreaPx: config.minRegionAreaPx,
+    minRegionAreaPx: resolveBuildMinRegionAreaPx(config.digitizingMode, config.minRegionAreaPx),
     removeWhiteBackground: config.removeWhiteBackground,
   });
   const baseDesign: EmbroideryDesign = {

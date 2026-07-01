@@ -4,7 +4,7 @@ type LineArtQuantizeInput = QuantizeInput & {
   removeWhiteBackground?: boolean;
 };
 
-const WHITE_THRESHOLD = 248;
+const WHITE_THRESHOLD = 238;
 const WHITE_NEUTRAL_CHROMA = 4;
 const SAME_COLOR_DISTANCE = 110;
 

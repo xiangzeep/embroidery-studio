@@ -112,7 +112,7 @@ describe("quantizeLineArt", () => {
   it("still removes neutral near-white background pixels", () => {
     const imageData = new ImageData(
       new Uint8ClampedArray([
-        250, 251, 252, 255,
+        244, 245, 246, 255,
       ]),
       1,
       1,

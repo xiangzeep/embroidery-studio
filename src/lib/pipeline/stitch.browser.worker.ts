@@ -11,6 +11,7 @@ import { optimizePatternCommands } from "./command-optimizer";
 import { analyzePattern } from "./stats";
 import { writeDstBytes } from "./dst-writer";
 import { serializeDesign } from "./design";
+import { resolveBuildMinRegionAreaPx } from "./line-art-settings";
 
 type StitchWorkerRequest = {
   type: "stitch";
@@ -38,7 +39,7 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
       digitizingMode: config.digitizingMode,
       outlineFontStrategy: config.outlineFontStrategy,
       satinMaxWidthMm: config.satinMaxWidthMm,
-      minRegionAreaPx: config.minRegionAreaPx,
+      minRegionAreaPx: resolveBuildMinRegionAreaPx(config.digitizingMode, config.minRegionAreaPx),
       removeWhiteBackground: config.removeWhiteBackground,
     });
     const baseDesign = {

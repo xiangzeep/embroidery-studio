@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   convertImageToEmbroideryDirect,
   rerenderDesignAndWrite,
+  resolveBuildMinRegionAreaPx,
   resolvePreprocessMaxDimension,
+  resolveVectorizeTurdsize,
   resolveVectorizeDilatePx,
   runPrepipeline,
   runStitchAndWrite,
@@ -38,10 +40,17 @@ describe("compose", () => {
   });
 
   it("caps line-art preprocessing size to keep generation responsive", () => {
-    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(192);
+    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(128);
     expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(192);
     expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(256);
     expect(resolvePreprocessMaxDimension("photo-stitch", "balanced")).toBe(384);
+  });
+
+  it("uses fine-grained line-art filters so small run-stitch details survive", () => {
+    expect(resolveVectorizeTurdsize("line-art")).toBe(8);
+    expect(resolveVectorizeTurdsize("photo-stitch")).toBe(8);
+    expect(resolveBuildMinRegionAreaPx("line-art", 12)).toBe(4);
+    expect(resolveBuildMinRegionAreaPx("photo-stitch", 12)).toBe(12);
   });
 
   it("rerenders from edited design instead of rebuilding from source regions", async () => {
