@@ -52,6 +52,13 @@ export { computeDistanceMap, measureSkeletonWidths } from "./distance-map";
 export { classifyStrokeKind, resolveObjectKindForStroke, type StrokeKind } from "./stroke-classifier";
 
 export { beanStitchPolyline } from "./bean-stitch";
+export {
+  classifyRunSegmentStyle,
+  doubleRunPolyline,
+  isClosedRunSegment,
+  styleRunSegment,
+  tripleRunPolyline,
+} from "./run-style";
 
 export { shouldRenderAsStrokeSatin } from "./curved-satin";
 

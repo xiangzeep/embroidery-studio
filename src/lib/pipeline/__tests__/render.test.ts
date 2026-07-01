@@ -2162,11 +2162,19 @@ describe("translated case", () => {
 
     const from = runObject("a", [[0, 0], [10, 0], [10, 1], [0, 1]], 0);
     const to = runObject("b", [[10, 0], [20, 0], [20, 1], [10, 1]], 1);
+    const run = connectObjectsWithSafety(
+      from,
+      to,
+      [4, 0.5],
+      [5.4, 0.5],
+      0,
+      TRIM_POLICY_BY_FORMAT.dst,
+    );
     const jump = connectObjectsWithSafety(
       from,
       to,
       [4, 0.5],
-      [7, 0.5],
+      [5.6, 0.5],
       0,
       TRIM_POLICY_BY_FORMAT.dst,
     );
@@ -2174,16 +2182,26 @@ describe("translated case", () => {
       runObject("loop", [[0, 0], [4, 0], [4, 4], [0, 4]], 0, 1),
       to,
       [0, 0],
-      [5, 0],
+      [3.2, 0],
+      0,
+      TRIM_POLICY_BY_FORMAT.dst,
+    );
+    const closedLoopJump = connectObjectsWithSafety(
+      runObject("loop-close", [[0, 0], [4, 0], [4, 4], [0, 4]], 0, 1),
+      to,
+      [0, 0],
+      [1.2, 0],
       0,
       TRIM_POLICY_BY_FORMAT.dst,
     );
 
-    expect(jump).toEqual([{ x: 7, y: 0.5, kind: "jump", colorIndex: 0 }]);
+    expect(run).toEqual([{ x: 5.4, y: 0.5, kind: "run", colorIndex: 0 }]);
+    expect(jump).toEqual([{ x: 5.6, y: 0.5, kind: "jump", colorIndex: 0 }]);
     expect(trim).toEqual([
       { x: 0, y: 0, kind: "trim", colorIndex: 0 },
-      { x: 5, y: 0, kind: "jump", colorIndex: 0 },
+      { x: 3.2, y: 0, kind: "jump", colorIndex: 0 },
     ]);
+    expect(closedLoopJump).toEqual([{ x: 1.2, y: 0, kind: "jump", colorIndex: 0 }]);
   });
 
   it("translated case", () => {

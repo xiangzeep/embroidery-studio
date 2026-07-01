@@ -19,7 +19,8 @@ import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
 const SKELETON_RUN_PX_PER_MM = 10;
-const JUNCTION_RETRACT_MM = 0.28;
+const JUNCTION_RETRACT_MM = 0.38;
+const LOOP_CLOSE_THRESHOLD_MM = 0.85;
 
 /**
  * English note.
@@ -200,28 +201,32 @@ function resampleOpenLine(line: Point2D[], stitchLenMm: number): Point2D[] {
 function prepareRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
   if (line.length < 3) return line.map(([x, y]) => [x, y]);
 
-  const toleranceMm = clamp(stitchLenMm * 0.08, 0.1, 0.25);
+  const toleranceMm = clamp(stitchLenMm * 0.06, 0.08, 0.15);
   const simplified = simplifyRdp(line, toleranceMm);
   const smoothingIterations = simplified.length >= 6 ? 2 : 1;
   const smoothed = chaikinSmoothOpenLine(simplified, smoothingIterations);
-  return dedupeSequential(smoothed);
+  const fitted = clampedCatmullRomSpline(smoothed, 4);
+  return dedupeSequential(fitted);
 }
 
 function prepareClosedRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
   const loop = stripClosingDuplicate(dedupeSequential(line));
   if (loop.length < 3) return line.map(([x, y]) => [x, y]);
 
-  const smoothingIterations = loop.length >= 8 ? 6 : 5;
-  const smoothed = chaikinSmoothClosedLine(loop, smoothingIterations);
-  return dedupeSequential(smoothed);
+  const toleranceMm = clamp(stitchLenMm * 0.04, 0.06, 0.12);
+  const simplified = simplifyClosedRdp(loop, toleranceMm);
+  const smoothingIterations = simplified.length >= 8 ? 6 : 5;
+  const smoothed = chaikinSmoothClosedLine(simplified, smoothingIterations);
+  const fitted = periodicCubicBSpline(smoothed, 6);
+  return dedupeSequential(fitted);
 }
 
 function resampleAdaptiveOpenLine(line: Point2D[], stitchLenMm: number): Point2D[] {
   if (line.length < 2 || stitchLenMm <= 0) return resampleOpenLine(line, stitchLenMm);
 
-  const minStep = clamp(stitchLenMm * 0.7, 1.2, 1.6);
-  const curveStep = clamp(stitchLenMm, 1.8, 2.2);
-  const maxStep = clamp(stitchLenMm * 1.15, 2.3, 2.8);
+  const minStep = clamp(stitchLenMm * 0.7, 1.2, 1.5);
+  const curveStep = clamp(stitchLenMm, 1.8, 2.0);
+  const maxStep = clamp(stitchLenMm * 1.15, 2.2, 2.5);
   const out: Point2D[] = [[line[0][0], line[0][1]]];
   let distSinceLast = 0;
 
@@ -274,8 +279,8 @@ function resampleClosedLineByArcLength(line: Point2D[], stitchLenMm: number): Po
   }
   if (total <= 1e-6) return loop;
 
-  const targetStep = clamp(stitchLenMm * 0.85, 1.05, 2.0);
-  const count = Math.max(6, Math.round(total / targetStep));
+  const targetStep = clamp(stitchLenMm * 0.55, 0.65, 1.2);
+  const count = Math.max(6, Math.floor(total / targetStep));
   const step = total / count;
   const out: Point2D[] = [];
   for (let i = 0; i < count; i++) {
@@ -285,8 +290,17 @@ function resampleClosedLineByArcLength(line: Point2D[], stitchLenMm: number): Po
   const rotated = rotateClosedLoopToHiddenSeam(dedupeSequential(out));
   const first = rotated[0];
   const last = rotated[rotated.length - 1];
-  if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-6) {
-    rotated.push([first[0], first[1]]);
+  const closeGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
+  if (closeGap > LOOP_CLOSE_THRESHOLD_MM && rotated.length >= 3) {
+    const beforeLast = rotated[rotated.length - 2];
+    const tailLen = Math.hypot(first[0] - beforeLast[0], first[1] - beforeLast[1]);
+    if (tailLen > LOOP_CLOSE_THRESHOLD_MM + 1e-6) {
+      const t = (tailLen - LOOP_CLOSE_THRESHOLD_MM) / tailLen;
+      rotated[rotated.length - 1] = [
+        beforeLast[0] + (first[0] - beforeLast[0]) * t,
+        beforeLast[1] + (first[1] - beforeLast[1]) * t,
+      ];
+    }
   }
   return dedupeSequential(rotated);
 }
@@ -389,6 +403,14 @@ function simplifyRdp(points: Point2D[], epsilon: number): Point2D[] {
   return left.slice(0, -1).concat(right);
 }
 
+function simplifyClosedRdp(points: Point2D[], epsilon: number): Point2D[] {
+  const loop = stripClosingDuplicate(points);
+  if (loop.length < 4 || epsilon <= 0) return loop.map(([x, y]) => [x, y]);
+  const closed = loop.concat([[loop[0][0], loop[0][1]]]);
+  const simplified = stripClosingDuplicate(simplifyRdp(closed, epsilon));
+  return simplified.length >= 3 ? simplified : loop.map(([x, y]) => [x, y]);
+}
+
 function pointToSegmentDistance(point: Point2D, a: Point2D, b: Point2D): number {
   const abx = b[0] - a[0];
   const aby = b[1] - a[1];
@@ -398,6 +420,95 @@ function pointToSegmentDistance(point: Point2D, a: Point2D, b: Point2D): number 
   const projX = a[0] + abx * t;
   const projY = a[1] + aby * t;
   return Math.hypot(point[0] - projX, point[1] - projY);
+}
+
+function clampedCatmullRomSpline(points: Point2D[], samplesPerSegment: number): Point2D[] {
+  if (points.length < 3) return points.map(([x, y]) => [x, y]);
+  const out: Point2D[] = [[points[0][0], points[0][1]]];
+  const samples = Math.max(2, Math.floor(samplesPerSegment));
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[Math.max(0, i - 1)];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[Math.min(points.length - 1, i + 2)];
+    for (let s = 1; s <= samples; s++) {
+      out.push(catmullRomPoint(p0, p1, p2, p3, s / samples));
+    }
+  }
+  return dedupeSequential(out);
+}
+
+function periodicCatmullRomSpline(points: Point2D[], samplesPerSegment: number): Point2D[] {
+  const loop = stripClosingDuplicate(points);
+  if (loop.length < 3) return loop.map(([x, y]) => [x, y]);
+  const out: Point2D[] = [];
+  const samples = Math.max(2, Math.floor(samplesPerSegment));
+  for (let i = 0; i < loop.length; i++) {
+    const p0 = loop[(i - 1 + loop.length) % loop.length];
+    const p1 = loop[i];
+    const p2 = loop[(i + 1) % loop.length];
+    const p3 = loop[(i + 2) % loop.length];
+    if (i === 0) out.push([p1[0], p1[1]]);
+    for (let s = 1; s <= samples; s++) {
+      out.push(catmullRomPoint(p0, p1, p2, p3, s / samples));
+    }
+  }
+  return dedupeSequential(stripClosingDuplicate(out));
+}
+
+function periodicCubicBSpline(points: Point2D[], samplesPerSegment: number): Point2D[] {
+  const loop = stripClosingDuplicate(points);
+  if (loop.length < 4) return periodicCatmullRomSpline(loop, samplesPerSegment);
+  const out: Point2D[] = [];
+  const samples = Math.max(2, Math.floor(samplesPerSegment));
+  for (let i = 0; i < loop.length; i++) {
+    const p0 = loop[(i - 1 + loop.length) % loop.length];
+    const p1 = loop[i];
+    const p2 = loop[(i + 1) % loop.length];
+    const p3 = loop[(i + 2) % loop.length];
+    for (let s = 0; s < samples; s++) {
+      out.push(cubicBSplinePoint(p0, p1, p2, p3, s / samples));
+    }
+  }
+  return dedupeSequential(stripClosingDuplicate(out));
+}
+
+function catmullRomPoint(
+  p0: Point2D,
+  p1: Point2D,
+  p2: Point2D,
+  p3: Point2D,
+  t: number,
+): Point2D {
+  const tt = t * t;
+  const ttt = tt * t;
+  return [
+    0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t
+      + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * tt
+      + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * ttt),
+    0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t
+      + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * tt
+      + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * ttt),
+  ];
+}
+
+function cubicBSplinePoint(
+  p0: Point2D,
+  p1: Point2D,
+  p2: Point2D,
+  p3: Point2D,
+  t: number,
+): Point2D {
+  const tt = t * t;
+  const ttt = tt * t;
+  const b0 = (1 - 3 * t + 3 * tt - ttt) / 6;
+  const b1 = (4 - 6 * tt + 3 * ttt) / 6;
+  const b2 = (1 + 3 * t + 3 * tt - 3 * ttt) / 6;
+  const b3 = ttt / 6;
+  return [
+    p0[0] * b0 + p1[0] * b1 + p2[0] * b2 + p3[0] * b3,
+    p0[1] * b0 + p1[1] * b1 + p2[1] * b2 + p3[1] * b3,
+  ];
 }
 
 function chaikinSmoothOpenLine(points: Point2D[], iterations: number): Point2D[] {

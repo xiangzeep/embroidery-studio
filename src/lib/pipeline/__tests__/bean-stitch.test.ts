@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { beanStitchPolyline } from "../bean-stitch";
 import { renderRun, type RenderContext } from "../render";
+import {
+  doubleRunPolyline,
+  styleRunSegment,
+  tripleRunPolyline,
+} from "../run-style";
 import type { EmbroideryObject, Shape } from "../types";
 
 const shape: Shape = {
@@ -71,6 +76,49 @@ describe("beanStitchPolyline", () => {
       [4, 0],
       [6, 0],
     ]);
+  });
+});
+
+describe("run stitch style controller", () => {
+  test("uses double run for very short decorative open paths", () => {
+    expect(doubleRunPolyline([[0, 0], [2, 0], [4, 0]])).toEqual([
+      [0, 0],
+      [2, 0],
+      [4, 0],
+      [2, 0],
+      [0, 0],
+    ]);
+  });
+
+  test("uses triple run for long backbone paths", () => {
+    expect(tripleRunPolyline([[0, 0], [2, 0], [4, 0]])).toEqual([
+      [0, 0],
+      [2, 0],
+      [4, 0],
+      [2, 0],
+      [0, 0],
+      [2, 0],
+      [4, 0],
+    ]);
+  });
+
+  test("selects closed bean, triple backbone, and double decorative styles", () => {
+    const closed = styleRunSegment(
+      [[0, 0], [2, 0], [2, 2], [0.6, 1.8]],
+      { closed: true, maxStitchMm: 7 },
+    );
+    const long = styleRunSegment(
+      [[0, 0], [12, 0], [24, 0]],
+      { strokeKind: "thin-run", maxStitchMm: 7 },
+    );
+    const short = styleRunSegment(
+      [[0, 0], [2, 0], [4, 0]],
+      { strokeKind: "thin-run", maxStitchMm: 7 },
+    );
+
+    expect(closed.length).toBeGreaterThan(4);
+    expect(long).toEqual(tripleRunPolyline([[0, 0], [12, 0], [24, 0]]));
+    expect(short).toEqual(doubleRunPolyline([[0, 0], [2, 0], [4, 0]]));
   });
 });
 

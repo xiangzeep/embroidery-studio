@@ -16,7 +16,7 @@ import { emitTieIn, emitTieOff } from "./lockstitch";
 import { intersectScanline } from "./scanline";
 import { routeFillSegmentsSafely, tatamiBrick } from "./fill";
 import { medialAxisRunSegments } from "./run";
-import { beanStitchPolyline } from "./bean-stitch";
+import { isClosedRunSegment, styleRunSegment } from "./run-style";
 import { renderCurvedStrokeSatin } from "./curved-satin";
 import { brickSplit, estimateSatinWidthStats, extractRails, renderSatin2Rail } from "./satin";
 import { generateUnderlayStitches } from "./underlay";
@@ -38,8 +38,8 @@ const MAX_THIN_RUN_STITCH_MM = 2.2;
 const DEFAULT_BEAN_RUN_STITCH_MM = 1.0;
 const DEFAULT_BEAN_RUN_STITCH_MULTIPLIER = 2.5;
 const MAX_BEAN_RUN_STITCH_MM = 1.6;
-const STRICT_RUN_TRAVEL_THRESHOLD_MM = 2;
-const STRICT_RUN_TRIM_THRESHOLD_MM = 4;
+const STRICT_RUN_TRAVEL_THRESHOLD_MM = 1.5;
+const STRICT_RUN_TRIM_THRESHOLD_MM = 3;
 const DEFAULT_FILL_ANGLE_DEG = 45;
 const DEFAULT_SHAPE_STRATEGY_MIN_ASPECT = 1.5;
 
@@ -216,13 +216,11 @@ function renderRunTopOnly(
     ? Math.min(ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM, STRICT_RUN_TRIM_THRESHOLD_MM)
     : ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
   for (const segment of orientRunSegments(segments, ctx.opts.preferredEntry)) {
-    let pts = segment;
-    if (obj.strokeKind === "bean-run") {
-      pts = beanStitchPolyline(
-        pts,
-        maxStitchMm,
-      );
-    }
+    const pts = styleRunSegment(segment, {
+      closed: isClosedRunSegment(segment),
+      strokeKind: obj.strokeKind,
+      maxStitchMm,
+    });
     appendStitchesWithJumps(
       block,
       pts,

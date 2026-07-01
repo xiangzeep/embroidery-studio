@@ -206,7 +206,8 @@ describe("medialAxisRun", () => {
     const endGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
 
     expect(pts.length).toBeGreaterThanOrEqual(8);
-    expect(endGap).toBeLessThanOrEqual(0.35);
+    expect(endGap).toBeGreaterThan(1e-3);
+    expect(endGap).toBeLessThanOrEqual(0.9);
   });
 
   it("smooths closed loop runs without sharp polyline corners", () => {
@@ -222,7 +223,7 @@ describe("medialAxisRun", () => {
       return Math.hypot(point[0] - prev[0], point[1] - prev[1]) < 0.35;
     });
 
-    expect(maxTurn).toBeLessThan(1.15);
+    expect(maxTurn).toBeLessThan(0.95);
     expect(tinySteps.length).toBe(0);
   });
 
@@ -277,7 +278,9 @@ describe("medialAxisRun", () => {
     const [loopSegment] = medialAxisRunSegments(loopOnly, 2.0);
     const first = loopSegment[0];
     const last = loopSegment[loopSegment.length - 1];
-    expect(Math.hypot(first[0] - last[0], first[1] - last[1])).toBeLessThanOrEqual(0.35);
+    const closeGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
+    expect(closeGap).toBeGreaterThan(1e-3);
+    expect(closeGap).toBeLessThanOrEqual(0.9);
   });
 
   it("does not extend split junction edges through neighboring branches", () => {
@@ -331,7 +334,7 @@ describe("medialAxisRun", () => {
       ];
     }));
 
-    expect(nearestEndpoint).toBeGreaterThan(0.18);
+    expect(nearestEndpoint).toBeGreaterThan(0.28);
   });
 });
 
