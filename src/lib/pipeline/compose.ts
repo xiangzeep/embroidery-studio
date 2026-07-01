@@ -134,7 +134,7 @@ export function resolvePreprocessMaxDimension(
 ): number {
   const configured = QUALITY_PRESETS[qualityPreset].maxDimension;
   if (digitizingMode !== "line-art") return configured;
-  const lineArtCap = qualityPreset === "detail" ? 256 : qualityPreset === "high" ? 192 : 128;
+  const lineArtCap = qualityPreset === "detail" ? 256 : 192;
   return Math.min(configured, lineArtCap);
 }
 

@@ -93,7 +93,7 @@ describe("quantizeLineArt", () => {
     const imageData = new ImageData(
       new Uint8ClampedArray([
         255, 255, 255, 255,
-        240, 248, 255, 255,
+        248, 252, 255, 255,
       ]),
       2,
       1,
@@ -107,5 +107,23 @@ describe("quantizeLineArt", () => {
 
     expect(result.labels[0]).toBe(BACKGROUND_LABEL);
     expect(result.labels[1]).not.toBe(BACKGROUND_LABEL);
+  });
+
+  it("still removes neutral near-white background pixels", () => {
+    const imageData = new ImageData(
+      new Uint8ClampedArray([
+        250, 251, 252, 255,
+      ]),
+      1,
+      1,
+    );
+
+    const result = quantizeLineArt({
+      imageData,
+      colorCount: 2,
+      removeWhiteBackground: true,
+    });
+
+    expect(result.labels[0]).toBe(BACKGROUND_LABEL);
   });
 });

@@ -5,6 +5,7 @@ type LineArtQuantizeInput = QuantizeInput & {
 };
 
 const WHITE_THRESHOLD = 248;
+const WHITE_NEUTRAL_CHROMA = 4;
 const SAME_COLOR_DISTANCE = 110;
 
 export function quantizeLineArt(input: LineArtQuantizeInput): QuantizedImage {
@@ -123,7 +124,12 @@ function shouldMergeLineArtColors(
 }
 
 function isNearWhite(r: number, g: number, b: number): boolean {
-  return r >= WHITE_THRESHOLD && g >= WHITE_THRESHOLD && b >= WHITE_THRESHOLD;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  return r >= WHITE_THRESHOLD &&
+    g >= WHITE_THRESHOLD &&
+    b >= WHITE_THRESHOLD &&
+    max - min <= WHITE_NEUTRAL_CHROMA;
 }
 
 function bucketKey(r: number, g: number, b: number): number {
