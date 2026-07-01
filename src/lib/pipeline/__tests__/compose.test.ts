@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   convertImageToEmbroideryDirect,
   rerenderDesignAndWrite,
+  resolveVectorizeDilatePx,
   runPrepipeline,
   runStitchAndWrite,
 } from "../compose";
@@ -28,6 +29,11 @@ describe("compose", () => {
     expect(pipeline.runPrepipeline).toBe(runPrepipeline);
     expect(pipeline.runStitchAndWrite).toBe(runStitchAndWrite);
     expect(pipeline.rerenderDesignAndWrite).toBe(rerenderDesignAndWrite);
+  });
+
+  it("disables mask dilation for line-art prepipeline to avoid joining nearby thin strokes", () => {
+    expect(resolveVectorizeDilatePx("line-art", 2)).toBe(0);
+    expect(resolveVectorizeDilatePx("photo-stitch", 2)).toBe(2);
   });
 
   it("rerenders from edited design instead of rebuilding from source regions", async () => {

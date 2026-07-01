@@ -1364,6 +1364,27 @@ describe("renderDesign", () => {
     expect(pattern.blocks[0].stitches.some((s) => s.kind === "stop")).toBe(false);
   });
 
+  it("stops rendering when the stitch budget is exceeded", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 100,
+      heightMm: 100,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeFillObj("0-0", 0, 0, [
+          [0, 0],
+          [30, 0],
+          [30, 30],
+          [0, 30],
+        ]),
+      ],
+    };
+
+    expect(() => renderDesign(design, {
+      ...baseOpts,
+      maxRenderStitches: 10,
+    })).toThrow("stitch budget");
+  });
+
   it("translated case", () => {
     const outer: [number, number][] = [
       [0, 0],

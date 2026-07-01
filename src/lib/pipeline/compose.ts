@@ -14,6 +14,7 @@ import type { ColorRegion } from "./vectorize";
 import { generateStitches } from "./render";
 import { writeEmbroidery } from "./writer";
 import { optimizePatternCommands } from "./command-optimizer";
+import type { DigitizingMode } from "./config";
 
 export type PipelineStage =
   | "loading-cv"
@@ -107,7 +108,7 @@ export async function runPrepipeline(
     width: imageData.width,
     height: imageData.height,
     palette: quantized.palette,
-    dilatePx: config.boundaryDilatePx,
+    dilatePx: resolveVectorizeDilatePx(config.digitizingMode, config.boundaryDilatePx),
   });
 
   return {
@@ -117,6 +118,13 @@ export async function runPrepipeline(
     widthPx: imageData.width,
     heightPx: imageData.height,
   };
+}
+
+export function resolveVectorizeDilatePx(
+  digitizingMode: DigitizingMode,
+  configuredDilatePx: number,
+): number {
+  return digitizingMode === "line-art" ? 0 : configuredDilatePx;
 }
 
 /**

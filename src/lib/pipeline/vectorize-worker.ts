@@ -32,6 +32,7 @@ export type VectorizeWorkerOptions = {
   tracer?: Tracer;
   workerFactory?: () => Worker;
   timeoutMs?: number;
+  allowDirectFallback?: boolean;
 };
 
 let seqCounter = 0;
@@ -40,13 +41,16 @@ export async function vectorizeViaWorker(
   input: VectorizeInput,
   options: VectorizeWorkerOptions = {},
 ): Promise<ColorRegion[]> {
-  if (options.tracer) return vectorize(input, options.tracer);
+  if (options.tracer && !options.workerFactory) return vectorize(input, options.tracer);
 
   try {
     const worker = (options.workerFactory ?? createWorker)();
     return await requestVectorize(worker, input, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  } catch {
-    return vectorize(input, options.tracer);
+  } catch (error) {
+    if (options.allowDirectFallback && options.tracer) {
+      return vectorize(input, options.tracer);
+    }
+    throw error;
   }
 }
 

@@ -32,12 +32,13 @@ const tracer: Tracer = {
 };
 
 describe("vectorizeViaWorker", () => {
-  it("falls back to direct vectorization when Worker is unavailable", async () => {
+  it("falls back to direct vectorization when explicitly allowed and Worker is unavailable", async () => {
     const regions = await vectorizeViaWorker(makeInput(), {
       tracer,
       workerFactory: () => {
         throw new Error("Worker unavailable");
       },
+      allowDirectFallback: true,
     });
 
     expect(regions).toHaveLength(1);
@@ -45,14 +46,11 @@ describe("vectorizeViaWorker", () => {
   });
 
   it("falls back to direct vectorization when the worker reports an error", async () => {
-    const regions = await vectorizeViaWorker(makeInput(), {
+    await expect(vectorizeViaWorker(makeInput(), {
       tracer,
       workerFactory: () => new ErrorWorker() as unknown as Worker,
       timeoutMs: 100,
-    });
-
-    expect(regions).toHaveLength(1);
-    expect(regions[0].colorIndex).toBe(0);
+    })).rejects.toThrow("boom");
   });
 });
 

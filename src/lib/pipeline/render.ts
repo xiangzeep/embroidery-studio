@@ -40,6 +40,7 @@ const DEFAULT_BEAN_RUN_STITCH_MULTIPLIER = 2.5;
 const MAX_BEAN_RUN_STITCH_MM = 1.6;
 const STRICT_RUN_TRAVEL_THRESHOLD_MM = 1.5;
 const STRICT_RUN_TRIM_THRESHOLD_MM = 3;
+const DEFAULT_MAX_RENDER_STITCHES = 60_000;
 const DEFAULT_FILL_ANGLE_DEG = 45;
 const DEFAULT_SHAPE_STRATEGY_MIN_ASPECT = 1.5;
 
@@ -138,6 +139,8 @@ export type RenderOptions = {
   /** English note. */
   suppressTieOff?: boolean;
   preferredEntry?: Point;
+  /** Stop rendering before huge patterns can lock the browser main thread. */
+  maxRenderStitches?: number;
 };
 
 /** English note. */
@@ -648,6 +651,7 @@ export function renderDesign(
 
   const blocks: StitchBlock[] = [];
   let totalStitches = 0;
+  const maxRenderStitches = opts.maxRenderStitches ?? DEFAULT_MAX_RENDER_STITCHES;
   const colors = [...byColor.keys()].sort((a, b) => a - b);
 
   for (const c of colors) {
@@ -671,6 +675,7 @@ export function renderDesign(
       totalStitches += block.stitches.filter(
         (s) => s.kind === "run" || s.kind === "satin" || s.kind === "fill",
       ).length;
+      assertWithinRenderBudget(totalStitches, maxRenderStitches);
     }
   }
 
@@ -690,6 +695,14 @@ export function renderDesign(
     blocks,
     totalStitches,
   };
+}
+
+function assertWithinRenderBudget(totalStitches: number, maxRenderStitches: number): void {
+  if (totalStitches <= maxRenderStitches) return;
+  throw new Error(
+    `Generated stitch budget exceeded (${totalStitches.toLocaleString()} / ${maxRenderStitches.toLocaleString()}). ` +
+    "Reduce image detail, color count, or output size and try again.",
+  );
 }
 
 function renderObjectByKind(
