@@ -67,4 +67,25 @@ describe("quantizeLineArt", () => {
     expect(result.labels[2]).toBe(result.labels[3]);
     expect(result.labels[4]).not.toBe(result.labels[1]);
   });
+
+  it("keeps distant same-hue line and fill colors separate to avoid oversized masks", () => {
+    const imageData = new ImageData(
+      new Uint8ClampedArray([
+        255, 255, 255, 255,
+        112, 184, 250, 255,
+        0, 72, 178, 255,
+      ]),
+      3,
+      1,
+    );
+
+    const result = quantizeLineArt({
+      imageData,
+      colorCount: 6,
+      removeWhiteBackground: true,
+    });
+
+    expect(result.palette).toHaveLength(2);
+    expect(result.labels[1]).not.toBe(result.labels[2]);
+  });
 });

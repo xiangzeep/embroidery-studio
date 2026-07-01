@@ -5,8 +5,7 @@ type LineArtQuantizeInput = QuantizeInput & {
 };
 
 const WHITE_THRESHOLD = 244;
-const SAME_HUE_MERGE_DEG = 30;
-const SAME_COLOR_DISTANCE = 80;
+const SAME_COLOR_DISTANCE = 110;
 
 export function quantizeLineArt(input: LineArtQuantizeInput): QuantizedImage {
   const {
@@ -120,28 +119,7 @@ function shouldMergeLineArtColors(
   const dg = a[1] - b[1];
   const db = a[2] - b[2];
   const distance = Math.sqrt(dr * dr + dg * dg + db * db);
-  if (distance <= SAME_COLOR_DISTANCE) return true;
-
-  const ah = rgbHue(a);
-  const bh = rgbHue(b);
-  if (ah === null || bh === null) return false;
-  const hueDistance = Math.min(Math.abs(ah - bh), 360 - Math.abs(ah - bh));
-  return hueDistance <= SAME_HUE_MERGE_DEG;
-}
-
-function rgbHue(rgb: [number, number, number]): number | null {
-  const r = rgb[0] / 255;
-  const g = rgb[1] / 255;
-  const b = rgb[2] / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const chroma = max - min;
-  if (chroma < 0.08) return null;
-  let hue: number;
-  if (max === r) hue = ((g - b) / chroma) % 6;
-  else if (max === g) hue = (b - r) / chroma + 2;
-  else hue = (r - g) / chroma + 4;
-  return (hue * 60 + 360) % 360;
+  return distance <= SAME_COLOR_DISTANCE;
 }
 
 function isNearWhite(r: number, g: number, b: number): boolean {
