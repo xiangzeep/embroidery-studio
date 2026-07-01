@@ -19,6 +19,7 @@ import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
 const SKELETON_RUN_PX_PER_MM = 10;
+const JUNCTION_RETRACT_MM = 0.28;
 
 /**
  * English note.
@@ -206,6 +207,15 @@ function prepareRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
   return dedupeSequential(smoothed);
 }
 
+function prepareClosedRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
+  const loop = stripClosingDuplicate(dedupeSequential(line));
+  if (loop.length < 3) return line.map(([x, y]) => [x, y]);
+
+  const smoothingIterations = loop.length >= 8 ? 6 : 5;
+  const smoothed = chaikinSmoothClosedLine(loop, smoothingIterations);
+  return dedupeSequential(smoothed);
+}
+
 function resampleAdaptiveOpenLine(line: Point2D[], stitchLenMm: number): Point2D[] {
   if (line.length < 2 || stitchLenMm <= 0) return resampleOpenLine(line, stitchLenMm);
 
@@ -250,6 +260,54 @@ function resampleAdaptiveOpenLine(line: Point2D[], stitchLenMm: number): Point2D
   return dedupeSequential(out);
 }
 
+function resampleClosedLineByArcLength(line: Point2D[], stitchLenMm: number): Point2D[] {
+  const loop = stripClosingDuplicate(dedupeSequential(line));
+  if (loop.length < 3 || stitchLenMm <= 0) return line.map(([x, y]) => [x, y]);
+
+  const lengths = [0];
+  let total = 0;
+  for (let i = 1; i <= loop.length; i++) {
+    const prev = loop[i - 1];
+    const next = loop[i % loop.length];
+    total += Math.hypot(next[0] - prev[0], next[1] - prev[1]);
+    lengths.push(total);
+  }
+  if (total <= 1e-6) return loop;
+
+  const targetStep = clamp(stitchLenMm * 0.85, 1.05, 2.0);
+  const count = Math.max(6, Math.round(total / targetStep));
+  const step = total / count;
+  const out: Point2D[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push(sampleClosedArcLength(loop, lengths, step * i));
+  }
+
+  const rotated = rotateClosedLoopToHiddenSeam(dedupeSequential(out));
+  const first = rotated[0];
+  const last = rotated[rotated.length - 1];
+  if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-6) {
+    rotated.push([first[0], first[1]]);
+  }
+  return dedupeSequential(rotated);
+}
+
+function sampleClosedArcLength(points: Point2D[], lengths: number[], target: number): Point2D {
+  const total = lengths[lengths.length - 1];
+  const wrapped = ((target % total) + total) % total;
+  let hi = 1;
+  while (hi < lengths.length && lengths[hi] < wrapped) hi++;
+  const lo = hi - 1;
+  const start = points[lo % points.length];
+  const end = points[hi % points.length];
+  const span = lengths[hi] - lengths[lo];
+  if (span <= 1e-6) return [start[0], start[1]];
+  const t = (wrapped - lengths[lo]) / span;
+  return [
+    start[0] + (end[0] - start[0]) * t,
+    start[1] + (end[1] - start[1]) * t,
+  ];
+}
+
 function desiredRunStep(
   line: Point2D[],
   segmentStartIndex: number,
@@ -272,6 +330,26 @@ function localTurnAngle(line: Point2D[], index: number): number {
   const prev = line[index - 1];
   const current = line[index];
   const next = line[index + 1];
+  const ax = current[0] - prev[0];
+  const ay = current[1] - prev[1];
+  const bx = next[0] - current[0];
+  const by = next[1] - current[1];
+  const al = Math.hypot(ax, ay);
+  const bl = Math.hypot(bx, by);
+  if (al <= 1e-6 || bl <= 1e-6) return 0;
+  const dot = clamp((ax * bx + ay * by) / (al * bl), -1, 1);
+  return Math.acos(dot);
+}
+
+function localClosedTurnAngle(line: Point2D[], index: number): number {
+  if (line.length < 3) return 0;
+  const prev = line[(index - 1 + line.length) % line.length];
+  const current = line[index % line.length];
+  const next = line[(index + 1) % line.length];
+  return turnAngle(prev, current, next);
+}
+
+function turnAngle(prev: Point2D, current: Point2D, next: Point2D): number {
   const ax = current[0] - prev[0];
   const ay = current[1] - prev[1];
   const bx = next[0] - current[0];
@@ -344,6 +422,53 @@ function chaikinSmoothOpenLine(points: Point2D[], iterations: number): Point2D[]
     current = dedupeSequential(next);
   }
   return current;
+}
+
+function chaikinSmoothClosedLine(points: Point2D[], iterations: number): Point2D[] {
+  let current = stripClosingDuplicate(points).map(([x, y]) => [x, y] as Point2D);
+  for (let iter = 0; iter < iterations; iter++) {
+    if (current.length < 3) break;
+    const next: Point2D[] = [];
+    for (let i = 0; i < current.length; i++) {
+      const a = current[i];
+      const b = current[(i + 1) % current.length];
+      next.push(
+        [
+          a[0] * 0.75 + b[0] * 0.25,
+          a[1] * 0.75 + b[1] * 0.25,
+        ],
+        [
+          a[0] * 0.25 + b[0] * 0.75,
+          a[1] * 0.25 + b[1] * 0.75,
+        ],
+      );
+    }
+    current = dedupeSequential(next);
+  }
+  return current;
+}
+
+function rotateClosedLoopToHiddenSeam(points: Point2D[]): Point2D[] {
+  const loop = stripClosingDuplicate(points);
+  if (loop.length < 3) return points.map(([x, y]) => [x, y]);
+
+  let bestIndex = 0;
+  let bestScore = Infinity;
+  const minY = Math.min(...loop.map(([, y]) => y));
+  const maxY = Math.max(...loop.map(([, y]) => y));
+  const height = Math.max(maxY - minY, 1e-6);
+
+  for (let i = 0; i < loop.length; i++) {
+    const turn = localClosedTurnAngle(loop, i);
+    const lowerPlacement = (maxY - loop[i][1]) / height;
+    const score = turn + lowerPlacement * 0.22;
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+
+  return loop.slice(bestIndex).concat(loop.slice(0, bestIndex));
 }
 
 function extendOpenPathToShape(points: Point2D[], shape: Shape): Point2D[] {
@@ -495,19 +620,63 @@ function prepareSkeletonBranch(
     const endNode = branch.endNodeId ? nodeMap.get(branch.endNodeId) : undefined;
     if (startNode && startNode.degree <= 1) {
       points[0] = extendEndpointTowardBoundary(points[0], points[1], shape);
+    } else if (startNode && startNode.degree >= 3) {
+      trimPolylineStart(points, JUNCTION_RETRACT_MM);
     }
     if (endNode && endNode.degree <= 1) {
       const lastIndex = points.length - 1;
       points[lastIndex] = extendEndpointTowardBoundary(points[lastIndex], points[lastIndex - 1], shape);
+    } else if (endNode && endNode.degree >= 3) {
+      const lastIndex = points.length - 1;
+      trimPolylineEnd(points, JUNCTION_RETRACT_MM);
     }
   }
-  return processRunPolyline(points, stitchLenMm);
+  return processRunPolyline(points, stitchLenMm, branch.isLoop);
 }
 
-function processRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
+function processRunPolyline(line: Point2D[], stitchLenMm: number, closed = false): Point2D[] {
   if (line.length < 2) return line.map(([x, y]) => [x, y]);
+  if (closed) {
+    const prepared = prepareClosedRunPolyline(line, stitchLenMm);
+    return resampleClosedLineByArcLength(prepared, stitchLenMm);
+  }
   const prepared = prepareRunPolyline(dedupeSequential(line), stitchLenMm);
   return resampleAdaptiveOpenLine(prepared, stitchLenMm);
+}
+
+function trimPolylineStart(points: Point2D[], amountMm: number): void {
+  const result = trimPolylineStartResult(points, amountMm);
+  if (!result) return;
+  points.splice(0, points.length, ...result);
+}
+
+function trimPolylineEnd(points: Point2D[], amountMm: number): void {
+  const reversed = points.slice().reverse();
+  const result = trimPolylineStartResult(reversed, amountMm);
+  if (!result) return;
+  points.splice(0, points.length, ...result.reverse());
+}
+
+function trimPolylineStartResult(points: Point2D[], amountMm: number): Point2D[] | null {
+  if (points.length < 2 || amountMm <= 0) return null;
+  let remaining = amountMm;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const next = points[i];
+    const length = Math.hypot(next[0] - prev[0], next[1] - prev[1]);
+    if (length <= 1e-6) continue;
+    if (remaining <= length) {
+      const t = remaining / length;
+      const trimmed: Point2D = [
+        prev[0] + (next[0] - prev[0]) * t,
+        prev[1] + (next[1] - prev[1]) * t,
+      ];
+      return [trimmed, ...points.slice(i)];
+    }
+    remaining -= length;
+  }
+  const fallback = points[Math.max(0, points.length - 2)];
+  return [[fallback[0], fallback[1]], points[points.length - 1]];
 }
 
 function pixelToMm(px: number, py: number, raster: SkeletonRasterInfo): Point2D {

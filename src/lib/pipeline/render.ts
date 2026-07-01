@@ -203,7 +203,7 @@ function renderRunTopOnly(
   let segments: Point[][] = ctx.opts.disableMedialAxis
     ? []
     : medialAxisRunSegments(obj.shape, runStitchLenMm);
-  if (segments.length === 0) {
+  if (segments.length === 0 && (ctx.opts.disableMedialAxis || !strictRunObject(obj))) {
     const fallback = resamplePolyline(
       obj.shape.outer as Polygon,
       runStitchLenMm,

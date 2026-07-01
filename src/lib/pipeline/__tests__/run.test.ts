@@ -209,6 +209,23 @@ describe("medialAxisRun", () => {
     expect(endGap).toBeLessThanOrEqual(0.35);
   });
 
+  it("smooths closed loop runs without sharp polyline corners", () => {
+    const shape: Shape = {
+      outer: [[0, 0], [12, 0], [12, 8], [0, 8]],
+      holes: [[[3, 2], [9, 2], [9, 6], [3, 6]]],
+    };
+
+    const [loop] = medialAxisRunSegments(shape, 1.4);
+    const maxTurn = maxTurnAngle(loop, true);
+    const tinySteps = loop.slice(1).filter((point, index) => {
+      const prev = loop[index];
+      return Math.hypot(point[0] - prev[0], point[1] - prev[1]) < 0.35;
+    });
+
+    expect(maxTurn).toBeLessThan(1.15);
+    expect(tinySteps.length).toBe(0);
+  });
+
   it("routes loop and branch strokes without falling back to pixel-density skeleton points", () => {
     const shape: Shape = {
       outer: [
@@ -222,10 +239,13 @@ describe("medialAxisRun", () => {
     const pts = medialAxisRun(shape, 2.0);
     const xs = pts.map(([x]) => x);
     const ys = pts.map(([, y]) => y);
-    const shortSteps = pts.slice(1).filter((point, index) => {
-      const prev = pts[index];
-      return Math.hypot(point[0] - prev[0], point[1] - prev[1]) < 0.75;
-    });
+    const segments = medialAxisRunSegments(shape, 2.0);
+    const shortSteps = segments.flatMap((segment) =>
+      segment.slice(1).filter((point, index) => {
+        const prev = segment[index];
+        return Math.hypot(point[0] - prev[0], point[1] - prev[1]) < 0.75;
+      }),
+    );
 
     expect(Math.min(...xs)).toBeLessThan(2.7);
     expect(Math.max(...xs)).toBeGreaterThan(11.6);
@@ -284,4 +304,53 @@ describe("medialAxisRun", () => {
       return Math.min(...xs) < 0.8 && Math.max(...xs) > 5.2 && Math.max(...ys) < 1.4;
     })).toBe(false);
   });
+
+  it("pulls branch endpoints away from junction clusters to avoid burrs", () => {
+    const shape: Shape = {
+      outer: [
+        [0, 0],
+        [6, 0],
+        [6, 1],
+        [3.5, 1],
+        [3.5, 6],
+        [2.5, 6],
+        [2.5, 1],
+        [0, 1],
+      ],
+      holes: [],
+    };
+
+    const segments = medialAxisRunSegments(shape, 0.8);
+    const junction: [number, number] = [3, 0.5];
+    const nearestEndpoint = Math.min(...segments.flatMap((segment) => {
+      const first = segment[0];
+      const last = segment[segment.length - 1];
+      return [
+        Math.hypot(first[0] - junction[0], first[1] - junction[1]),
+        Math.hypot(last[0] - junction[0], last[1] - junction[1]),
+      ];
+    }));
+
+    expect(nearestEndpoint).toBeGreaterThan(0.18);
+  });
 });
+
+function maxTurnAngle(points: Array<[number, number]>, closed: boolean): number {
+  let maxTurn = 0;
+  const count = closed ? points.length : points.length - 1;
+  for (let i = 0; i < count; i++) {
+    const prev = points[(i - 1 + points.length) % points.length];
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    const ax = current[0] - prev[0];
+    const ay = current[1] - prev[1];
+    const bx = next[0] - current[0];
+    const by = next[1] - current[1];
+    const al = Math.hypot(ax, ay);
+    const bl = Math.hypot(bx, by);
+    if (al <= 1e-6 || bl <= 1e-6) continue;
+    const dot = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (al * bl)));
+    maxTurn = Math.max(maxTurn, Math.acos(dot));
+  }
+  return maxTurn;
+}

@@ -1021,6 +1021,38 @@ describe("renderRun", () => {
     expect(kinds).toContain("jump");
     expect(maxRealStitchDistance(stitches)).toBeLessThanOrEqual(7);
   });
+
+  it("does not fall back to contour outlines for strict stroke run objects", () => {
+    const obj: EmbroideryObject = {
+      id: "0-0",
+      kind: "run",
+      strokeKind: "bean-run",
+      colorIndex: 0,
+      rgb: [0, 0, 0],
+      shape: {
+        outer: [[0, 0], [0.4, 0], [0.4, 0.3], [0, 0.3]],
+        holes: [],
+      },
+      props: DUMMY_PROPS,
+      strokeMetrics: {
+        areaMm2: 0.12,
+        perimeterMm: 1.4,
+        bboxWidthMm: 0.4,
+        bboxHeightMm: 0.3,
+        estimatedWidthMm: 0.2,
+        estimatedLengthMm: 0.6,
+        slenderness: 1.33,
+        compactness: 0.7,
+        holeCount: 0,
+        isStrokeLike: true,
+      },
+      order: 0,
+    };
+
+    const stitches = renderRun(obj, makeCtx());
+
+    expect(stitches).toEqual([]);
+  });
 });
 
 describe("renderSatin", () => {
