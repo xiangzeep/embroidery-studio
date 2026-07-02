@@ -40,8 +40,8 @@ export function medialAxisRun(shape: Shape, stitchLenMm: number): Point2D[] {
 export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
   const routed = branchAwareSkeletonRunSegments(shape, stitchLenMm);
   if (routed.length > 0) return routed;
-  const skeleton = centerRunUnderlay(shape, stitchLenMm);
-  if (skeleton.length >= 2) return [finalizeRunPath(skeleton, shape)];
+  const centerline = centerRunUnderlay(shape, stitchLenMm);
+  if (centerline.length >= 2) return [finalizeRunPath(centerline, shape)];
   const rail = railMidlineRun(shape, stitchLenMm);
   return rail.length >= 2 ? [finalizeRunPath(rail, shape)] : [];
 }
@@ -751,7 +751,6 @@ function prepareSkeletonBranch(
       const lastIndex = points.length - 1;
       points[lastIndex] = extendEndpointTowardBoundary(points[lastIndex], points[lastIndex - 1], shape);
     } else if (endNode && endNode.degree >= 3) {
-      const lastIndex = points.length - 1;
       trimPolylineEnd(points, JUNCTION_RETRACT_MM);
     }
   }

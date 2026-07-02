@@ -2,16 +2,13 @@
 
 import type { ConversionConfig } from "./config";
 import type { PrepipelineResult } from "./compose";
-import { getFabricProfile } from "./fabric";
-import { buildObjects } from "./build-objects";
-import { optimizeOrder } from "./pathing";
-import { renderDesign } from "./render";
+import { buildDesignGraph } from "./design-graph";
+import { renderDesignGraph } from "./render";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { optimizePatternCommands } from "./command-optimizer";
 import { analyzePattern } from "./stats";
 import { writeDstBytes } from "./dst-writer";
 import { serializeDesign } from "./design";
-import { resolveBuildMinRegionAreaPx } from "./line-art-settings";
 
 type StitchWorkerRequest = {
   type: "stitch";
@@ -29,27 +26,8 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
     }
 
     const { pre, config } = input;
-    const fabric = getFabricProfile(config.fabric);
-    const objects = buildObjects({
-      regions: pre.regions,
-      widthMm: pre.widthMm,
-      widthPx: pre.widthPx,
-      heightPx: pre.heightPx,
-      fabric,
-      digitizingMode: config.digitizingMode,
-      outlineFontStrategy: config.outlineFontStrategy,
-      satinMaxWidthMm: config.satinMaxWidthMm,
-      minRegionAreaPx: resolveBuildMinRegionAreaPx(config.digitizingMode, config.minRegionAreaPx),
-      removeWhiteBackground: config.removeWhiteBackground,
-    });
-    const baseDesign = {
-      widthMm: pre.widthMm,
-      heightMm: pre.heightMm,
-      fabric,
-      objects,
-    };
-    const design = optimizeOrder(baseDesign);
-    const renderedPattern = renderDesign(design, {
+    const graph = buildDesignGraph(pre, config);
+    const renderedPattern = renderDesignGraph(graph, {
       widthMm: pre.widthMm,
       heightMm: pre.heightMm,
       widthPx: pre.widthPx,
@@ -59,7 +37,7 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
       fillAngleDeg: config.fillAngleDeg,
       fillAngleByColorIndex: config.fillAngleByColor,
       fillStrategy: config.fillStrategy,
-      fabric,
+      fabric: graph.design.fabric,
       disableUnderlay: config.disableUnderlay,
       disableCompensation: config.disableCompensation,
       policy: TRIM_POLICY_BY_FORMAT[config.format],
@@ -74,7 +52,7 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
       type: "result",
       seq: input.seq,
       pattern,
-      design: serializeDesign(design),
+      design: serializeDesign(graph.design),
       stats,
       fileBuffer,
     }, [fileBuffer]);

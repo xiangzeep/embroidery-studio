@@ -1,12 +1,9 @@
 import type { StitchPattern } from "./types";
 import { analyzePattern, type PatternStats } from "./stats";
 import { QUALITY_PRESETS, type ConversionConfig, type QualityPreset } from "./config";
-import { optimizeOrder } from "./pathing";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
-import { buildObjects } from "./build-objects";
-import { renderDesign } from "./render";
+import { renderDesignGraph } from "./render";
 import type { EmbroideryDesign } from "./types";
-import { getFabricProfile } from "./fabric";
 import { quantize, warmupOpenCV } from "./quantize";
 import { quantizeLineArt } from "./line-art-quantize";
 import { vectorizeViaWorker } from "./vectorize-worker";
@@ -16,6 +13,7 @@ import { writeEmbroidery } from "./writer";
 import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
 import { runStitchAndWriteViaWorker } from "./stitch-worker";
+import { buildDesignGraph } from "./design-graph";
 export {
   resolveBuildMinRegionAreaPx,
   resolveVectorizeTurdsize,
@@ -169,30 +167,8 @@ export async function runStitchAndWriteDirect(
   onProgress?: (p: PipelineProgress) => void,
 ): Promise<PipelineResult> {
   onProgress?.({ stage: "stitch", percent: 75 });
-  // Local pathing flow: buildObjects -> optimizeOrder -> renderDesign.
-  // English note.
-  // English note.
-  const fabric = getFabricProfile(config.fabric);
-  const objects = buildObjects({
-    regions: pre.regions,
-    widthMm: pre.widthMm,
-    widthPx: pre.widthPx,
-    heightPx: pre.heightPx,
-    fabric,
-    digitizingMode: config.digitizingMode,
-    outlineFontStrategy: config.outlineFontStrategy,
-    satinMaxWidthMm: config.satinMaxWidthMm,
-    minRegionAreaPx: resolveBuildMinRegionAreaPx(config.digitizingMode, config.minRegionAreaPx),
-    removeWhiteBackground: config.removeWhiteBackground,
-  });
-  const baseDesign: EmbroideryDesign = {
-    widthMm: pre.widthMm,
-    heightMm: pre.heightMm,
-    fabric,
-    objects,
-  };
-  const optimized = optimizeOrder(baseDesign);
-  const renderedPattern = renderDesign(optimized, {
+  const graph = buildDesignGraph(pre, config);
+  const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,
     widthPx: pre.widthPx,
@@ -202,7 +178,7 @@ export async function runStitchAndWriteDirect(
     fillAngleDeg: config.fillAngleDeg,
     fillAngleByColorIndex: config.fillAngleByColor,
     fillStrategy: config.fillStrategy,
-    fabric,
+    fabric: graph.design.fabric,
     disableUnderlay: config.disableUnderlay,
     disableCompensation: config.disableCompensation,
     policy: TRIM_POLICY_BY_FORMAT[config.format],
@@ -216,7 +192,7 @@ export async function runStitchAndWriteDirect(
     format: config.format,
   });
 
-  return { pattern, design: optimized, fileBlob, stats };
+  return { pattern, design: graph.design, fileBlob, stats };
 }
 
 export async function rerenderDesignAndWrite(
@@ -232,7 +208,8 @@ export async function rerenderDesignAndWrite(
     objects: design.objects.filter((object) => object.visible !== false),
   };
 
-  const renderedPattern = renderDesign(visibleDesign, {
+  const graph = buildDesignGraph(visibleDesign);
+  const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,
     widthPx: pre.widthPx,
@@ -257,7 +234,7 @@ export async function rerenderDesignAndWrite(
     format: config.format,
   });
 
-  return { pattern, design: visibleDesign, fileBlob, stats };
+  return { pattern, design: graph.design, fileBlob, stats };
 }
 
 function bitmapToImageData(bitmap: ImageBitmap, maxDimension: number): {

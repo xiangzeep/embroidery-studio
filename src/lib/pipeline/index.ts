@@ -11,6 +11,7 @@ export {
 export {
   generateStitches,
   renderDesign,
+  renderDesignGraph,
   renderRun,
   renderSatin,
   renderFill,
@@ -63,3 +64,7 @@ export {
 export { shouldRenderAsStrokeSatin } from "./curved-satin";
 
 export { isStrokeBranchGroup, orderStrokeBranchObjects } from "./stroke-graph";
+
+export { buildDesignGraph, mapObjectType, type DesignGraph, type DesignGraphNode, type DesignGraphEdge, type GraphObjectType } from "./design-graph";
+export { cleanPath, filterNearDuplicates, resampleClosed, resampleOpen } from "./path-cleaner";
+export { routeGraphObjects } from "./object-router";

@@ -49,6 +49,8 @@ export type StitchPattern = {
 
 export type ObjectKind = "run" | "satin" | "fill";
 
+export type EmbroideryObjectType = "RUN" | "SATIN" | "TATAMI";
+
 export type StrokeKind =
   | "none"
   | "thin-run"
