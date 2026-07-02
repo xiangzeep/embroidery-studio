@@ -191,13 +191,13 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].kind).toBe("run");
   });
 
-  it("drops short pale open line-art fragments as detail noise", () => {
+  it("drops tiny pale open line-art fragments as detail noise", () => {
     const fragment: ColorRegion = {
       colorIndex: 1,
       rgb: [230, 245, 255],
       svgPath: "",
       shapes: [{
-        outer: [[0, 0], [36, 0], [36, 4], [0, 4]],
+        outer: [[0, 0], [18, 0], [18, 4], [0, 4]],
         holes: [],
       }],
       polygons: [],
@@ -213,6 +213,57 @@ describe("buildObjects — kind 判定: satin / run", () => {
     });
 
     expect(result).toEqual([]);
+  });
+
+  it("keeps short coherent pale line-art strokes as run stitches", () => {
+    const stroke: ColorRegion = {
+      colorIndex: 1,
+      rgb: [230, 245, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [36, 0], [36, 4], [0, 4]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [stroke],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("run");
+  });
+
+  it("promotes short wide-enough pale line-art strips from fill to run", () => {
+    const stroke: ColorRegion = {
+      colorIndex: 1,
+      rgb: [230, 245, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [36, 0], [36, 12], [0, 12]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [stroke],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("run");
+    expect(result[0].strokeKind).toBe("thin-run");
   });
 
   it("keeps continuous pale line-art details as run stitches", () => {

@@ -3,6 +3,7 @@ import { FABRIC_PROFILES } from "../fabric";
 import { buildDesignGraph, mapObjectType } from "../design-graph";
 import { cleanPath } from "../path-cleaner";
 import { routeGraphObjects } from "../object-router";
+import { renderDesignGraph } from "../render";
 import type { EmbroideryDesign, EmbroideryObject, Point2D, Stitch } from "../types";
 
 const makeRun = (id: string, outer: Point2D[], order: number): EmbroideryObject => ({
@@ -80,5 +81,51 @@ describe("objectRouter", () => {
 
     expect(routed.map((stitch) => stitch.kind)).toEqual(["trim", "jump"]);
     expect(routed.some((stitch) => stitch.kind === "run")).toBe(false);
+  });
+});
+
+describe("graph RUN fidelity", () => {
+  it("preserves branched thin strokes instead of collapsing them into rail-average zigzags", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 20,
+      heightMm: 12,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun(
+          "branched-run",
+          [
+            [0, 0],
+            [6, 0],
+            [6, 1],
+            [3.5, 1],
+            [3.5, 6],
+            [2.5, 6],
+            [2.5, 1],
+            [0, 1],
+          ],
+          0,
+        ),
+      ],
+    };
+    const graph = buildDesignGraph(design);
+    const pattern = renderDesignGraph(graph, {
+      widthMm: 20,
+      heightMm: 12,
+      widthPx: 200,
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+    });
+    const runStitches = pattern.blocks.flatMap((block) =>
+      block.stitches.filter((stitch) => stitch.kind === "run"),
+    );
+    const xs = runStitches.map((stitch) => stitch.x);
+    const ys = runStitches.map((stitch) => stitch.y);
+
+    expect(Math.min(...xs)).toBeLessThan(0.8);
+    expect(Math.max(...xs)).toBeGreaterThan(5.2);
+    expect(Math.max(...ys)).toBeGreaterThan(5.2);
   });
 });

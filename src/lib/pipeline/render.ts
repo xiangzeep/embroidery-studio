@@ -26,7 +26,6 @@ import type { DigitizingMode, OutlineFontStrategy } from "./config";
 import { photoRandomFill } from "./fill";
 import { routeGraphObjects } from "./object-router";
 import type { DesignGraph } from "./design-graph";
-import { cleanPath, resampleClosed, resampleOpen } from "./path-cleaner";
 
 export type { TrimPolicy } from "./policy";
 
@@ -144,8 +143,6 @@ export type RenderOptions = {
   preferredEntry?: Point;
   /** Stop rendering before huge patterns can lock the browser main thread. */
   maxRenderStitches?: number;
-  /** Use object-graph centerline extraction for RUN objects. */
-  useObjectGraphRunPath?: boolean;
 };
 
 /** English note. */
@@ -208,11 +205,9 @@ function renderRunTopOnly(
   // English note.
   // English note.
   const runStitchLenMm = resolveRunStitchLength(obj, ctx);
-  let segments: Point[][] = ctx.opts.useObjectGraphRunPath
-    ? geometricRunSegments(obj.shape, runStitchLenMm)
-    : ctx.opts.disableMedialAxis
-      ? []
-      : medialAxisRunSegments(obj.shape, runStitchLenMm);
+  let segments: Point[][] = ctx.opts.disableMedialAxis
+    ? []
+    : medialAxisRunSegments(obj.shape, runStitchLenMm);
   if (segments.length === 0 && (ctx.opts.disableMedialAxis || !strictRunObject(obj))) {
     const fallback = resamplePolyline(
       obj.shape.outer as Polygon,
@@ -242,62 +237,6 @@ function renderRunTopOnly(
     );
   }
   return block.stitches;
-}
-
-function geometricRunSegments(shape: Shape, stitchLenMm: number): Point[][] {
-  const closedLoop = shape.holes.length > 0;
-  const centerLoop = centerlineFromNestedLoop(shape, stitchLenMm);
-  if (centerLoop.length >= 3) return [centerLoop as Point[]];
-
-  const centerRail = centerlineFromRails(shape, stitchLenMm);
-  if (centerRail.length >= 2) return [centerRail as Point[]];
-
-  const fallbackClosed = closedLoop || isPolygonClosed(shape.outer);
-  const fallback = cleanPath(shape.outer, {
-    targetSpacingMm: stitchLenMm,
-    closed: fallbackClosed,
-  });
-  return fallback.length >= 2 ? [fallback as Point[]] : [];
-}
-
-function centerlineFromNestedLoop(shape: Shape, stitchLenMm: number): Point[] {
-  const hole = shape.holes[0];
-  if (!hole || shape.outer.length < 3 || hole.length < 3) return [];
-  const outer = resampleClosed(shape.outer, stitchLenMm);
-  const inner = resampleClosed(hole, stitchLenMm);
-  const count = Math.min(outer.length, inner.length);
-  if (count < 3) return [];
-  const center: Point[] = [];
-  for (let i = 0; i < count; i++) {
-    const a = outer[Math.floor((i / count) * outer.length)];
-    const b = inner[Math.floor((i / count) * inner.length)];
-    center.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
-  }
-  return cleanPath(center, { targetSpacingMm: stitchLenMm, closed: true }) as Point[];
-}
-
-function centerlineFromRails(shape: Shape, stitchLenMm: number): Point[] {
-  if (shape.outer.length < 4 || shape.holes.length > 0) return [];
-  const rails = extractRails(shape);
-  if (rails.left.length < 2 || rails.right.length < 2) return [];
-  const left = resampleOpen(rails.left, stitchLenMm);
-  const right = resampleOpen(rails.right, stitchLenMm);
-  const count = Math.min(left.length, right.length);
-  if (count < 2) return [];
-  const center: Point[] = [];
-  for (let i = 0; i < count; i++) {
-    const a = left[Math.floor((i / count) * left.length)];
-    const b = right[Math.floor((i / count) * right.length)];
-    center.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
-  }
-  return cleanPath(center, { targetSpacingMm: stitchLenMm, closed: false }) as Point[];
-}
-
-function isPolygonClosed(points: Point[]): boolean {
-  if (points.length < 3) return false;
-  const first = points[0];
-  const last = points[points.length - 1];
-  return Math.hypot(first[0] - last[0], first[1] - last[1]) <= 0.9;
 }
 
 function resolveRunStitchLength(
@@ -764,7 +703,7 @@ export function renderDesignGraph(
   graph: DesignGraph,
   opts: RenderOptions,
 ): StitchPattern {
-  const ctx: RenderContext = { opts: { ...opts, useObjectGraphRunPath: true } };
+  const ctx: RenderContext = { opts };
   const trimThresholdMm = opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
   const maxRenderStitches = opts.maxRenderStitches ?? DEFAULT_MAX_RENDER_STITCHES;
   const blocks: StitchBlock[] = [];

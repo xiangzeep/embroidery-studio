@@ -59,9 +59,11 @@ const DEFAULT_BOUNDARY_SIMPLIFY_TOLERANCE_PX = 0.6;
 const RUN_MIN_ASPECT_RATIO = 3;
 const LINE_ART_PALE_DETAIL_MIN_CHANNEL = 220;
 const LINE_ART_PALE_DETAIL_MAX_CHANNEL = 238;
-const LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM = 6;
+const LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM = 3;
 const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 = 12;
 const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM = 8;
+const LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM = 1.35;
+const LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS = 2.6;
 
 /**
  * English note.
@@ -242,10 +244,10 @@ function buildObjectForShape(
     opts.satinMinAspectRatio,
   );
   const strokeMetrics = analyzeStrokeMetrics(shapeMm);
-  const strokeKind = classifyStrokeKind(strokeMetrics, opts.digitizingMode);
-  const strokeRole = classifyStrokeRole(strokeMetrics, strokeKind, opts.digitizingMode);
+  let strokeKind = classifyStrokeKind(strokeMetrics, opts.digitizingMode);
+  let strokeRole = classifyStrokeRole(strokeMetrics, strokeKind, opts.digitizingMode);
   const strokeOverride: StrokeOverride = "use-global";
-  const kind = resolveObjectKindForStroke(
+  let kind = resolveObjectKindForStroke(
     baseKind,
     strokeKind,
     strokeRole,
@@ -253,6 +255,18 @@ function buildObjectForShape(
     opts.outlineFontStrategy,
     strokeOverride,
   );
+  if (
+    shouldPromoteLineArtDetailToRun({
+      kind,
+      layer,
+      strokeMetrics,
+      digitizingMode: opts.digitizingMode,
+    })
+  ) {
+    kind = "run";
+    strokeKind = "thin-run";
+    strokeRole = "outline";
+  }
   if (
     isLineArtPaleOpenFragmentNoise({
       rgb: region.rgb,
@@ -294,6 +308,31 @@ function buildObjectForShape(
   };
 }
 
+function shouldPromoteLineArtDetailToRun(input: {
+  kind: ObjectKind;
+  layer: ReturnType<typeof classifyLayer>;
+  strokeMetrics: ReturnType<typeof analyzeStrokeMetrics>;
+  digitizingMode: DigitizingMode;
+}): boolean {
+  if (input.digitizingMode !== "line-art") return false;
+  if (input.kind !== "fill") return false;
+  if (
+    input.layer !== "outline" &&
+    input.layer !== "detail" &&
+    input.layer !== "highlight"
+  ) {
+    return false;
+  }
+  if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) return false;
+  const width = input.strokeMetrics.widthAvgMm ?? input.strokeMetrics.estimatedWidthMm;
+  return (
+    width > 0 &&
+    width <= LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM &&
+    input.strokeMetrics.estimatedLengthMm >= LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM &&
+    input.strokeMetrics.slenderness >= LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS
+  );
+}
+
 function isLineArtPaleOpenFragmentNoise(input: {
   rgb: [number, number, number];
   kind: ObjectKind;
@@ -316,7 +355,9 @@ function isLineArtPaleOpenFragmentNoise(input: {
     return input.metrics.areaMm2 < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 ||
       input.strokeMetrics.estimatedLengthMm < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM;
   }
-  if (!input.strokeMetrics.isStrokeLike) return false;
+  if (!input.strokeMetrics.isStrokeLike) {
+    return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
+  }
   return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
 }
 

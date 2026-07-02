@@ -40,8 +40,8 @@ describe("compose", () => {
   });
 
   it("caps line-art preprocessing size to keep generation responsive", () => {
-    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(128);
-    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(192);
+    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(160);
+    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(224);
     expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(256);
     expect(resolvePreprocessMaxDimension("photo-stitch", "balanced")).toBe(384);
   });
