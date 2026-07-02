@@ -57,6 +57,11 @@ const DEFAULT_MAX_STITCH_MM = 7;
 const DEFAULT_MIN_REGION_AREA_PX = 0;
 const DEFAULT_BOUNDARY_SIMPLIFY_TOLERANCE_PX = 0.6;
 const RUN_MIN_ASPECT_RATIO = 3;
+const LINE_ART_PALE_DETAIL_MIN_CHANNEL = 220;
+const LINE_ART_PALE_DETAIL_MAX_CHANNEL = 238;
+const LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM = 6;
+const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 = 12;
+const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM = 8;
 
 /**
  * English note.
@@ -248,6 +253,18 @@ function buildObjectForShape(
     opts.outlineFontStrategy,
     strokeOverride,
   );
+  if (
+    isLineArtPaleOpenFragmentNoise({
+      rgb: region.rgb,
+      kind,
+      layer,
+      metrics,
+      strokeMetrics,
+      digitizingMode: opts.digitizingMode,
+    })
+  ) {
+    return null;
+  }
   const defaultProps = deriveDefaultProps(kind, shortSide, opts.fabric);
   const policy = resolveLayerStitchPolicy({
     layer,
@@ -275,6 +292,38 @@ function buildObjectForShape(
     strokeOverride,
     order,
   };
+}
+
+function isLineArtPaleOpenFragmentNoise(input: {
+  rgb: [number, number, number];
+  kind: ObjectKind;
+  layer: ReturnType<typeof classifyLayer>;
+  metrics: ShapeMetrics;
+  strokeMetrics: ReturnType<typeof analyzeStrokeMetrics>;
+  digitizingMode: DigitizingMode;
+}): boolean {
+  if (input.digitizingMode !== "line-art") return false;
+  if (!isPaleLineArtDetail(input.rgb)) return false;
+  if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) return false;
+  if (
+    input.layer !== "outline" &&
+    input.layer !== "detail" &&
+    input.layer !== "highlight"
+  ) {
+    return false;
+  }
+  if (input.kind !== "run") {
+    return input.metrics.areaMm2 < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 ||
+      input.strokeMetrics.estimatedLengthMm < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM;
+  }
+  if (!input.strokeMetrics.isStrokeLike) return false;
+  return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
+}
+
+function isPaleLineArtDetail(rgb: [number, number, number]): boolean {
+  const max = Math.max(...rgb);
+  const min = Math.min(...rgb);
+  return min >= LINE_ART_PALE_DETAIL_MIN_CHANNEL && max >= LINE_ART_PALE_DETAIL_MAX_CHANNEL;
 }
 
 /**

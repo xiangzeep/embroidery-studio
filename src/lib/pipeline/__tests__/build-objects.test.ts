@@ -191,6 +191,80 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].kind).toBe("run");
   });
 
+  it("drops short pale open line-art fragments as detail noise", () => {
+    const fragment: ColorRegion = {
+      colorIndex: 1,
+      rgb: [230, 245, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [36, 0], [36, 4], [0, 4]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [fragment],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toEqual([]);
+  });
+
+  it("keeps continuous pale line-art details as run stitches", () => {
+    const stroke: ColorRegion = {
+      colorIndex: 1,
+      rgb: [230, 245, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [120, 0], [120, 4], [0, 4]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [stroke],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("run");
+    expect(result[0].strokeKind).toBe("thin-run");
+  });
+
+  it("drops pale line-art detail blocks that would render as fill instead of run", () => {
+    const block: ColorRegion = {
+      colorIndex: 1,
+      rgb: [230, 245, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [28, 0], [28, 18], [0, 18]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [block],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toEqual([]);
+  });
+
   it("routes narrow closed line-art loops to run using sampled skeleton width", () => {
     const contourLoop: ColorRegion = {
       colorIndex: 0,
