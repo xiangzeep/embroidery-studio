@@ -8,12 +8,15 @@ import { quantize, warmupOpenCV } from "./quantize";
 import { quantizeLineArt } from "./line-art-quantize";
 import { vectorizeViaWorker } from "./vectorize-worker";
 import type { ColorRegion } from "./vectorize";
+import { compactVectorizeRegionsForTransfer } from "./vectorize-payload";
+import { vectorizeRasterLabels } from "./raster-vectorize";
 import { generateStitches } from "./render";
 import { writeEmbroidery } from "./writer";
 import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
 import { runStitchAndWriteViaWorker } from "./stitch-worker";
 import { buildDesignGraph } from "./design-graph";
+import { assertPrepipelineWithinStitchBudget } from "./stitch-budget";
 export {
   resolveBuildMinRegionAreaPx,
   resolveVectorizeTurdsize,
@@ -110,22 +113,33 @@ export async function runPrepipeline(
       });
 
   onProgress?.({ stage: "vectorize", percent: 50 });
-  const regions = await vectorizeViaWorker({
-    labels: quantized.labels,
-    width: imageData.width,
-    height: imageData.height,
-    palette: quantized.palette,
-    turdsize: resolveVectorizeTurdsize(config.digitizingMode),
-    dilatePx: resolveVectorizeDilatePx(config.digitizingMode, config.boundaryDilatePx),
-  });
+  const regions = compactVectorizeRegionsForTransfer(
+    config.digitizingMode === "line-art"
+      ? vectorizeRasterLabels({
+          labels: quantized.labels,
+          width: imageData.width,
+          height: imageData.height,
+          palette: quantized.palette,
+        })
+      : await vectorizeViaWorker({
+          labels: quantized.labels,
+          width: imageData.width,
+          height: imageData.height,
+          palette: quantized.palette,
+          turdsize: resolveVectorizeTurdsize(config.digitizingMode),
+          dilatePx: resolveVectorizeDilatePx(config.digitizingMode, config.boundaryDilatePx),
+        }),
+  );
 
-  return {
+  const pre = {
     regions,
     widthMm,
     heightMm,
     widthPx: imageData.width,
     heightPx: imageData.height,
   };
+  assertPrepipelineWithinStitchBudget(pre, config);
+  return pre;
 }
 
 export function resolveVectorizeDilatePx(
@@ -141,7 +155,11 @@ export function resolvePreprocessMaxDimension(
 ): number {
   const configured = QUALITY_PRESETS[qualityPreset].maxDimension;
   if (digitizingMode !== "line-art") return configured;
-  const lineArtCap = qualityPreset === "detail" ? 512 : qualityPreset === "high" ? 384 : 256;
+  const lineArtCap =
+    qualityPreset === "detail" ? 512 :
+    qualityPreset === "high" ? 384 :
+    qualityPreset === "balanced" ? 192 :
+    160;
   return Math.min(configured, lineArtCap);
 }
 

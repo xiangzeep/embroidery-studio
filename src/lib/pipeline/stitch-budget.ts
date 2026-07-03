@@ -1,7 +1,7 @@
 import type { ConversionConfig } from "./config";
 import type { PrepipelineResult } from "./compose";
 
-const MAX_LINE_ART_STITCH_SHAPES = 1_200;
+const MAX_LINE_ART_STITCH_SHAPES = 500;
 const MAX_LINE_ART_STITCH_POINTS = 80_000;
 const MAX_LINE_ART_SINGLE_SHAPE_POINTS = 8_000;
 

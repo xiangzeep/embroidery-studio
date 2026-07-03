@@ -9,6 +9,9 @@ import {
 } from "../compose";
 import { makeDefaultConfig } from "../config";
 import { quantizeLineArt } from "../line-art-quantize";
+import { vectorizeRasterLabels } from "../raster-vectorize";
+import { assertPrepipelineWithinStitchBudget } from "../stitch-budget";
+import { compactVectorizeRegionsForTransfer } from "../vectorize-payload";
 
 class TestImageData {
   constructor(
@@ -71,13 +74,45 @@ describe("line-art c_00012 regression", () => {
       if (r >= 238 && g >= 238 && b >= 238 && max - min <= 4) neutralNearWhiteForeground++;
     }
 
-    expect(maxDimension).toBe(256);
-    expect(width).toBe(256);
+    expect(maxDimension).toBe(192);
+    expect(width).toBe(192);
     expect(resolveVectorizeTurdsize("line-art")).toBe(1);
     expect(resolveBuildMinRegionAreaPx("line-art", config.minRegionAreaPx)).toBe(1);
-    expect(foreground).toBeGreaterThan(10_000);
-    expect(foreground).toBeLessThan(25_000);
-    expect(paleBlueForeground).toBeGreaterThan(750);
+    expect(foreground).toBeGreaterThan(6_000);
+    expect(foreground).toBeLessThan(14_000);
+    expect(paleBlueForeground).toBeGreaterThan(450);
     expect(neutralNearWhiteForeground).toBe(0);
   });
+
+  it("rejects c_00012 before graph rendering if the line-art payload is too complex", async () => {
+    const { config, width, height, quantized } = await loadQuantizedSample();
+    const rawRegions = vectorizeRasterLabels({
+      labels: quantized.labels,
+      width,
+      height,
+      palette: quantized.palette,
+    });
+    const regions = compactVectorizeRegionsForTransfer(rawRegions);
+    const widthMm = config.widthMm;
+    const heightMm = widthMm * (height / width);
+    const pre = {
+      regions,
+      widthMm,
+      heightMm,
+      widthPx: width,
+      heightPx: height,
+    };
+
+    const transferredPointCount = regions.reduce((sum, region) =>
+      sum + region.shapes.reduce((shapeSum, shape) =>
+        shapeSum + shape.outer.length + shape.holes.reduce((holeSum, hole) => holeSum + hole.length, 0),
+      0),
+    0);
+    const shapeCount = regions.reduce((sum, region) => sum + region.shapes.length, 0);
+    expect(rawRegions.length).toBeGreaterThan(0);
+    expect(regions.every((region) => region.polygons.length === 0 && region.svgPath === "")).toBe(true);
+    expect(shapeCount).toBeGreaterThan(500);
+    expect(transferredPointCount).toBeLessThan(80_000);
+    expect(() => assertPrepipelineWithinStitchBudget(pre, config)).toThrow("too complex");
+  }, 30_000);
 });
