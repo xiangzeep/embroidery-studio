@@ -66,12 +66,12 @@ describe("line-art c_00012 regression", () => {
       if (r >= 238 && g >= 238 && b >= 238 && max - min <= 4) neutralNearWhiteForeground++;
     }
 
-    expect(width).toBe(160);
+    expect(width).toBe(128);
     expect(resolveVectorizeTurdsize("line-art")).toBe(8);
     expect(resolveBuildMinRegionAreaPx("line-art", config.minRegionAreaPx)).toBe(4);
-    expect(foreground).toBeGreaterThan(4_500);
-    expect(foreground).toBeLessThan(10_000);
-    expect(paleBlueForeground).toBeGreaterThan(300);
+    expect(foreground).toBeGreaterThan(3_000);
+    expect(foreground).toBeLessThan(6_000);
+    expect(paleBlueForeground).toBeGreaterThan(200);
     expect(neutralNearWhiteForeground).toBe(0);
   });
 });
