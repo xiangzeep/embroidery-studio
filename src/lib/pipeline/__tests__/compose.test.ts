@@ -41,9 +41,9 @@ describe("compose", () => {
 
   it("keeps enough line-art preprocessing resolution for thin stroke fidelity", () => {
     expect(resolvePreprocessMaxDimension("line-art", "fast")).toBe(256);
-    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(384);
-    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(640);
-    expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(768);
+    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(256);
+    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(384);
+    expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(512);
     expect(resolvePreprocessMaxDimension("photo-stitch", "balanced")).toBe(384);
   });
 
