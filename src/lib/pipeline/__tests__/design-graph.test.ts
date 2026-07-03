@@ -168,4 +168,32 @@ describe("graph RUN fidelity", () => {
 
     expect(firstDrawn?.x).toBeGreaterThan(20);
   });
+
+  it("stops graph rendering as soon as object-level stitch budget is exceeded", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 80,
+      heightMm: 12,
+      fabric: FABRIC_PROFILES.denim,
+      objects: Array.from({ length: 8 }, (_, index) =>
+        makeRun(
+          `run-${index}`,
+          [[index * 8, 0], [index * 8 + 7, 0], [index * 8 + 7, 1], [index * 8, 1]],
+          index,
+        ),
+      ),
+    };
+
+    expect(() => renderDesignGraph(buildDesignGraph(design), {
+      widthMm: 80,
+      heightMm: 12,
+      widthPx: 800,
+      digitizingMode: "line-art",
+      stitchDensityMm: 0.2,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+      maxRenderStitches: 12,
+    })).toThrow("stitch budget");
+  });
 });

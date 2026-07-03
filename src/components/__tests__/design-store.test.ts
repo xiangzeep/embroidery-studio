@@ -271,7 +271,7 @@ describe("designStore applyOptimizeOrder", () => {
       selectedObjectId: null,
       editMode: "select",
       history: null,
-      visualization: { showTravel: false, showJump: false, showTrim: false },
+      visualization: { showTravel: false, showJump: false, showTrim: false, showStitchTypes: false },
     });
     const before = designStore.getState().design;
     designStore.getState().applyOptimizeOrder();
@@ -290,7 +290,7 @@ describe("designStore undo / redo", () => {
       selectedObjectId: null,
       editMode: "select",
       history: null,
-      visualization: { showTravel: false, showJump: false, showTrim: false },
+      visualization: { showTravel: false, showJump: false, showTrim: false, showStitchTypes: false },
     });
   });
 

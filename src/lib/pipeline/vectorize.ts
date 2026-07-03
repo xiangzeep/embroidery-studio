@@ -12,6 +12,8 @@ type ImageTracerLike = {
 };
 
 const tracer = ImageTracer as unknown as ImageTracerLike;
+const MAX_CONTAINMENT_SUBPATHS = 1_200;
+const MAX_PENDING_SUBPATHS = MAX_CONTAINMENT_SUBPATHS * 2;
 
 export type VectorizeInput = {
   labels: Uint8Array;
@@ -113,11 +115,7 @@ export async function vectorize(
     // English note.
     // English note.
     // English note.
-    const allSubs: Polygon[] = [];
-    for (const d of dList) {
-      const subs = parsePathD(d);
-      allSubs.push(...subs);
-    }
+    const allSubs = collectLimitedSubpaths(dList);
     if (allSubs.length === 0) continue;
 
     const shapes = buildShapesByContainment(allSubs);
@@ -129,13 +127,38 @@ export async function vectorize(
     regions.push({
       colorIndex,
       rgb: palette[colorIndex],
-      svgPath: dList.join(" "),
+      svgPath: "",
       shapes,
       polygons: flatPolys,
     });
   }
 
   return regions;
+}
+
+function collectLimitedSubpaths(dList: string[]): Polygon[] {
+  let subs: Polygon[] = [];
+  for (const d of dList) {
+    for (const poly of parsePathD(d)) {
+      if (Math.abs(signedArea(poly)) <= 0) continue;
+      subs.push(poly);
+    }
+    if (subs.length > MAX_PENDING_SUBPATHS) {
+      subs = limitContainmentSubpaths(subs);
+    }
+  }
+  return limitContainmentSubpaths(subs);
+}
+
+function limitContainmentSubpaths(subs: Polygon[]): Polygon[] {
+  if (subs.length <= MAX_CONTAINMENT_SUBPATHS) return subs;
+  return subs
+    .map((poly, index) => ({ poly, index, area: Math.abs(signedArea(poly)) }))
+    .filter((item) => item.area > 0)
+    .sort((a, b) => b.area - a.area || a.index - b.index)
+    .slice(0, MAX_CONTAINMENT_SUBPATHS)
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.poly);
 }
 
 /** English note. */

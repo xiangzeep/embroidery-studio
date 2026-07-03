@@ -23,7 +23,7 @@ if (typeof globalThis.ImageData === "undefined") {
 }
 
 describe("line-art c_00012 regression", () => {
-  it("keeps pale blue strokes while discarding near-white background noise", async () => {
+  async function loadQuantizedSample() {
     const config = makeDefaultConfig("denim");
     const maxDimension = resolvePreprocessMaxDimension("line-art", config.qualityPreset);
     const sourcePath = path.join(process.cwd(), "public/phase3-samples/c_00012.png");
@@ -51,6 +51,11 @@ describe("line-art c_00012 regression", () => {
       colorCount: config.colorCount,
       removeWhiteBackground: config.removeWhiteBackground,
     });
+    return { config, maxDimension, width, height, imageData, quantized };
+  }
+
+  it("keeps pale blue strokes while discarding near-white background noise", async () => {
+    const { config, maxDimension, width, imageData, quantized } = await loadQuantizedSample();
     let foreground = 0;
     let paleBlueForeground = 0;
     let neutralNearWhiteForeground = 0;

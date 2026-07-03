@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveStitchWorkerTimeoutMs, runStitchAndWriteViaWorker } from "../stitch-worker";
 import { makeDefaultConfig } from "../config";
 import type { PrepipelineResult } from "../compose";
+import { assertPrepipelineWithinStitchBudget } from "../stitch-budget";
 
 const pre: PrepipelineResult = {
   regions: [{
@@ -63,6 +64,27 @@ describe("runStitchAndWriteViaWorker", () => {
       workerFactory: () => new SlowWorker() as unknown as Worker,
       timeoutMs: 10,
     })).rejects.toThrow("Stitch worker timeout");
+  });
+
+  it("rejects oversized line-art prepipeline data before creating a stitch worker", async () => {
+    const config = makeDefaultConfig("denim");
+    const oversized: PrepipelineResult = {
+      ...pre,
+      regions: [{
+        ...pre.regions[0],
+        shapes: Array.from({ length: 1_201 }, (_, index) => ({
+          outer: [[index, 0], [index + 0.4, 0], [index + 0.4, 0.4], [index, 0.4]],
+          holes: [],
+        })),
+      }],
+    };
+
+    expect(() => assertPrepipelineWithinStitchBudget(oversized, config))
+      .toThrow("too complex");
+    await expect(runStitchAndWriteViaWorker(oversized, config, {
+      workerFactory: () => new SuccessWorker() as unknown as Worker,
+      timeoutMs: 100,
+    })).rejects.toThrow("too complex");
   });
 });
 

@@ -15,6 +15,7 @@ type Point = Point2D;
 
 const PHASE_EPS = 1e-9;
 const MAX_FILL_ROW_CONNECTOR_MM = 2.5;
+const MAX_GREEDY_FILL_SEGMENTS = 800;
 export const DEFAULT_TATAMI_SHIFT_MM = 1.5;
 export const DEFAULT_TATAMI_PATTERN_LENGTH_MM = 4.0;
 
@@ -146,6 +147,7 @@ export function routeFillSegmentsSafely(input: FillRoutingInput): Stitch[] {
 
 function orderFillSegments(input: FillRoutingInput): Point[][] {
   if (input.segments.length <= 1) return input.segments;
+  if (input.segments.length > MAX_GREEDY_FILL_SEGMENTS) return input.segments;
 
   const remaining = input.segments.map((segment) => [...segment]);
   const ordered: Point[][] = [remaining.shift()!];

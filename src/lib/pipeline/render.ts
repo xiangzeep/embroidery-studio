@@ -484,22 +484,20 @@ function renderFillTopOnly(
     ctx.opts.shapeStrategyMinAspect ?? DEFAULT_SHAPE_STRATEGY_MIN_ASPECT,
   );
   const maxStitchMm = ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM;
-  const segments = tatamiBrick(
-    obj.shape,
-    ctx.opts.stitchDensityMm,
-    shapeAngleDeg,
-    maxStitchMm,
-  );
-  const photoSegments = photoRandomFill(
-    obj.shape,
-    ctx.opts.stitchDensityMm,
-    shapeAngleDeg,
-    maxStitchMm,
-    obj.order + obj.colorIndex * 101 + 17,
-  );
   const routedSegments = ctx.opts.digitizingMode === "photo-stitch"
-    ? photoSegments
-    : segments;
+    ? photoRandomFill(
+        obj.shape,
+        ctx.opts.stitchDensityMm,
+        shapeAngleDeg,
+        maxStitchMm,
+        obj.order + obj.colorIndex * 101 + 17,
+      )
+    : tatamiBrick(
+        obj.shape,
+        ctx.opts.stitchDensityMm,
+        shapeAngleDeg,
+        maxStitchMm,
+      );
   const trimThresholdMm =
     ctx.opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
   block.stitches.push(...routeFillSegmentsSafely({
@@ -711,16 +709,16 @@ export function renderDesign(
     } else {
       // English note.
       for (const obj of objs) {
+        assertObjectRenderEstimateWithinBudget(obj, ctx, totalStitches, maxRenderStitches);
         const stitches = renderObjectByKind(obj, ctx);
+        const nextRealStitches = countRealStitches(stitches);
+        assertWithinRenderBudget(totalStitches + nextRealStitches, maxRenderStitches);
         appendObjectStitches(block, stitches, c, trimThresholdMm);
+        totalStitches += nextRealStitches;
       }
     }
     if (block.stitches.length > 0) {
       blocks.push(block);
-      totalStitches += block.stitches.filter(
-        (s) => s.kind === "run" || s.kind === "satin" || s.kind === "fill",
-      ).length;
-      assertWithinRenderBudget(totalStitches, maxRenderStitches);
     }
   }
 
@@ -766,8 +764,14 @@ export function renderDesignGraph(
       stitches: [],
     };
     for (const node of nodes) {
+      assertObjectRenderEstimateWithinBudget(node.object, ctx, totalStitches, maxRenderStitches);
       const stitches = renderObjectByKind(node.object, ctx);
       if (stitches.length === 0) continue;
+      const nextRealStitches = countRealStitches(stitches);
+      assertWithinRenderBudget(
+        totalStitches + nextRealStitches,
+        maxRenderStitches,
+      );
       const previous = block.stitches[block.stitches.length - 1];
       if (previous) {
         block.stitches.push(...routeGraphObjects(previous, stitches[0], {
@@ -777,13 +781,10 @@ export function renderDesignGraph(
         }));
       }
       block.stitches.push(...stitches);
+      totalStitches += nextRealStitches;
     }
     if (block.stitches.length > 0) {
       blocks.push(block);
-      totalStitches += block.stitches.filter(
-        (s) => s.kind === "run" || s.kind === "satin" || s.kind === "fill",
-      ).length;
-      assertWithinRenderBudget(totalStitches, maxRenderStitches);
     }
   }
 
@@ -842,6 +843,54 @@ function assertWithinRenderBudget(totalStitches: number, maxRenderStitches: numb
     `Generated stitch budget exceeded (${totalStitches.toLocaleString()} / ${maxRenderStitches.toLocaleString()}). ` +
     "Reduce image detail, color count, or output size and try again.",
   );
+}
+
+function countRealStitches(stitches: Stitch[]): number {
+  return stitches.filter(
+    (stitch) => stitch.kind === "run" || stitch.kind === "satin" || stitch.kind === "fill",
+  ).length;
+}
+
+function assertObjectRenderEstimateWithinBudget(
+  obj: EmbroideryObject,
+  ctx: RenderContext,
+  alreadyRenderedStitches: number,
+  maxRenderStitches: number,
+): void {
+  if (obj.kind !== "fill") return;
+  const densityMm = Math.max(ctx.opts.stitchDensityMm, 0.1);
+  const maxStitchMm = Math.max(ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM, 0.1);
+  const areaMm2 = obj.metrics?.areaMm2 ?? estimatePolygonArea(obj.shape.outer as Polygon);
+  const perimeterMm = obj.metrics?.perimeterMm ?? estimatePolygonPerimeter(obj.shape.outer as Polygon);
+  const estimatedFillStitches =
+    Math.ceil(areaMm2 / (densityMm * maxStitchMm)) +
+    Math.ceil(perimeterMm / densityMm) +
+    obj.shape.holes.length * 8;
+  if (alreadyRenderedStitches + estimatedFillStitches <= maxRenderStitches * 1.5) return;
+  throw new Error(
+    `Generated stitch budget exceeded (${(alreadyRenderedStitches + estimatedFillStitches).toLocaleString()} estimated / ${maxRenderStitches.toLocaleString()}). ` +
+    "Reduce image detail, color count, or output size and try again.",
+  );
+}
+
+function estimatePolygonArea(poly: Polygon): number {
+  let area = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, y1] = poly[i];
+    const [x2, y2] = poly[(i + 1) % poly.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area / 2);
+}
+
+function estimatePolygonPerimeter(poly: Polygon): number {
+  let total = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x1, y1] = poly[i];
+    const [x2, y2] = poly[(i + 1) % poly.length];
+    total += Math.hypot(x2 - x1, y2 - y1);
+  }
+  return total;
 }
 
 function renderObjectByKind(

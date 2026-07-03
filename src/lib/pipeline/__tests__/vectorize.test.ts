@@ -272,4 +272,23 @@ describe("vectorize (mock tracer)", () => {
     expect(island).toBeDefined();
     expect(island!.holes).toHaveLength(0);
   });
+
+  it("caps excessive tracer subpaths before containment analysis", async () => {
+    const mockTracer: Tracer = {
+      async trace() {
+        return Array.from({ length: 1_600 }, (_, index) => {
+          const x = index * 2;
+          return `M ${x} 0 L ${x + 1} 0 L ${x + 1} 1 L ${x} 1 Z`;
+        });
+      },
+    };
+    const labels = new Uint8Array(100 * 100).fill(0);
+    const regions = await vectorize(
+      { labels, width: 100, height: 100, palette: [[0, 0, 0]] },
+      mockTracer,
+    );
+
+    expect(regions).toHaveLength(1);
+    expect(regions[0].shapes.length).toBeLessThanOrEqual(1_200);
+  });
 });

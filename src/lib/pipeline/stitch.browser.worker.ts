@@ -9,6 +9,7 @@ import { optimizePatternCommands } from "./command-optimizer";
 import { analyzePattern } from "./stats";
 import { writeDstBytes } from "./dst-writer";
 import { serializeDesign } from "./design";
+import { assertPrepipelineWithinStitchBudget } from "./stitch-budget";
 
 type StitchWorkerRequest = {
   type: "stitch";
@@ -26,6 +27,7 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
     }
 
     const { pre, config } = input;
+    assertPrepipelineWithinStitchBudget(pre, config);
     const graph = buildDesignGraph(pre, config);
     const renderedPattern = renderDesignGraph(graph, {
       widthMm: pre.widthMm,

@@ -72,7 +72,7 @@ describe("getFabricProfile", () => {
 
   it("translated case", () => {
     // English note.
-    getFabricProfile("unknown-fabric");
+    getFabricProfile("unknown-fabric" as FabricKind);
     expect(true).toBe(true);
   });
 });

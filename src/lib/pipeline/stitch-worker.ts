@@ -4,6 +4,10 @@ import type { ConversionConfig } from "./config";
 import type { PrepipelineResult, PipelineResult } from "./compose";
 import { deserializeDesign, type SerializedDesign } from "./design";
 import { getFabricProfile } from "./fabric";
+import {
+  assertPrepipelineWithinStitchBudget,
+  summarizePrepipelineComplexity,
+} from "./stitch-budget";
 
 const BASE_TIMEOUT_MS = 30_000;
 const COMPLEX_LINE_ART_TIMEOUT_MS = 45_000;
@@ -47,6 +51,7 @@ export async function runStitchAndWriteViaWorker(
   config: ConversionConfig,
   options: StitchWorkerOptions = {},
 ): Promise<PipelineResult> {
+  assertPrepipelineWithinStitchBudget(pre, config);
   const worker = (options.workerFactory ?? createWorker)();
   const result = await requestStitch(
     worker,
@@ -80,22 +85,6 @@ export function resolveStitchWorkerTimeoutMs(
   const extraShapeBuckets = Math.floor(Math.max(0, complexity.shapeCount - COMPLEX_LINE_ART_SHAPES) / 40);
   const extraPointBuckets = Math.floor(Math.max(0, complexity.pointCount - COMPLEX_LINE_ART_POINTS) / 3_000);
   return Math.min(MAX_TIMEOUT_MS, timeoutMs + Math.max(extraShapeBuckets, extraPointBuckets) * 15_000);
-}
-
-function summarizePrepipelineComplexity(pre: PrepipelineResult): {
-  shapeCount: number;
-  pointCount: number;
-} {
-  let shapeCount = 0;
-  let pointCount = 0;
-  for (const region of pre.regions) {
-    shapeCount += region.shapes.length;
-    for (const shape of region.shapes) {
-      pointCount += shape.outer.length;
-      for (const hole of shape.holes) pointCount += hole.length;
-    }
-  }
-  return { shapeCount, pointCount };
 }
 
 function createWorker(): Worker {

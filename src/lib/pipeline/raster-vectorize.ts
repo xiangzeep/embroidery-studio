@@ -1,11 +1,13 @@
 import type { ColorRegion } from "./vectorize";
-import { buildShapesByContainment } from "./vectorize";
+import { buildShapesByContainment, signedArea } from "./vectorize";
 import type { Point2D, Polygon } from "./types";
 
 type Edge = {
   from: Point2D;
   to: Point2D;
 };
+
+const MAX_RASTER_CONTAINMENT_POLYGONS = 1_200;
 
 export function vectorizeRasterLabels(input: {
   labels: Uint8Array;
@@ -16,7 +18,9 @@ export function vectorizeRasterLabels(input: {
   const { labels, width, height, palette } = input;
   const regions: ColorRegion[] = [];
   for (let colorIndex = 0; colorIndex < palette.length; colorIndex++) {
-    const polygons = traceLabelPolygons(labels, width, height, colorIndex);
+    const polygons = limitRasterPolygons(
+      traceLabelPolygons(labels, width, height, colorIndex),
+    );
     if (polygons.length === 0) continue;
     const shapes = buildShapesByContainment(polygons);
     if (shapes.length === 0) continue;
@@ -29,6 +33,17 @@ export function vectorizeRasterLabels(input: {
     });
   }
   return regions;
+}
+
+function limitRasterPolygons(polygons: Polygon[]): Polygon[] {
+  if (polygons.length <= MAX_RASTER_CONTAINMENT_POLYGONS) return polygons;
+  return polygons
+    .map((polygon, index) => ({ polygon, index, area: Math.abs(signedArea(polygon)) }))
+    .filter((item) => item.area > 0)
+    .sort((a, b) => b.area - a.area || a.index - b.index)
+    .slice(0, MAX_RASTER_CONTAINMENT_POLYGONS)
+    .sort((a, b) => a.index - b.index)
+    .map((item) => item.polygon);
 }
 
 export function traceLabelPolygons(
