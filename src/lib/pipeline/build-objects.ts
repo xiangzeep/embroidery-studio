@@ -279,6 +279,16 @@ function buildObjectForShape(
   ) {
     return null;
   }
+  if (
+    isLineArtAntiAliasNoise({
+      rgb: region.rgb,
+      metrics,
+      strokeMetrics,
+      digitizingMode: opts.digitizingMode,
+    })
+  ) {
+    return null;
+  }
   const defaultProps = deriveDefaultProps(kind, shortSide, opts.fabric);
   const policy = resolveLayerStitchPolicy({
     layer,
@@ -361,10 +371,36 @@ function isLineArtPaleOpenFragmentNoise(input: {
   return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
 }
 
+function isLineArtAntiAliasNoise(input: {
+  rgb: [number, number, number];
+  metrics: ShapeMetrics;
+  strokeMetrics: ReturnType<typeof analyzeStrokeMetrics>;
+  digitizingMode: DigitizingMode;
+}): boolean {
+  if (input.digitizingMode !== "line-art") return false;
+  if (!isPaleBlueAntiAlias(input.rgb)) return false;
+  if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) return false;
+
+  const length = input.strokeMetrics.estimatedLengthMm;
+  const area = input.metrics.areaMm2;
+  return !input.strokeMetrics.isStrokeLike || (length < 6 && area < 6);
+}
+
 function isPaleLineArtDetail(rgb: [number, number, number]): boolean {
   const max = Math.max(...rgb);
   const min = Math.min(...rgb);
   return min >= LINE_ART_PALE_DETAIL_MIN_CHANNEL && max >= LINE_ART_PALE_DETAIL_MAX_CHANNEL;
+}
+
+function isPaleBlueAntiAlias(rgb: [number, number, number]): boolean {
+  const [r, g, b] = rgb;
+  return (
+    b >= 180 &&
+    r >= 120 &&
+    g >= 160 &&
+    b - r >= 45 &&
+    Math.max(r, g, b) - Math.min(r, g, b) <= 120
+  );
 }
 
 /**

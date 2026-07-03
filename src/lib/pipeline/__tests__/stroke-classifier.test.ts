@@ -81,7 +81,7 @@ describe("classifyStrokeRole", () => {
     expect(role).toBe("outline");
   });
 
-  it("keeps broader line-art loop bands on satin instead of collapsing them into run", () => {
+  it("keeps stable closed line-art loops up to 3mm on bean run instead of satin", () => {
     const metrics = makeMetrics({
       areaMm2: 28,
       perimeterMm: 56,
@@ -103,11 +103,11 @@ describe("classifyStrokeRole", () => {
     const strokeKind = classifyStrokeKind(metrics, "line-art");
     const role = classifyStrokeRole(metrics, strokeKind, "line-art");
 
-    expect(strokeKind).toBe("narrow-satin");
-    expect(role).toBe("decorative-band");
+    expect(strokeKind).toBe("bean-run");
+    expect(role).toBe("outline");
   });
 
-  it("keeps flared line-art loop bands on satin when the local max width opens up", () => {
+  it("keeps flared stable line-art loops on bean run when the average width is narrow", () => {
     const metrics = makeMetrics({
       areaMm2: 22,
       perimeterMm: 48,
@@ -121,6 +121,32 @@ describe("classifyStrokeRole", () => {
       widthMinMm: 1.2,
       widthAvgMm: 2.1,
       widthMaxMm: 3.1,
+      loopCount: 1,
+      hasStableSkeleton: true,
+      isStrokeLike: true,
+    });
+
+    const strokeKind = classifyStrokeKind(metrics, "line-art");
+    const role = classifyStrokeRole(metrics, strokeKind, "line-art");
+
+    expect(strokeKind).toBe("bean-run");
+    expect(role).toBe("outline");
+  });
+
+  it("keeps truly wider closed line-art bands on satin", () => {
+    const metrics = makeMetrics({
+      areaMm2: 36,
+      perimeterMm: 60,
+      bboxWidthMm: 14,
+      bboxHeightMm: 10,
+      estimatedWidthMm: 3.25,
+      estimatedLengthMm: 16,
+      slenderness: 3.2,
+      compactness: 0.23,
+      holeCount: 1,
+      widthMinMm: 2.8,
+      widthAvgMm: 3.2,
+      widthMaxMm: 3.4,
       loopCount: 1,
       hasStableSkeleton: true,
       isStrokeLike: true,

@@ -39,17 +39,18 @@ describe("compose", () => {
     expect(resolveVectorizeDilatePx("photo-stitch", 2)).toBe(2);
   });
 
-  it("caps line-art preprocessing size to keep generation responsive", () => {
-    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(128);
-    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(192);
-    expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(256);
+  it("keeps enough line-art preprocessing resolution for thin stroke fidelity", () => {
+    expect(resolvePreprocessMaxDimension("line-art", "fast")).toBe(256);
+    expect(resolvePreprocessMaxDimension("line-art", "balanced")).toBe(384);
+    expect(resolvePreprocessMaxDimension("line-art", "high")).toBe(640);
+    expect(resolvePreprocessMaxDimension("line-art", "detail")).toBe(768);
     expect(resolvePreprocessMaxDimension("photo-stitch", "balanced")).toBe(384);
   });
 
   it("uses fine-grained line-art filters so small run-stitch details survive", () => {
-    expect(resolveVectorizeTurdsize("line-art")).toBe(8);
+    expect(resolveVectorizeTurdsize("line-art")).toBe(1);
     expect(resolveVectorizeTurdsize("photo-stitch")).toBe(8);
-    expect(resolveBuildMinRegionAreaPx("line-art", 12)).toBe(4);
+    expect(resolveBuildMinRegionAreaPx("line-art", 12)).toBe(1);
     expect(resolveBuildMinRegionAreaPx("photo-stitch", 12)).toBe(12);
   });
 

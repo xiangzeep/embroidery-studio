@@ -22,6 +22,7 @@ const SKELETON_RUN_PX_PER_MM = 10;
 const MAX_SKELETON_RUN_RASTER_PIXELS = 220_000;
 const JUNCTION_RETRACT_MM = 0.38;
 const LOOP_CLOSE_THRESHOLD_MM = 0.85;
+const MIN_OPEN_BRANCH_LENGTH_MM = 0.75;
 
 /**
  * English note.
@@ -733,6 +734,9 @@ function prepareSkeletonBranch(
   nodeMap: Map<string, { degree: number }>,
 ): Point2D[] {
   const points = branch.points.map(([px, py]) => pixelToMm(px, py, raster));
+  if (!branch.isLoop && polylineRawLength(points) < MIN_OPEN_BRANCH_LENGTH_MM) {
+    return [];
+  }
   if (branch.isLoop && points.length >= 2) {
     const first = points[0];
     const last = points[points.length - 1];
@@ -755,6 +759,14 @@ function prepareSkeletonBranch(
     }
   }
   return processRunPolyline(points, stitchLenMm, branch.isLoop);
+}
+
+function polylineRawLength(points: Point2D[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  }
+  return total;
 }
 
 function processRunPolyline(line: Point2D[], stitchLenMm: number, closed = false): Point2D[] {

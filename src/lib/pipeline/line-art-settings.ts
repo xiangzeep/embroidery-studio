@@ -1,8 +1,8 @@
 import type { DigitizingMode } from "./config";
 
 const DEFAULT_VECTORIZE_TURDSIZE = 8;
-const LINE_ART_VECTORIZE_TURDSIZE = 8;
-const LINE_ART_MIN_REGION_AREA_PX = 4;
+const LINE_ART_VECTORIZE_TURDSIZE = 1;
+const LINE_ART_MIN_REGION_AREA_PX = 1;
 
 export function resolveVectorizeTurdsize(digitizingMode: DigitizingMode): number {
   return digitizingMode === "line-art"

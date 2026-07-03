@@ -128,4 +128,44 @@ describe("graph RUN fidelity", () => {
     expect(Math.max(...xs)).toBeGreaterThan(5.2);
     expect(Math.max(...ys)).toBeGreaterThan(5.2);
   });
+
+  it("renders line-art run nodes before satin and fill nodes for stable object order", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 32,
+      heightMm: 12,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        {
+          id: "fill-late",
+          kind: "fill",
+          baseKind: "fill",
+          colorIndex: 0,
+          rgb: [0, 128, 255],
+          shape: { outer: [[0, 0], [4, 0], [4, 4], [0, 4]], holes: [] },
+          props: { densityMm: 1, maxStitchMm: 4, underlay: { kind: "none" } },
+          strokeKind: "none",
+          strokeRole: "area",
+          order: 0,
+        },
+        makeRun("run-first", [[24, 0], [32, 0], [32, 1], [24, 1]], 1),
+      ],
+    };
+    const pattern = renderDesignGraph(buildDesignGraph(design), {
+      widthMm: 32,
+      heightMm: 12,
+      widthPx: 320,
+      digitizingMode: "line-art",
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+    });
+
+    const firstDrawn = pattern.blocks[0].stitches.find((stitch) =>
+      stitch.kind === "run" || stitch.kind === "satin" || stitch.kind === "fill"
+    );
+
+    expect(firstDrawn?.x).toBeGreaterThan(20);
+  });
 });

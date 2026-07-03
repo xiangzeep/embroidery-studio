@@ -316,6 +316,30 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result).toEqual([]);
   });
 
+  it("drops pale anti-aliased blue fragments even when they look locally stroke-like", () => {
+    const fragment: ColorRegion = {
+      colorIndex: 1,
+      rgb: [180, 215, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [48, 0], [48, 4], [0, 4]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [fragment],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toEqual([]);
+  });
+
   it("routes narrow closed line-art loops to run using sampled skeleton width", () => {
     const contourLoop: ColorRegion = {
       colorIndex: 0,
@@ -376,7 +400,7 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].kind).toBe("satin");
   });
 
-  it("keeps flared petal-like line-art loop bands on satin", () => {
+  it("routes flared petal-like line-art loop bands to run when skeleton is stable", () => {
     const contourLoop: ColorRegion = {
       colorIndex: 0,
       rgb: [0, 0, 0],
@@ -401,9 +425,9 @@ describe("buildObjects — kind 判定: satin / run", () => {
       outlineFontStrategy: "auto",
     });
 
-    expect(result[0].strokeKind).toBe("narrow-satin");
-    expect(result[0].strokeRole).toBe("decorative-band");
-    expect(result[0].kind).toBe("satin");
+    expect(result[0].strokeKind).toBe("bean-run");
+    expect(result[0].strokeRole).toBe("outline");
+    expect(result[0].kind).toBe("run");
   });
 
   it("translated case", () => {

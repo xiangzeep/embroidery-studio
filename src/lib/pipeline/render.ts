@@ -208,12 +208,22 @@ function renderRunTopOnly(
   let segments: Point[][] = ctx.opts.disableMedialAxis
     ? []
     : medialAxisRunSegments(obj.shape, runStitchLenMm);
+  if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj)) {
+    segments = filterRunSegmentsForLineArt(segments);
+  }
   if (segments.length === 0 && (ctx.opts.disableMedialAxis || !strictRunObject(obj))) {
     const fallback = resamplePolyline(
       obj.shape.outer as Polygon,
       runStitchLenMm,
     );
     if (fallback.length > 0) segments = [fallback];
+  }
+  if (segments.length === 0 && strictRunObject(obj)) {
+    const fallback = resamplePolyline(
+      obj.shape.outer as Polygon,
+      runStitchLenMm,
+    );
+    if (fallback.length >= 2) segments = [fallback];
   }
   if (segments.length === 0) return block.stitches;
   const maxStitchMm = ctx.opts.maxStitchMm ?? DEFAULT_MAX_STITCH_MM;
@@ -237,6 +247,17 @@ function renderRunTopOnly(
     );
   }
   return block.stitches;
+}
+
+function filterRunSegmentsForLineArt(segments: Point[][]): Point[][] {
+  return segments.filter((segment) => {
+    const length = polylineLength(segment);
+    if (length < 1.8) return false;
+    if (segment.length < 4 && length < 4) return false;
+    const bbox = polylineBBox(segment);
+    if (bbox.width < 1 && bbox.height < 1) return false;
+    return true;
+  });
 }
 
 function resolveRunStitchLength(
@@ -331,6 +352,28 @@ function orientRunSegments(
   }
 
   return oriented;
+}
+
+function polylineLength(points: Point[]): number {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    total += distance(points[i - 1][0], points[i - 1][1], points[i][0], points[i][1]);
+  }
+  return total;
+}
+
+function polylineBBox(points: Point[]): { width: number; height: number } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of points) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { width: maxX - minX, height: maxY - minY };
 }
 
 function strictRunObject(obj: EmbroideryObject): boolean {
@@ -712,7 +755,10 @@ export function renderDesignGraph(
   const colorIndexes = [...new Set(graph.nodes.map((node) => node.object.colorIndex))]
     .sort((a, b) => a - b);
   for (const colorIndex of colorIndexes) {
-    const nodes = graph.nodes.filter((node) => node.object.colorIndex === colorIndex);
+    const nodes = sortGraphNodesForRender(
+      graph.nodes.filter((node) => node.object.colorIndex === colorIndex),
+      opts,
+    );
     if (nodes.length === 0) continue;
     const block: StitchBlock = {
       colorIndex,
@@ -757,6 +803,37 @@ export function renderDesignGraph(
     blocks,
     totalStitches,
   };
+}
+
+function sortGraphNodesForRender(
+  nodes: DesignGraph["nodes"],
+  opts: RenderOptions,
+): DesignGraph["nodes"] {
+  if (opts.digitizingMode !== "line-art") return nodes;
+  return [...nodes].sort((a, b) => {
+    const layerRank = rankLayerForLineArt(a.object) - rankLayerForLineArt(b.object);
+    if (layerRank !== 0) return layerRank;
+    const kindRank = rankKindForLineArt(a.object) - rankKindForLineArt(b.object);
+    if (kindRank !== 0) return kindRank;
+    return a.object.order - b.object.order;
+  });
+}
+
+function rankLayerForLineArt(obj: EmbroideryObject): number {
+  if (obj.layer === "outline") return 0;
+  if (obj.layer === "detail") return 1;
+  if (obj.layer === "highlight") return 4;
+  if (obj.layer === "base-fill") return 5;
+  if (obj.layer === "background") return 6;
+  if (obj.layer === "noise") return 7;
+  return 3;
+}
+
+function rankKindForLineArt(obj: EmbroideryObject): number {
+  if (obj.kind === "run" && (obj.strokeKind === "bean-run" || obj.strokeKind === "thin-run")) return 0;
+  if (obj.kind === "run") return 1;
+  if (obj.kind === "satin") return 2;
+  return 3;
 }
 
 function assertWithinRenderBudget(totalStitches: number, maxRenderStitches: number): void {

@@ -20,6 +20,7 @@ const LINE_ART_MEDIUM_CONTOUR_RUN_MAX_COMPACTNESS = 0.36;
 const LINE_ART_MEDIUM_CONTOUR_RUN_MIN_SLENDERNESS = 5.5;
 const LINE_ART_LOOP_SATIN_MAX_WIDTH_TRIGGER_MM = 2.4;
 const LINE_ART_LOOP_SATIN_MIN_AVG_WIDTH_MM = 1.8;
+const LINE_ART_STABLE_LOOP_RUN_MAX_WIDTH_MM = 3.0;
 const BEAN_RUN_MAX_WIDTH_MM = 1.4;
 const LONG_MEDIUM_STROKE_SATIN_MIN_WIDTH_MM = 0.95;
 const LONG_MEDIUM_STROKE_SATIN_MIN_LENGTH_MM = 14;
@@ -35,6 +36,14 @@ export function classifyStrokeKind(
   const width = metrics.widthAvgMm ?? metrics.estimatedWidthMm;
   const widthMax = metrics.widthMaxMm ?? width;
   if (!Number.isFinite(width) || width <= 0) return "none";
+  if (
+    mode === "line-art" &&
+    metrics.holeCount > 0 &&
+    metrics.hasStableSkeleton &&
+    width <= LINE_ART_STABLE_LOOP_RUN_MAX_WIDTH_MM
+  ) {
+    return "bean-run";
+  }
   if (
     mode === "line-art" &&
     metrics.holeCount > 0 &&
