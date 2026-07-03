@@ -26,6 +26,7 @@ const DEFAULT_TOUCH_EPSILON_MM = 0.5;
 const STROKE_BRANCH_GAP_EPSILON_MM = 1.5;
 const TWO_OPT_OBJECT_CAP = 48;
 const TWO_OPT_MAX_PASSES = 2;
+const LARGE_OBJECT_LINEAR_ORDER_CAP = 160;
 
 /**
  * English note.
@@ -194,6 +195,9 @@ export function chooseEntryExit(
 export function optimizeOrder(design: EmbroideryDesign): EmbroideryDesign {
   if (design.objects.length === 0) return { ...design, objects: [] };
   const cloned = design.objects.map((o) => ({ ...o }));
+  if (cloned.length > LARGE_OBJECT_LINEAR_ORDER_CAP) {
+    return { ...design, objects: stableLinearObjectOrder(cloned) };
+  }
   const locked = cloned.filter((o) => o.locked === true);
   const movable = cloned.filter((o) => o.locked !== true);
   const lockedOrders = new Set(locked.map((o) => o.order));
@@ -258,6 +262,10 @@ export function optimizeOrder(design: EmbroideryDesign): EmbroideryDesign {
 
   const all = [...ordered, ...locked].sort((a, b) => a.order - b.order);
   return { ...design, objects: all };
+}
+
+function stableLinearObjectOrder(objects: EmbroideryObject[]): EmbroideryObject[] {
+  return groupObjectsByLayerOrder(objects).flatMap((group) => group.objects);
 }
 
 function routeBranchGroup(

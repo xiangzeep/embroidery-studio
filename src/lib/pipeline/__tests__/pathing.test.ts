@@ -49,6 +49,54 @@ describe("pathing module skeleton", () => {
   });
 });
 
+describe("optimizeOrder — large designs", () => {
+  it("keeps large line-art-like object sets on a stable linear order", () => {
+    const objects = Array.from({ length: 180 }, (_, index) =>
+      makeObj(
+        `obj-${index}`,
+        0,
+        [
+          [180 - index, 0],
+          [180.5 - index, 0],
+          [180.5 - index, 0.5],
+          [180 - index, 0.5],
+        ],
+        "run",
+      ),
+    ).map((object, order) => ({
+      ...object,
+      order,
+      layer: "outline" as const,
+      strokeKind: "thin-run" as const,
+      strokeRole: "outline" as const,
+      strokeMetrics: {
+        areaMm2: 0.25,
+        perimeterMm: 2,
+        bboxWidthMm: 0.5,
+        bboxHeightMm: 0.5,
+        estimatedWidthMm: 0.5,
+        estimatedLengthMm: 1,
+        slenderness: 1,
+        compactness: 0.5,
+        holeCount: 0,
+        isStrokeLike: true,
+      },
+    }));
+    const design: EmbroideryDesign = {
+      widthMm: 200,
+      heightMm: 20,
+      fabric: {} as EmbroideryDesign["fabric"],
+      objects,
+    };
+
+    const ordered = optimizeOrder(design);
+
+    expect(ordered.objects.map((object) => object.id)).toEqual(
+      objects.map((object) => object.id),
+    );
+  });
+});
+
 describe("shapesTouch — bbox pruning", () => {
   it("translated case", () => {
     const a: Shape = {
