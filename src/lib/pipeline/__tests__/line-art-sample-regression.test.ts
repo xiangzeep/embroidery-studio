@@ -9,8 +9,12 @@ import {
 } from "../compose";
 import { makeDefaultConfig } from "../config";
 import { quantizeLineArt } from "../line-art-quantize";
+import { buildDesignGraph } from "../design-graph";
+import { TRIM_POLICY_BY_FORMAT } from "../policy";
 import { vectorizeRasterLabels } from "../raster-vectorize";
+import { renderDesignGraph } from "../render";
 import { assertPrepipelineWithinStitchBudget } from "../stitch-budget";
+import { fitPrepipelineWithinStitchBudget } from "../stitch-budget";
 import { compactVectorizeRegionsForTransfer } from "../vectorize-payload";
 
 class TestImageData {
@@ -84,7 +88,7 @@ describe("line-art c_00012 regression", () => {
     expect(neutralNearWhiteForeground).toBe(0);
   });
 
-  it("rejects c_00012 before graph rendering if the line-art payload is too complex", async () => {
+  it("auto-fits c_00012 before graph rendering instead of failing on complexity", async () => {
     const { config, width, height, quantized } = await loadQuantizedSample();
     const rawRegions = vectorizeRasterLabels({
       labels: quantized.labels,
@@ -95,24 +99,46 @@ describe("line-art c_00012 regression", () => {
     const regions = compactVectorizeRegionsForTransfer(rawRegions);
     const widthMm = config.widthMm;
     const heightMm = widthMm * (height / width);
-    const pre = {
+    const rawPre = {
       regions,
       widthMm,
       heightMm,
       widthPx: width,
       heightPx: height,
     };
+    const pre = fitPrepipelineWithinStitchBudget(rawPre, config);
 
     const transferredPointCount = regions.reduce((sum, region) =>
       sum + region.shapes.reduce((shapeSum, shape) =>
         shapeSum + shape.outer.length + shape.holes.reduce((holeSum, hole) => holeSum + hole.length, 0),
       0),
     0);
-    const shapeCount = regions.reduce((sum, region) => sum + region.shapes.length, 0);
+    const rawShapeCount = regions.reduce((sum, region) => sum + region.shapes.length, 0);
+    const fittedShapeCount = pre.regions.reduce((sum, region) => sum + region.shapes.length, 0);
     expect(rawRegions.length).toBeGreaterThan(0);
     expect(regions.every((region) => region.polygons.length === 0 && region.svgPath === "")).toBe(true);
-    expect(shapeCount).toBeGreaterThan(500);
+    expect(rawShapeCount).toBeGreaterThan(500);
+    expect(fittedShapeCount).toBeLessThanOrEqual(120);
     expect(transferredPointCount).toBeLessThan(80_000);
-    expect(() => assertPrepipelineWithinStitchBudget(pre, config)).toThrow("too complex");
+    expect(() => assertPrepipelineWithinStitchBudget(pre, config)).not.toThrow();
+
+    const graph = buildDesignGraph(pre, config);
+    const pattern = renderDesignGraph(graph, {
+      widthMm,
+      heightMm,
+      widthPx: width,
+      digitizingMode: config.digitizingMode,
+      stitchDensityMm: config.stitchDensity,
+      satinMaxWidthMm: config.satinMaxWidthMm,
+      fillAngleDeg: config.fillAngleDeg,
+      fillAngleByColorIndex: config.fillAngleByColor,
+      fillStrategy: config.fillStrategy,
+      fabric: graph.design.fabric,
+      disableUnderlay: config.disableUnderlay,
+      disableCompensation: config.disableCompensation,
+      policy: TRIM_POLICY_BY_FORMAT[config.format],
+    });
+    expect(pattern.totalStitches).toBeGreaterThan(100);
+    expect(pattern.totalStitches).toBeLessThanOrEqual(60_000);
   }, 30_000);
 });

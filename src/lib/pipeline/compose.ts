@@ -16,7 +16,10 @@ import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
 import { runStitchAndWriteViaWorker } from "./stitch-worker";
 import { buildDesignGraph } from "./design-graph";
-import { assertPrepipelineWithinStitchBudget } from "./stitch-budget";
+import {
+  assertPrepipelineWithinStitchBudget,
+  fitPrepipelineWithinStitchBudget,
+} from "./stitch-budget";
 export {
   resolveBuildMinRegionAreaPx,
   resolveVectorizeTurdsize,
@@ -131,13 +134,13 @@ export async function runPrepipeline(
         }),
   );
 
-  const pre = {
+  const pre = fitPrepipelineWithinStitchBudget({
     regions,
     widthMm,
     heightMm,
     widthPx: imageData.width,
     heightPx: imageData.height,
-  };
+  }, config);
   assertPrepipelineWithinStitchBudget(pre, config);
   return pre;
 }
