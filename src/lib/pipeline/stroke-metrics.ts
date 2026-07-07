@@ -10,7 +10,10 @@ const STROKE_MAX_COMPACTNESS = 0.45;
 const STROKE_WIDTH_SAMPLE_PX_PER_MM = 10;
 const MAX_STROKE_WIDTH_SAMPLE_PIXELS = 180_000;
 
-export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
+export function analyzeStrokeMetrics(
+  shape: Shape,
+  opts: { sampleSkeleton?: boolean } = {},
+): StrokeMetrics {
   const outerArea = Math.abs(polygonArea(shape.outer));
   const holeArea = shape.holes.reduce((sum, hole) => sum + Math.abs(polygonArea(hole)), 0);
   const areaMm2 = Math.max(0, outerArea - holeArea);
@@ -25,6 +28,7 @@ export function analyzeStrokeMetrics(shape: Shape): StrokeMetrics {
   const compactness = perimeterMm <= 1e-9 ? 0 :
     (4 * Math.PI * areaMm2) / (perimeterMm * perimeterMm);
   const canSampleSkeleton =
+    opts.sampleSkeleton !== false &&
     estimatedRasterPixels(width, height, STROKE_WIDTH_SAMPLE_PX_PER_MM) <=
     MAX_STROKE_WIDTH_SAMPLE_PIXELS;
   const skeletonData = canSampleSkeleton

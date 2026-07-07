@@ -32,7 +32,6 @@ export function classifyStrokeKind(
   metrics: StrokeMetrics,
   mode: DigitizingMode = "photo-stitch",
 ): StrokeKind {
-  if (!metrics.isStrokeLike) return "none";
   const width = metrics.widthAvgMm ?? metrics.estimatedWidthMm;
   const widthMax = metrics.widthMaxMm ?? width;
   if (!Number.isFinite(width) || width <= 0) return "none";
@@ -67,6 +66,7 @@ export function classifyStrokeKind(
   ) {
     return "narrow-satin";
   }
+  if (!metrics.isStrokeLike) return "none";
   if (
     mode === "line-art" &&
     metrics.hasStableSkeleton &&
@@ -118,7 +118,6 @@ export function classifyStrokeRole(
 ): StrokeRole {
   const sampledWidth = metrics.widthAvgMm ?? metrics.estimatedWidthMm;
   const sampledWidthMax = metrics.widthMaxMm ?? sampledWidth;
-  if (!metrics.isStrokeLike) return "none";
   if (
     metrics.holeCount > 0 &&
     !(
@@ -148,6 +147,7 @@ export function classifyStrokeRole(
   ) {
     return "decorative-band";
   }
+  if (!metrics.isStrokeLike) return "none";
   if (mode === "line-art") return "outline";
   if (strokeKind === "narrow-satin" || strokeKind === "border-satin") {
     return "decorative-band";

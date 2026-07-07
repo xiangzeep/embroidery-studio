@@ -316,7 +316,7 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result).toEqual([]);
   });
 
-  it("drops pale anti-aliased blue fragments even when they look locally stroke-like", () => {
+  it("keeps pale anti-aliased blue fragments when they are long enough to be real strokes", () => {
     const fragment: ColorRegion = {
       colorIndex: 1,
       rgb: [180, 215, 255],
@@ -337,7 +337,9 @@ describe("buildObjects — kind 判定: satin / run", () => {
       outlineFontStrategy: "auto",
     });
 
-    expect(result).toEqual([]);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("run");
+    expect(result[0].strokeKind).toBe("thin-run");
   });
 
   it("routes narrow closed line-art loops to run using sampled skeleton width", () => {

@@ -43,6 +43,7 @@ const MAX_BEAN_RUN_STITCH_MM = 1.6;
 const STRICT_RUN_TRAVEL_THRESHOLD_MM = 1.5;
 const STRICT_RUN_TRIM_THRESHOLD_MM = 3;
 const DEFAULT_MAX_RENDER_STITCHES = 60_000;
+const LIGHTWEIGHT_LINE_ART_NODE_THRESHOLD = 160;
 const DEFAULT_FILL_ANGLE_DEG = 45;
 const DEFAULT_SHAPE_STRATEGY_MIN_ASPECT = 1.5;
 
@@ -744,9 +745,9 @@ export function renderDesignGraph(
   graph: DesignGraph,
   opts: RenderOptions,
 ): StitchPattern {
-  const ctx: RenderContext = { opts };
+  const ctx: RenderContext = { opts: resolveGraphRenderOptions(graph, opts) };
   const trimThresholdMm = opts.trimThresholdMm ?? DEFAULT_TRIM_THRESHOLD_MM;
-  const maxRenderStitches = opts.maxRenderStitches ?? DEFAULT_MAX_RENDER_STITCHES;
+  const maxRenderStitches = ctx.opts.maxRenderStitches ?? DEFAULT_MAX_RENDER_STITCHES;
   const blocks: StitchBlock[] = [];
   let totalStitches = 0;
 
@@ -755,7 +756,7 @@ export function renderDesignGraph(
   for (const colorIndex of colorIndexes) {
     const nodes = sortGraphNodesForRender(
       graph.nodes.filter((node) => node.object.colorIndex === colorIndex),
-      opts,
+      ctx.opts,
     );
     if (nodes.length === 0) continue;
     const block: StitchBlock = {
@@ -803,6 +804,24 @@ export function renderDesignGraph(
     heightMm: graph.heightMm,
     blocks,
     totalStitches,
+  };
+}
+
+function resolveGraphRenderOptions(
+  graph: DesignGraph,
+  opts: RenderOptions,
+): RenderOptions {
+  if (
+    opts.digitizingMode !== "line-art" ||
+    graph.nodes.length <= LIGHTWEIGHT_LINE_ART_NODE_THRESHOLD
+  ) {
+    return opts;
+  }
+  return {
+    ...opts,
+    disableMedialAxis: true,
+    disableUnderlay: true,
+    disableLockstitch: true,
   };
 }
 

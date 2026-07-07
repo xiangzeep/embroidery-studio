@@ -43,11 +43,11 @@ function traceLabelComponentShapes(
     .map((pixels, componentId) => {
       const polygons = limitRasterPolygons(
         traceComponentPolygons(pixels, componentIds, width, height, componentId),
-      );
-      const outer = polygons
+      ).filter((polygon) => polygon.length >= 4);
+      const [outer, ...holes] = polygons
         .filter((polygon) => polygon.length >= 4)
-        .sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)))[0];
-      return outer ? { outer, holes: [] as Polygon[] } : null;
+        .sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)));
+      return outer ? { outer, holes } : null;
     })
     .filter((shape): shape is { outer: Polygon; holes: Polygon[] } => shape !== null);
 }

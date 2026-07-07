@@ -115,14 +115,34 @@ describe("line-art c_00012 regression", () => {
     0);
     const rawShapeCount = regions.reduce((sum, region) => sum + region.shapes.length, 0);
     const fittedShapeCount = pre.regions.reduce((sum, region) => sum + region.shapes.length, 0);
+    const rawBounds = boundsForRegions(regions);
+    const fittedBounds = boundsForRegions(pre.regions);
     expect(rawRegions.length).toBeGreaterThan(0);
     expect(regions.every((region) => region.polygons.length === 0 && region.svgPath === "")).toBe(true);
     expect(rawShapeCount).toBeGreaterThan(500);
-    expect(fittedShapeCount).toBeLessThanOrEqual(120);
+    expect(fittedShapeCount).toBeGreaterThanOrEqual(360);
+    expect(fittedShapeCount).toBeLessThanOrEqual(420);
+    expect(fittedBounds.minX).toBeLessThanOrEqual(rawBounds.minX + width * 0.03);
+    expect(fittedBounds.maxX).toBeGreaterThanOrEqual(rawBounds.maxX - width * 0.03);
+    expect(fittedBounds.minY).toBeLessThanOrEqual(rawBounds.minY + height * 0.03);
+    expect(fittedBounds.maxY).toBeGreaterThanOrEqual(rawBounds.maxY - height * 0.03);
     expect(transferredPointCount).toBeLessThan(80_000);
     expect(() => assertPrepipelineWithinStitchBudget(pre, config)).not.toThrow();
 
     const graph = buildDesignGraph(pre, config);
+    const runNodes = graph.nodes.filter((node) => node.object.kind === "run");
+    const lineNodes = graph.nodes.filter((node) =>
+      node.object.kind === "run" ||
+      node.object.strokeKind === "narrow-satin" ||
+      node.object.strokeKind === "border-satin",
+    );
+    const unclassifiedFillNodes = graph.nodes.filter((node) =>
+      node.object.kind === "fill" && node.object.strokeKind === "none",
+    );
+    expect(graph.nodes.length).toBeGreaterThanOrEqual(100);
+    expect(runNodes.length).toBeGreaterThanOrEqual(65);
+    expect(lineNodes.length).toBeGreaterThanOrEqual(95);
+    expect(unclassifiedFillNodes.length).toBeLessThanOrEqual(5);
     const pattern = renderDesignGraph(graph, {
       widthMm,
       heightMm,
@@ -142,3 +162,21 @@ describe("line-art c_00012 regression", () => {
     expect(pattern.totalStitches).toBeLessThanOrEqual(60_000);
   }, 30_000);
 });
+
+function boundsForRegions(regions: ReturnType<typeof compactVectorizeRegionsForTransfer>) {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const region of regions) {
+    for (const shape of region.shapes) {
+      for (const [x, y] of shape.outer) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  return { minX, minY, maxX, maxY };
+}

@@ -15,7 +15,7 @@ describe("traceLabelPolygons", () => {
     expect(polygons[0].length).toBeGreaterThanOrEqual(4);
   });
 
-  it("keeps raster rings bounded without global containment analysis", () => {
+  it("keeps raster rings bounded while preserving the inner hole", () => {
     const labels = new Uint8Array([
       0, 0, 0, 0, 0,
       0, 255, 255, 255, 0,
@@ -34,6 +34,7 @@ describe("traceLabelPolygons", () => {
     expect(regions).toHaveLength(1);
     expect(regions[0].shapes).toHaveLength(1);
     expect(regions[0].shapes[0].outer.length).toBeGreaterThanOrEqual(4);
-    expect(regions[0].shapes[0].holes).toHaveLength(0);
+    expect(regions[0].shapes[0].holes).toHaveLength(1);
+    expect(regions[0].shapes[0].holes[0].length).toBeGreaterThanOrEqual(4);
   });
 });

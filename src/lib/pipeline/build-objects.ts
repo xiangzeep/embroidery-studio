@@ -60,10 +60,11 @@ const RUN_MIN_ASPECT_RATIO = 3;
 const LINE_ART_PALE_DETAIL_MIN_CHANNEL = 220;
 const LINE_ART_PALE_DETAIL_MAX_CHANNEL = 238;
 const LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM = 3;
-const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 = 12;
-const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM = 8;
-const LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM = 1.35;
-const LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS = 2.6;
+const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 = 1.5;
+const LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM = 2.5;
+const LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM = 2.4;
+const LINE_ART_PROMOTE_CLOSED_RUN_MAX_WIDTH_MM = 3;
+const LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS = 1.5;
 
 /**
  * English note.
@@ -243,7 +244,9 @@ function buildObjectForShape(
     opts.satinMaxWidthMm,
     opts.satinMinAspectRatio,
   );
-  const strokeMetrics = analyzeStrokeMetrics(shapeMm);
+  const strokeMetrics = analyzeStrokeMetrics(shapeMm, {
+    sampleSkeleton: opts.digitizingMode !== "line-art",
+  });
   let strokeKind = classifyStrokeKind(strokeMetrics, opts.digitizingMode);
   let strokeRole = classifyStrokeRole(strokeMetrics, strokeKind, opts.digitizingMode);
   const strokeOverride: StrokeOverride = "use-global";
@@ -255,16 +258,15 @@ function buildObjectForShape(
     opts.outlineFontStrategy,
     strokeOverride,
   );
-  if (
-    shouldPromoteLineArtDetailToRun({
-      kind,
-      layer,
-      strokeMetrics,
-      digitizingMode: opts.digitizingMode,
-    })
-  ) {
+  const promotedLineArtRunKind = promotedLineArtDetailRunKind({
+    kind,
+    layer,
+    strokeMetrics,
+    digitizingMode: opts.digitizingMode,
+  });
+  if (promotedLineArtRunKind) {
     kind = "run";
-    strokeKind = "thin-run";
+    strokeKind = promotedLineArtRunKind;
     strokeRole = "outline";
   }
   if (
@@ -318,29 +320,35 @@ function buildObjectForShape(
   };
 }
 
-function shouldPromoteLineArtDetailToRun(input: {
+function promotedLineArtDetailRunKind(input: {
   kind: ObjectKind;
   layer: ReturnType<typeof classifyLayer>;
   strokeMetrics: ReturnType<typeof analyzeStrokeMetrics>;
   digitizingMode: DigitizingMode;
-}): boolean {
-  if (input.digitizingMode !== "line-art") return false;
-  if (input.kind !== "fill") return false;
+}): "thin-run" | "bean-run" | null {
+  if (input.digitizingMode !== "line-art") return null;
+  if (input.kind !== "fill") return null;
   if (
     input.layer !== "outline" &&
     input.layer !== "detail" &&
     input.layer !== "highlight"
   ) {
-    return false;
+    return null;
   }
-  if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) return false;
   const width = input.strokeMetrics.widthAvgMm ?? input.strokeMetrics.estimatedWidthMm;
-  return (
-    width > 0 &&
-    width <= LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM &&
-    input.strokeMetrics.estimatedLengthMm >= LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM &&
-    input.strokeMetrics.slenderness >= LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS
-  );
+  if (!Number.isFinite(width) || width <= 0) return null;
+  if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) {
+    return width <= LINE_ART_PROMOTE_CLOSED_RUN_MAX_WIDTH_MM ? "bean-run" : null;
+  }
+  if (width > LINE_ART_PROMOTE_DETAIL_RUN_MAX_WIDTH_MM) return null;
+  if (input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM) return null;
+  if (
+    input.strokeMetrics.slenderness < LINE_ART_PROMOTE_DETAIL_RUN_MIN_SLENDERNESS &&
+    input.strokeMetrics.compactness > 0.55
+  ) {
+    return null;
+  }
+  return width < 1.8 ? "thin-run" : "bean-run";
 }
 
 function isLineArtPaleOpenFragmentNoise(input: {
@@ -362,10 +370,19 @@ function isLineArtPaleOpenFragmentNoise(input: {
     return false;
   }
   if (input.kind !== "run") {
-    return input.metrics.areaMm2 < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 ||
+    if (!input.strokeMetrics.isStrokeLike && input.strokeMetrics.compactness > 0.55) {
+      return input.strokeMetrics.estimatedLengthMm < 8;
+    }
+    return input.metrics.areaMm2 < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_AREA_MM2 &&
       input.strokeMetrics.estimatedLengthMm < LINE_ART_MAX_PALE_NON_RUN_FRAGMENT_LENGTH_MM;
   }
   if (!input.strokeMetrics.isStrokeLike) {
+    if (
+      input.strokeMetrics.compactness > 0.55 &&
+      input.strokeMetrics.slenderness < 2
+    ) {
+      return input.strokeMetrics.estimatedLengthMm < 8;
+    }
     return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
   }
   return input.strokeMetrics.estimatedLengthMm < LINE_ART_MIN_CLEAN_OPEN_STROKE_LENGTH_MM;
@@ -383,7 +400,11 @@ function isLineArtAntiAliasNoise(input: {
 
   const length = input.strokeMetrics.estimatedLengthMm;
   const area = input.metrics.areaMm2;
-  return !input.strokeMetrics.isStrokeLike || (length < 6 && area < 6);
+  return (
+    length < 2.5 ||
+    area < 1.5 ||
+    (!input.strokeMetrics.isStrokeLike && length < 4 && area < 4)
+  );
 }
 
 function isPaleLineArtDetail(rgb: [number, number, number]): boolean {
