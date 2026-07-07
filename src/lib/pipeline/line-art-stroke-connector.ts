@@ -1,5 +1,6 @@
 import type { DesignGraph, DesignGraphEdge, DesignGraphNode, GraphObjectType } from "./design-graph";
-import type { EmbroideryObject, Point2D, Shape } from "./types";
+import { detectClosedLoop, ensureClosedLoop, polylineLength } from "./closed-loop-detector";
+import type { EmbroideryObject, Point2D } from "./types";
 
 type RunComponent = {
   objects: EmbroideryObject[];
@@ -196,17 +197,17 @@ function centroid(points: Point2D[]): Point2D {
 }
 
 function finalizeComponent(component: RunComponent): RunComponent {
-  const closed = inferClosed(component.path, component.objects.some((object) => object.shape.holes.length > 0));
+  const closed = detectClosedLoop(component.path, component.objects.find((object) => object.shape.holes.length > 0)?.shape ?? component.objects[0]?.shape);
   return {
     ...component,
     closed,
-    path: closed ? ensureClosed(component.path) : component.path,
+    path: closed ? ensureClosedLoop(component.path) : component.path,
   };
 }
 
 function isNoiseComponent(component: RunComponent): boolean {
   if (component.closed || component.merged) return false;
-  const length = pathLength(component.path);
+  const length = polylineLength(component.path);
   const box = bbox(component.path);
   const width = box.maxX - box.minX;
   const height = box.maxY - box.minY;
@@ -245,20 +246,6 @@ function stripClosingDuplicate(points: Point2D[]): Point2D[] {
 
 function isExplicitlyClosed(points: Point2D[]): boolean {
   return points.length >= 3 && distance(points[0], points[points.length - 1]) <= 1e-6;
-}
-
-function inferClosed(path: Point2D[], hasHoles: boolean): boolean {
-  if (path.length < 3) return false;
-  const gap = distance(path[0], path[path.length - 1]);
-  const length = pathLength(path);
-  return gap <= 1.2 || (gap <= 2 && length > 0 && gap / length <= 0.06) || (hasHoles && gap <= 2.5);
-}
-
-function ensureClosed(path: Point2D[]): Point2D[] {
-  if (path.length === 0) return [];
-  const out = path.map(([x, y]) => [x, y] as Point2D);
-  if (distance(out[0], out[out.length - 1]) > 1e-6) out.push([out[0][0], out[0][1]]);
-  return out;
 }
 
 function mergePaths(left: Point2D[], right: Point2D[], gap: number): Point2D[] {
@@ -333,12 +320,6 @@ function reversePath(path: Point2D[]): Point2D[] {
 
 function endpointDistance(left: Point2D[], right: Point2D[]): number {
   return distance(left[left.length - 1], right[0]);
-}
-
-function pathLength(path: Point2D[]): number {
-  let total = 0;
-  for (let i = 1; i < path.length; i++) total += distance(path[i - 1], path[i]);
-  return total;
 }
 
 function bbox(points: Point2D[]): { minX: number; minY: number; maxX: number; maxY: number } {
