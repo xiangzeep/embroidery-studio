@@ -12,7 +12,7 @@ export type RunStyleOptions = {
 const CLOSED_LOOP_STYLE_MAX_MM = 18;
 const SHORT_DECORATIVE_MAX_MM = 7;
 const BACKBONE_MIN_MM = 18;
-const CLOSED_GAP_MM = 0.9;
+const CLOSED_GAP_MM = 1.2;
 
 export function styleRunSegment(points: Point2D[], opts: RunStyleOptions): Point2D[] {
   if (points.length < 2) return points.map(([x, y]) => [x, y]);

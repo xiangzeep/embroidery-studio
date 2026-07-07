@@ -233,8 +233,7 @@ describe("medialAxisRun", () => {
     const endGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
 
     expect(pts.length).toBeGreaterThanOrEqual(8);
-    expect(endGap).toBeGreaterThan(1e-3);
-    expect(endGap).toBeLessThanOrEqual(0.9);
+    expect(endGap).toBeLessThanOrEqual(1e-6);
   });
 
   it("smooths closed loop runs without sharp polyline corners", () => {
@@ -306,8 +305,7 @@ describe("medialAxisRun", () => {
     const first = loopSegment[0];
     const last = loopSegment[loopSegment.length - 1];
     const closeGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
-    expect(closeGap).toBeGreaterThan(1e-3);
-    expect(closeGap).toBeLessThanOrEqual(0.9);
+    expect(closeGap).toBeLessThanOrEqual(1e-6);
   });
 
   it("does not extend split junction edges through neighboring branches", () => {
@@ -361,7 +359,50 @@ describe("medialAxisRun", () => {
       ];
     }));
 
-    expect(nearestEndpoint).toBeGreaterThan(0.28);
+    expect(nearestEndpoint).toBeGreaterThan(0.06);
+  });
+
+  it("force-closes near-closed loop bands even when skeleton branches are open", () => {
+    const shape: Shape = {
+      outer: [
+        [0, 0], [12, 0], [12, 8], [0, 8],
+      ],
+      holes: [
+        [[2.5, 1.8], [9.5, 1.8], [9.5, 6.2], [2.5, 6.2]],
+      ],
+    };
+
+    const segments = medialAxisRunSegments(shape, 1.2);
+    const closedSegments = segments.filter((segment) => {
+      const first = segment[0];
+      const last = segment[segment.length - 1];
+      return Math.hypot(first[0] - last[0], first[1] - last[1]) <= 1e-6;
+    });
+
+    expect(closedSegments.length).toBeGreaterThan(0);
+  });
+
+  it("keeps short non-spur bridges near junctions so contours do not visibly break", () => {
+    const shape: Shape = {
+      outer: [
+        [0, 0], [7, 0], [7, 1],
+        [4.1, 1], [4.1, 4],
+        [5.1, 4], [5.1, 1],
+        [2.9, 1], [2.9, 4],
+        [1.9, 4], [1.9, 1],
+        [0, 1],
+      ],
+      holes: [],
+    };
+
+    const segments = medialAxisRunSegments(shape, 0.8);
+    const bridgeSegments = segments.filter((segment) => {
+      const xs = segment.map(([x]) => x);
+      const ys = segment.map(([, y]) => y);
+      return Math.max(...ys) < 1.5 && Math.max(...xs) - Math.min(...xs) >= 1.0;
+    });
+
+    expect(bridgeSegments.length).toBeGreaterThan(0);
   });
 
   it("falls back without high-resolution skeleton routing for oversized run masks", () => {
