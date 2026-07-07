@@ -49,9 +49,9 @@ export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2
 
 export function lightweightRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
   const rail = railMidlineRun(shape, stitchLenMm);
-  if (rail.length >= 2) return [finalizeRunPath(rail, shape)];
+  if (rail.length >= 2) return [processRunPolyline(finalizeRunPath(rail, shape), stitchLenMm)];
   const centerline = centerRunUnderlay(shape, stitchLenMm);
-  return centerline.length >= 2 ? [finalizeRunPath(centerline, shape)] : [];
+  return centerline.length >= 2 ? [processRunPolyline(finalizeRunPath(centerline, shape), stitchLenMm)] : [];
 }
 
 function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {

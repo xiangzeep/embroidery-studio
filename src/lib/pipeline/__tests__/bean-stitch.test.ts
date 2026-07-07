@@ -102,23 +102,28 @@ describe("run stitch style controller", () => {
     ]);
   });
 
-  test("selects closed bean, triple backbone, and double decorative styles", () => {
+  test("selects closed bean, generic reinforcement, and single thin-run styles", () => {
     const closed = styleRunSegment(
       [[0, 0], [2, 0], [2, 2], [0.6, 1.8]],
       { closed: true, maxStitchMm: 7 },
     );
-    const long = styleRunSegment(
+    const genericLong = styleRunSegment(
       [[0, 0], [12, 0], [24, 0]],
-      { strokeKind: "thin-run", maxStitchMm: 7 },
+      { maxStitchMm: 7 },
     );
-    const short = styleRunSegment(
+    const genericShort = styleRunSegment(
+      [[0, 0], [2, 0], [4, 0]],
+      { maxStitchMm: 7 },
+    );
+    const thinRun = styleRunSegment(
       [[0, 0], [2, 0], [4, 0]],
       { strokeKind: "thin-run", maxStitchMm: 7 },
     );
 
     expect(closed.length).toBeGreaterThan(4);
-    expect(long).toEqual(tripleRunPolyline([[0, 0], [12, 0], [24, 0]]));
-    expect(short).toEqual(doubleRunPolyline([[0, 0], [2, 0], [4, 0]]));
+    expect(genericLong).toEqual(tripleRunPolyline([[0, 0], [12, 0], [24, 0]]));
+    expect(genericShort).toEqual(doubleRunPolyline([[0, 0], [2, 0], [4, 0]]));
+    expect(thinRun).toEqual([[0, 0], [2, 0], [4, 0]]);
   });
 });
 

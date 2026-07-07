@@ -825,24 +825,34 @@ export function renderDesignGraph(
       rgb: nodes[0].object.rgb,
       stitches: [],
     };
+    let previousNode: DesignGraph["nodes"][number] | null = null;
     for (const node of nodes) {
       assertObjectRenderEstimateWithinBudget(node.object, ctx, totalStitches, maxRenderStitches);
-      const stitches = renderObjectByKind(node.object, ctx);
+      const previous = block.stitches[block.stitches.length - 1];
+      const nodeCtx = previous && ctx.opts.digitizingMode === "line-art" && strictRunObject(node.object)
+        ? {
+            opts: {
+              ...ctx.opts,
+              preferredEntry: [previous.x, previous.y] as Point,
+            },
+          }
+        : ctx;
+      const stitches = renderObjectByKind(node.object, nodeCtx);
       if (stitches.length === 0) continue;
       const nextRealStitches = countRealStitches(stitches);
       assertWithinRenderBudget(
         totalStitches + nextRealStitches,
         maxRenderStitches,
       );
-      const previous = block.stitches[block.stitches.length - 1];
       if (previous) {
-        block.stitches.push(...routeGraphObjects(previous, stitches[0], {
+        block.stitches.push(...routeGraphTransition(previousNode?.object ?? null, node.object, previous, stitches[0], nodeCtx, {
           colorIndex,
           jumpThresholdMm: 1.5,
           trimThresholdMm: Math.min(trimThresholdMm, 3),
         }));
       }
       block.stitches.push(...stitches);
+      previousNode = node;
       totalStitches += nextRealStitches;
     }
     if (block.stitches.length > 0) {
@@ -866,6 +876,40 @@ export function renderDesignGraph(
     blocks,
     totalStitches,
   };
+}
+
+function routeGraphTransition(
+  prevObj: EmbroideryObject | null,
+  nextObj: EmbroideryObject,
+  previous: Stitch,
+  next: Stitch,
+  ctx: RenderContext,
+  opts: {
+    colorIndex: number;
+    jumpThresholdMm: number;
+    trimThresholdMm: number;
+  },
+): Stitch[] {
+  const bridge = lineArtRunBridge(prevObj, nextObj, previous, next, ctx, opts.colorIndex);
+  if (bridge) return bridge;
+  return routeGraphObjects(previous, next, opts);
+}
+
+function lineArtRunBridge(
+  prevObj: EmbroideryObject | null,
+  nextObj: EmbroideryObject,
+  previous: Stitch,
+  next: Stitch,
+  ctx: RenderContext,
+  colorIndex: number,
+): Stitch[] | null {
+  if (ctx.opts.digitizingMode !== "line-art") return null;
+  if (!prevObj || prevObj.colorIndex !== nextObj.colorIndex) return null;
+  if (!strictRunObject(prevObj) || !strictRunObject(nextObj)) return null;
+  if (closedRunLoopObject(prevObj) || closedRunLoopObject(nextObj)) return null;
+  const gap = distance(previous.x, previous.y, next.x, next.y);
+  if (gap > 1.25) return null;
+  return [{ x: next.x, y: next.y, kind: "run", colorIndex }];
 }
 
 function resolveGraphRenderOptions(

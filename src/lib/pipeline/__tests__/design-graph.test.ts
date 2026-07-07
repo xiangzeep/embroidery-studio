@@ -169,6 +169,92 @@ describe("graph RUN fidelity", () => {
     expect(firstDrawn?.x).toBeGreaterThan(20);
   });
 
+  it("bridges tiny same-color line-art run gaps without a jump", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 10,
+      heightMm: 4,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
+        makeRun("run-b", [[4.55, 0], [8, 0], [8, 0.8], [4.55, 0.8]], 1),
+      ],
+    };
+
+    const pattern = renderDesignGraph(buildDesignGraph(design), {
+      widthMm: 10,
+      heightMm: 4,
+      widthPx: 100,
+      digitizingMode: "line-art",
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+    });
+
+    const stitches = pattern.blocks[0].stitches;
+    expect(stitches.some((stitch) => stitch.kind === "jump" || stitch.kind === "trim")).toBe(false);
+    expect(stitches.some((stitch) => stitch.kind === "run" && stitch.x > 4.2 && stitch.x < 4.8)).toBe(true);
+  });
+
+  it("keeps larger line-art run gaps as jumps", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 14,
+      heightMm: 4,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
+        makeRun("run-b", [[6.2, 0], [10, 0], [10, 0.8], [6.2, 0.8]], 1),
+      ],
+    };
+
+    const pattern = renderDesignGraph(buildDesignGraph(design), {
+      widthMm: 14,
+      heightMm: 4,
+      widthPx: 140,
+      digitizingMode: "line-art",
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+    });
+
+    const stitches = pattern.blocks[0].stitches;
+    expect(stitches.some((stitch) => stitch.kind === "jump")).toBe(true);
+    expect(stitches.some((stitch) => stitch.kind === "trim")).toBe(false);
+  });
+
+  it("orders nearby line-art run fragments before distant fragments", () => {
+    const design: EmbroideryDesign = {
+      widthMm: 12,
+      heightMm: 4,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
+        makeRun("run-far", [[7.6, 0], [11, 0], [11, 0.8], [7.6, 0.8]], 1),
+        makeRun("run-near", [[4.55, 0], [6.2, 0], [6.2, 0.8], [4.55, 0.8]], 2),
+      ],
+    };
+
+    const pattern = renderDesignGraph(buildDesignGraph(design), {
+      widthMm: 12,
+      heightMm: 4,
+      widthPx: 120,
+      digitizingMode: "line-art",
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+    });
+
+    const stitches = pattern.blocks[0].stitches;
+    const jumps = stitches.filter((stitch) => stitch.kind === "jump");
+    expect(jumps).toHaveLength(1);
+    expect(jumps[0].x).toBeGreaterThan(7);
+  });
+
   it("stops graph rendering as soon as object-level stitch budget is exceeded", () => {
     const design: EmbroideryDesign = {
       widthMm: 80,
