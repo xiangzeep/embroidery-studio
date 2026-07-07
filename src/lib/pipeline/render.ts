@@ -15,7 +15,7 @@ import { applyPullCompensation } from "./compensation";
 import { emitTieIn, emitTieOff } from "./lockstitch";
 import { intersectScanline } from "./scanline";
 import { routeFillSegmentsSafely, tatamiBrick } from "./fill";
-import { medialAxisRunSegments } from "./run";
+import { lightweightRunSegments, medialAxisRunSegments } from "./run";
 import { isClosedRunSegment, styleRunSegment } from "./run-style";
 import { renderCurvedStrokeSatin } from "./curved-satin";
 import { brickSplit, estimateSatinWidthStats, extractRails, renderSatin2Rail } from "./satin";
@@ -207,12 +207,12 @@ function renderRunTopOnly(
   // English note.
   const runStitchLenMm = resolveRunStitchLength(obj, ctx);
   let segments: Point[][] = ctx.opts.disableMedialAxis
-    ? []
+    ? lightweightRunFallbackSegments(obj, ctx, runStitchLenMm)
     : medialAxisRunSegments(obj.shape, runStitchLenMm);
   if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj)) {
     segments = filterRunSegmentsForLineArt(segments);
   }
-  if (segments.length === 0 && (ctx.opts.disableMedialAxis || !strictRunObject(obj))) {
+  if (segments.length === 0 && shouldUseContourFallback(obj, ctx)) {
     const fallback = resamplePolyline(
       obj.shape.outer as Polygon,
       runStitchLenMm,
@@ -259,6 +259,67 @@ function filterRunSegmentsForLineArt(segments: Point[][]): Point[][] {
     if (bbox.width < 1 && bbox.height < 1) return false;
     return true;
   });
+}
+
+function lightweightRunFallbackSegments(
+  obj: EmbroideryObject,
+  ctx: RenderContext,
+  runStitchLenMm: number,
+): Point[][] {
+  if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj)) {
+    const lightweight = lightweightRunSegments(obj.shape, runStitchLenMm) as Point[][];
+    if (lightweight.length > 0) return lightweight;
+    const geometric = geometricCenterlineFallback(obj.shape, runStitchLenMm);
+    return geometric.length >= 2 ? [geometric] : [];
+  }
+  return [];
+}
+
+function shouldUseContourFallback(
+  obj: EmbroideryObject,
+  ctx: RenderContext,
+): boolean {
+  if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj)) {
+    return false;
+  }
+  return ctx.opts.disableMedialAxis || !strictRunObject(obj);
+}
+
+function geometricCenterlineFallback(
+  shape: Shape,
+  stitchLenMm: number,
+): Point[] {
+  const bbox = shapeBBox(shape.outer as Polygon);
+  const width = bbox.maxX - bbox.minX;
+  const height = bbox.maxY - bbox.minY;
+  if (Math.max(width, height) < 1 || Math.max(width, height) / Math.max(0.1, Math.min(width, height)) < 1.4) {
+    return [];
+  }
+  const centerX = (bbox.minX + bbox.maxX) / 2;
+  const centerY = (bbox.minY + bbox.maxY) / 2;
+  const line: Point[] = width >= height
+    ? [[bbox.minX, centerY], [bbox.maxX, centerY]]
+    : [[centerX, bbox.minY], [centerX, bbox.maxY]];
+  return resamplePolyline(line, stitchLenMm);
+}
+
+function shapeBBox(poly: Polygon): {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+} {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const [x, y] of poly) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { minX, minY, maxX, maxY };
 }
 
 function resolveRunStitchLength(

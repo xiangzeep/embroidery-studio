@@ -258,6 +258,19 @@ function buildObjectForShape(
     opts.outlineFontStrategy,
     strokeOverride,
   );
+  if (
+    shouldForceLineArtEdgeBandFill({
+      layer,
+      shapePx: simplifiedShapePx,
+      digitizingMode: opts.digitizingMode,
+      widthPx: opts.widthPx,
+      heightPx: opts.heightPx,
+    })
+  ) {
+    kind = "fill";
+    strokeKind = "none";
+    strokeRole = "area";
+  }
   const promotedLineArtRunKind = promotedLineArtDetailRunKind({
     kind,
     layer,
@@ -320,6 +333,19 @@ function buildObjectForShape(
   };
 }
 
+function shouldForceLineArtEdgeBandFill(input: {
+  layer: ReturnType<typeof classifyLayer>;
+  shapePx: Shape;
+  digitizingMode: DigitizingMode;
+  widthPx: number;
+  heightPx?: number;
+}): boolean {
+  if (input.digitizingMode !== "line-art") return false;
+  if (input.layer !== "base-fill") return false;
+  if (input.shapePx.holes.length > 0) return false;
+  return isVerticalCanvasEdgeBand(input.shapePx, input.widthPx);
+}
+
 function promotedLineArtDetailRunKind(input: {
   kind: ObjectKind;
   layer: ReturnType<typeof classifyLayer>;
@@ -349,6 +375,33 @@ function promotedLineArtDetailRunKind(input: {
     return null;
   }
   return width < 1.8 ? "thin-run" : "bean-run";
+}
+
+function isVerticalCanvasEdgeBand(shape: Shape, widthPx: number): boolean {
+  const bbox = shapePixelBounds(shape);
+  const width = bbox.maxX - bbox.minX;
+  const height = bbox.maxY - bbox.minY;
+  const touchesVerticalEdge = bbox.minX <= 1 || bbox.maxX >= widthPx - 1;
+  return touchesVerticalEdge && height >= width * 3;
+}
+
+function shapePixelBounds(shape: Shape): {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+} {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const [x, y] of shape.outer) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { minX, minY, maxX, maxY };
 }
 
 function isLineArtPaleOpenFragmentNoise(input: {

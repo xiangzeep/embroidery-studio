@@ -922,6 +922,34 @@ describe("renderRun", () => {
     expect(stitches[0]).toMatchObject({ x: 12, y: 2, kind: "run", colorIndex: 0 });
   });
 
+  it("uses a centerline instead of contour fallback for complex line-art run bands", () => {
+    const obj: EmbroideryObject = {
+      id: "0-0",
+      kind: "run",
+      strokeKind: "thin-run",
+      colorIndex: 0,
+      rgb: [0, 120, 255],
+      shape: {
+        outer: [[2, 2], [22, 2], [22, 4], [2, 4]],
+        holes: [],
+      },
+      props: DUMMY_PROPS,
+      order: 0,
+    };
+
+    const stitches = renderRun(obj, makeCtx({
+      digitizingMode: "line-art",
+      disableMedialAxis: true,
+      stitchDensityMm: 0.4,
+    }));
+    const runStitches = stitches.filter((stitch) => stitch.kind === "run");
+    const ys = runStitches.map((stitch) => stitch.y);
+
+    expect(runStitches.length).toBeGreaterThan(2);
+    expect(Math.min(...ys)).toBeGreaterThan(2.4);
+    expect(Math.max(...ys)).toBeLessThan(3.6);
+  });
+
   it("uses a looser stitch length for thin-run than the global fill density", () => {
     const obj: EmbroideryObject = {
       id: "0-0",

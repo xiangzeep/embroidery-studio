@@ -47,6 +47,13 @@ export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2
   return rail.length >= 2 ? [finalizeRunPath(rail, shape)] : [];
 }
 
+export function lightweightRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
+  const rail = railMidlineRun(shape, stitchLenMm);
+  if (rail.length >= 2) return [finalizeRunPath(rail, shape)];
+  const centerline = centerRunUnderlay(shape, stitchLenMm);
+  return centerline.length >= 2 ? [finalizeRunPath(centerline, shape)] : [];
+}
+
 function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
   if (stitchLenMm <= 0 || shape.outer.length < 3) return [];
   if (Math.abs(polygonArea(shape.outer)) < MIN_RAIL_MIDLINE_AREA_MM2) return [];

@@ -402,6 +402,34 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].kind).toBe("satin");
   });
 
+  it("keeps edge-connected broad line-art bands as fill instead of satin or run", () => {
+    const edgeBand: ColorRegion = {
+      colorIndex: 0,
+      rgb: [0, 120, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[960, 0], [1000, 0], [1000, 1000], [960, 1000]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+
+    const result = buildObjects({
+      regions: [edgeBand],
+      widthMm: 100,
+      widthPx: 1000,
+      heightPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].layer).toBe("base-fill");
+    expect(result[0].kind).toBe("fill");
+  });
+
   it("routes flared petal-like line-art loop bands to run when skeleton is stable", () => {
     const contourLoop: ColorRegion = {
       colorIndex: 0,
