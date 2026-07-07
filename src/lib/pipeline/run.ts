@@ -15,6 +15,12 @@ import { skeletonizeMask } from "./skeleton";
 import { centerRunUnderlay } from "./underlay";
 import { __internal as underlayInternal } from "./underlay";
 import { extractRails } from "./satin";
+import { cleanStrokeGraph } from "./stroke/stroke-cleaner";
+import { detectClosedStroke } from "./stroke/loop-detector";
+import { deduplicateStitches } from "./stroke/path-deduplicator";
+import { mergeSimilarStrokePaths } from "./stroke/path-merger";
+import { reconstructStrokePaths } from "./stroke/stroke-reconstructor";
+import type { StrokeGraph } from "./stroke/stroke-types";
 import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
@@ -804,13 +810,77 @@ function routeSkeletonGraphBranchSegments(
   }
 
   metrics.averageSegmentLengthBeforeAssembly = averageRawSegmentLength(rawSegments);
-  const assembled = assembleRunComponents(rawSegments, shape, stitchLenMm, metrics);
+  const fallbackAssembled = assembleRunComponents(rawSegments, shape, stitchLenMm, metrics);
+  const strokePaths = graph.nodes.some((node) => node.degree >= 3)
+    ? []
+    : reconstructRunStrokePaths(graph, raster, rawSegments, shape, stitchLenMm);
+  const strokeAssembled = strokePaths.map((points) => ({
+      points,
+      closed: isExplicitlyClosedSegment(points),
+      startDegree: 0,
+      endDegree: 0,
+      hasOpenBoundaryEndpoint: false,
+    }));
+  const assembled = shouldUseStrokeReconstruction(strokeAssembled, fallbackAssembled)
+    ? strokeAssembled
+    : fallbackAssembled;
   metrics.routedSegmentCount = assembled.length;
   metrics.mergedComponentCount = assembled.length;
   metrics.inferredClosedCount = assembled.filter((component) => component.closed).length;
   metrics.averageSegmentLengthAfterAssembly = averagePolylineLength(assembled.map((component) => component.points));
   debugRunRoutingMetrics(metrics);
   return assembled.map((component) => component.points);
+}
+
+function shouldUseStrokeReconstruction(candidate: RunComponent[], fallback: RunComponent[]): boolean {
+  if (candidate.length === 0) return false;
+  if (fallback.length === 0) return true;
+  if (fallback.some((component) => component.closed) && candidate.length < fallback.length) return false;
+  const candidateBox = polylineBBoxRaw(candidate.flatMap((component) => component.points));
+  const fallbackBox = polylineBBoxRaw(fallback.flatMap((component) => component.points));
+  return !(
+    candidateBox.minX - fallbackBox.minX > 0.5 ||
+    fallbackBox.maxX - candidateBox.maxX > 0.5 ||
+    candidateBox.minY - fallbackBox.minY > 0.5 ||
+    fallbackBox.maxY - candidateBox.maxY > 0.5
+  );
+}
+
+function reconstructRunStrokePaths(
+  graph: SkeletonGraph,
+  raster: SkeletonRasterInfo,
+  rawSegments: RawRunSegment[],
+  shape: Shape,
+  stitchLenMm: number,
+): Point2D[][] {
+  const rawByBranchId = new Map(rawSegments.map((segment) => [segment.branch.id, segment]));
+  const strokeGraph: StrokeGraph = {
+    width: graph.width,
+    height: graph.height,
+    nodes: graph.nodes.map((node) => {
+      const [x, y] = pixelToMm(node.x, node.y, raster);
+      return { ...node, x, y };
+    }),
+    branches: graph.branches.flatMap((branch) => {
+      const raw = rawByBranchId.get(branch.id);
+      if (!raw || raw.points.length < 2) return [];
+      return [{
+        id: branch.id,
+        points: raw.points.map(([x, y]) => [x, y] as Point2D),
+        isLoop: branch.isLoop,
+        startNodeId: branch.startNodeId,
+        endNodeId: branch.endNodeId,
+      }];
+    }),
+  };
+  const cleaned = cleanStrokeGraph(strokeGraph);
+  const repairedPaths = mergeSimilarStrokePaths(
+    reconstructStrokePaths(cleaned).map(detectClosedStroke),
+  );
+  const stitchedPaths = repairedPaths
+    .map((path) => processRunPolyline(path.closed ? path.points : finalizeRunPath(path.points, shape), stitchLenMm, path.closed))
+    .filter((points) => points.length >= 2);
+  return deduplicateStitches(stitchedPaths);
 }
 
 function prepareSkeletonBranch(
