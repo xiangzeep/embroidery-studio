@@ -4,6 +4,7 @@ import type { ConversionConfig } from "./config";
 import type { PrepipelineResult } from "./compose";
 import { buildDesignGraph } from "./design-graph";
 import { connectLineArtRunObjects } from "./line-art-stroke-connector";
+import { removeDuplicatePaths } from "./polyline-deduplicator";
 import { renderDesignGraph } from "./render";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { optimizePatternCommands } from "./command-optimizer";
@@ -30,7 +31,9 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
     const { pre, config } = input;
     assertPrepipelineWithinStitchBudget(pre, config);
     const builtGraph = buildDesignGraph(pre, config);
-    const graph = config.digitizingMode === "line-art" ? connectLineArtRunObjects(builtGraph) : builtGraph;
+    const graph = config.digitizingMode === "line-art"
+      ? removeDuplicatePaths(connectLineArtRunObjects(builtGraph))
+      : builtGraph;
     const renderedPattern = renderDesignGraph(graph, {
       widthMm: pre.widthMm,
       heightMm: pre.heightMm,
