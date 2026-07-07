@@ -900,7 +900,7 @@ function lineArtRunBridge(
   if (!strictRunObject(prevObj) || !strictRunObject(nextObj)) return null;
   if (closedRunLoopObject(prevObj) || closedRunLoopObject(nextObj)) return null;
   const gap = distance(previous.x, previous.y, next.x, next.y);
-  if (gap > 0.45) return null;
+  if (gap > 0.65) return null;
   return [{ x: next.x, y: next.y, kind: "run", colorIndex }];
 }
 

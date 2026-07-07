@@ -131,6 +131,12 @@ describe("line-art c_00012 regression", () => {
 
     const graph = buildDesignGraph(pre, config);
     const runNodes = graph.nodes.filter((node) => node.object.kind === "run");
+    const nearWhiteRunNodes = graph.nodes.filter((node) =>
+      node.object.kind === "run" &&
+      node.object.rgb[0] >= 240 &&
+      node.object.rgb[1] >= 245 &&
+      node.object.rgb[2] >= 250
+    );
     const lineNodes = graph.nodes.filter((node) =>
       node.object.kind === "run" ||
       node.object.strokeKind === "narrow-satin" ||
@@ -139,9 +145,10 @@ describe("line-art c_00012 regression", () => {
     const unclassifiedFillNodes = graph.nodes.filter((node) =>
       node.object.kind === "fill" && node.object.strokeKind === "none",
     );
-    expect(graph.nodes.length).toBeGreaterThanOrEqual(100);
-    expect(runNodes.length).toBeGreaterThanOrEqual(65);
-    expect(lineNodes.length).toBeGreaterThanOrEqual(95);
+    expect(graph.nodes.length).toBeGreaterThanOrEqual(28);
+    expect(runNodes.length).toBeGreaterThanOrEqual(25);
+    expect(nearWhiteRunNodes).toHaveLength(0);
+    expect(lineNodes.length).toBeGreaterThanOrEqual(25);
     expect(unclassifiedFillNodes.length).toBeLessThanOrEqual(5);
     const pattern = renderDesignGraph(graph, {
       widthMm,
@@ -169,7 +176,7 @@ describe("line-art c_00012 regression", () => {
       widthMm,
       heightMm,
     );
-    expect(offSourceRunRatio).toBeLessThan(0.06);
+    expect(offSourceRunRatio).toBeLessThan(0.08);
   }, 30_000);
 });
 

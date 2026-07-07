@@ -415,6 +415,7 @@ function isLineArtPaleOpenFragmentNoise(input: {
   if (input.digitizingMode !== "line-art") return false;
   if (!isPaleLineArtDetail(input.rgb)) return false;
   if (input.strokeMetrics.holeCount > 0 || (input.strokeMetrics.loopCount ?? 0) > 0) return false;
+  if (isNearWhitePaleBlue(input.rgb)) return true;
   if (
     input.layer !== "outline" &&
     input.layer !== "detail" &&
@@ -475,6 +476,11 @@ function isPaleBlueAntiAlias(rgb: [number, number, number]): boolean {
     b - r >= 45 &&
     Math.max(r, g, b) - Math.min(r, g, b) <= 120
   );
+}
+
+function isNearWhitePaleBlue(rgb: [number, number, number]): boolean {
+  const [r, g, b] = rgb;
+  return r >= 240 && g >= 245 && b >= 250 && b - r >= 6;
 }
 
 /**

@@ -292,6 +292,30 @@ describe("buildObjects — kind 判定: satin / run", () => {
     expect(result[0].strokeKind).toBe("thin-run");
   });
 
+  it("drops near-white pale blue open line-art anti-alias runs", () => {
+    const stroke: ColorRegion = {
+      colorIndex: 1,
+      rgb: [243, 249, 255],
+      svgPath: "",
+      shapes: [{
+        outer: [[0, 0], [160, 0], [160, 4], [0, 4]],
+        holes: [],
+      }],
+      polygons: [],
+    };
+    const result = buildObjects({
+      regions: [stroke],
+      widthMm: 100,
+      widthPx: 1000,
+      fabric: FABRIC_PROFILES.denim,
+      satinMaxWidthMm: 6,
+      digitizingMode: "line-art",
+      outlineFontStrategy: "auto",
+    });
+
+    expect(result).toEqual([]);
+  });
+
   it("drops pale line-art detail blocks that would render as fill instead of run", () => {
     const block: ColorRegion = {
       colorIndex: 1,
