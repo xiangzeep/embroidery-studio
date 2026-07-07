@@ -57,6 +57,26 @@ describe("connectLineArtRunObjects", () => {
     expect(connected.design.objects.some((object) => object.id === "fill")).toBe(true);
     expect(connected.design.objects.filter((object) => object.kind === "run")).toHaveLength(1);
   });
+
+  it("preserves unmerged polygonal run geometry instead of replacing it with bbox centerlines", () => {
+    const contour: Point2D[] = [
+      [0, 0],
+      [2, 0.5],
+      [3, 2],
+      [2, 3.5],
+      [0, 4],
+      [-1, 2],
+    ];
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("petal", contour, 0),
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+    const run = connected.design.objects.find((object) => object.id === "petal");
+
+    expect(run).toBeDefined();
+    expect(run?.shape.outer).toEqual(contour);
+  });
 });
 
 function makeDesign(objects: EmbroideryObject[]): EmbroideryDesign {

@@ -88,13 +88,7 @@ function connectRunGroup(objects: EmbroideryObject[]): EmbroideryObject[] {
 }
 
 function objectRunPath(object: EmbroideryObject): Point2D[] {
-  const outer = object.shape.outer;
-  if (outer.length <= 3) return outer.map(([x, y]) => [x, y]);
-  const box = bbox(outer);
-  const width = box.maxX - box.minX;
-  const height = box.maxY - box.minY;
-  if (width >= height) return [[box.minX, (box.minY + box.maxY) / 2], [box.maxX, (box.minY + box.maxY) / 2]];
-  return [[(box.minX + box.maxX) / 2, box.minY], [(box.minX + box.maxX) / 2, box.maxY]];
+  return stripClosingDuplicate(object.shape.outer).map(([x, y]) => [x, y]);
 }
 
 function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: RunComponent } | null {
@@ -153,6 +147,9 @@ function isNoiseComponent(component: RunComponent): boolean {
 
 function componentToObject(component: RunComponent): EmbroideryObject {
   const source = component.objects[0];
+  if (component.objects.length === 1 && !component.merged && !component.closed) {
+    return source;
+  }
   const path = component.path.map(([x, y]) => [x, y] as Point2D);
   return {
     ...source,
@@ -163,6 +160,13 @@ function componentToObject(component: RunComponent): EmbroideryObject {
     },
     order: Math.min(...component.objects.map((object) => object.order)),
   };
+}
+
+function stripClosingDuplicate(points: Point2D[]): Point2D[] {
+  if (points.length < 2) return points;
+  const out = points.map(([x, y]) => [x, y] as Point2D);
+  if (distance(out[0], out[out.length - 1]) <= 1e-6) out.pop();
+  return out;
 }
 
 function inferClosed(path: Point2D[], hasHoles: boolean): boolean {
