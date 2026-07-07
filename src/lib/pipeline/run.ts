@@ -20,10 +20,11 @@ import type { Point2D, Shape, SkeletonBranch, SkeletonGraph } from "./types";
 const MIN_RAIL_MIDLINE_AREA_MM2 = 0.25;
 const SKELETON_RUN_PX_PER_MM = 10;
 const MAX_SKELETON_RUN_RASTER_PIXELS = 220_000;
-const JUNCTION_RETRACT_MM = 0.12;
+const JUNCTION_RETRACT_MM = 0;
 const LOOP_CLOSE_THRESHOLD_MM = 0.85;
-const MIN_OPEN_BRANCH_LENGTH_MM = 0.75;
+const MIN_OPEN_BRANCH_LENGTH_MM = 1.2;
 const HEAL_GAP_MM = 1.2;
+const COMPONENT_HEAL_GAP_MM = 1.5;
 const HEAL_DIRECTION_COS = 0.25;
 
 /**
@@ -71,7 +72,7 @@ function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Poin
   });
   const sampled = routeSkeletonGraphBranchSegments(graph, raster, stitchLenMm, shape);
   if (sampled.length === 0) return [];
-  return sampled;
+  return supplementFragmentedRunCoverage(sampled, shape, stitchLenMm);
 }
 
 function railMidlineRun(shape: Shape, stitchLenMm: number): Point2D[] {
@@ -101,6 +102,35 @@ function railMidlineRun(shape: Shape, stitchLenMm: number): Point2D[] {
     midline.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
   }
   return dedupeSequential(midline);
+}
+
+function supplementFragmentedRunCoverage(
+  segments: Point2D[][],
+  shape: Shape,
+  stitchLenMm: number,
+): Point2D[][] {
+  if (segments.length <= 2 || shape.holes.length === 0) return segments;
+  const shapeBox = polylineBBoxRaw(shape.outer);
+  const segmentBox = polylineBBoxRaw(segments.flat());
+  const missesCoverage =
+    shapeBox.maxX - segmentBox.maxX > 1.0 ||
+    segmentBox.minX - shapeBox.minX > 1.0 ||
+    shapeBox.maxY - segmentBox.maxY > 1.0 ||
+    segmentBox.minY - shapeBox.minY > 1.0;
+  if (!missesCoverage) return segments;
+
+  const lightweight = lightweightRunSegments(shape, stitchLenMm);
+  const supplement = lightweight.find((segment) => {
+    if (segment.length < 2) return false;
+    const box = polylineBBoxRaw(segment);
+    return (
+      box.maxX > segmentBox.maxX + 0.8 ||
+      box.minX < segmentBox.minX - 0.8 ||
+      box.maxY > segmentBox.maxY + 0.8 ||
+      box.minY < segmentBox.minY - 0.8
+    );
+  });
+  return supplement ? segments.concat([supplement]) : segments;
 }
 
 function estimatedRasterPixelsForShape(shape: Shape, pxPerMm: number): number {
@@ -716,6 +746,26 @@ type RunRoutingMetrics = {
   inferredClosedCount: number;
   healedMergeCount: number;
   droppedShortBranchCount: number;
+  mergedComponentCount: number;
+  averageSegmentLengthBeforeAssembly: number;
+  averageSegmentLengthAfterAssembly: number;
+};
+
+type RawRunSegment = {
+  points: Point2D[];
+  branch: SkeletonBranch;
+  startDegree: number;
+  endDegree: number;
+  length: number;
+  hasOpenBoundaryEndpoint: boolean;
+};
+
+type RunComponent = {
+  points: Point2D[];
+  closed: boolean;
+  startDegree: number;
+  endDegree: number;
+  hasOpenBoundaryEndpoint: boolean;
 };
 
 function routeSkeletonGraphBranchSegments(
@@ -733,104 +783,67 @@ function routeSkeletonGraphBranchSegments(
     inferredClosedCount: 0,
     healedMergeCount: 0,
     droppedShortBranchCount: 0,
+    mergedComponentCount: 0,
+    averageSegmentLengthBeforeAssembly: 0,
+    averageSegmentLengthAfterAssembly: 0,
   };
   const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
-  const prepared = new Map<string, Point2D[]>();
+  const rawSegments: RawRunSegment[] = [];
   for (const branch of graph.branches) {
-    const result = prepareSkeletonBranch(branch, raster, stitchLenMm, shape, nodeMap);
+    const result = prepareSkeletonBranch(branch, raster, shape, nodeMap);
     if (result.droppedShort) {
       metrics.droppedShortBranchCount += 1;
       continue;
     }
-    if (result.inferredClosed) metrics.inferredClosedCount += 1;
-    const line = result.points;
-    if (line.length >= 2) prepared.set(branch.id, line);
+    if (result.segment.points.length >= 2) rawSegments.push(result.segment);
   }
-  if (prepared.size === 0) {
+  if (rawSegments.length === 0) {
     debugRunRoutingMetrics(metrics);
     return [];
   }
 
-  if (graph.branches.length === 1) {
-    const only = prepared.get(graph.branches[0].id);
-    const routed: Point2D[][] = only ? [only.map(([x, y]) => [x, y] as Point2D)] : [];
-    metrics.routedSegmentCount = routed.length;
-    debugRunRoutingMetrics(metrics);
-    return routed;
-  }
-
-  const adjacency = buildSkeletonAdjacency(graph);
-  const visitedBranches = new Set<string>();
-  const routed: Point2D[][] = [];
-  const startNodes = graph.nodes
-    .slice()
-    .sort((a, b) => nodeStartRank(a) - nodeStartRank(b) || a.y - b.y || a.x - b.x);
-
-  const visitNode = (nodeId: string): void => {
-    const edges = (adjacency.get(nodeId) ?? [])
-      .filter((edge) => !visitedBranches.has(edge.branch.id))
-      .sort((a, b) => {
-        const an = nodeMap.get(a.nextNodeId);
-        const bn = nodeMap.get(b.nextNodeId);
-        return (an?.y ?? 0) - (bn?.y ?? 0) || (an?.x ?? 0) - (bn?.x ?? 0) || a.length - b.length;
-      });
-
-    for (const edge of edges) {
-      if (visitedBranches.has(edge.branch.id)) continue;
-      const forward = orientPreparedBranch(edge.branch, nodeId, prepared);
-      if (forward.length < 2) continue;
-      visitedBranches.add(edge.branch.id);
-      routed.push(forward);
-      visitNode(edge.nextNodeId);
-    }
-  };
-
-  for (const node of startNodes) {
-    if ((adjacency.get(node.id) ?? []).some((edge) => !visitedBranches.has(edge.branch.id))) {
-      visitNode(node.id);
-    }
-  }
-
-  for (const branch of graph.branches) {
-    if (visitedBranches.has(branch.id)) continue;
-    const line = prepared.get(branch.id);
-    if (!line || line.length < 2) continue;
-    visitedBranches.add(branch.id);
-    routed.push(line.map(([x, y]) => [x, y]));
-  }
-
-  const healed = healRunSegmentGaps(routed);
-  metrics.routedSegmentCount = healed.length;
-  metrics.healedMergeCount = Math.max(0, routed.length - healed.length);
+  metrics.averageSegmentLengthBeforeAssembly = averageRawSegmentLength(rawSegments);
+  const assembled = assembleRunComponents(rawSegments, shape, stitchLenMm, metrics);
+  metrics.routedSegmentCount = assembled.length;
+  metrics.mergedComponentCount = assembled.length;
+  metrics.inferredClosedCount = assembled.filter((component) => component.closed).length;
+  metrics.averageSegmentLengthAfterAssembly = averagePolylineLength(assembled.map((component) => component.points));
   debugRunRoutingMetrics(metrics);
-  return healed;
+  return assembled.map((component) => component.points);
 }
 
 function prepareSkeletonBranch(
   branch: SkeletonBranch,
   raster: SkeletonRasterInfo,
-  stitchLenMm: number,
   shape: Shape,
   nodeMap: Map<string, { degree: number }>,
 ): {
-  points: Point2D[];
-  inferredClosed: boolean;
+  segment: RawRunSegment;
   droppedShort: boolean;
 } {
   const points = branch.points.map(([px, py]) => pixelToMm(px, py, raster));
   const rawLength = polylineRawLength(points);
   const startNode = branch.startNodeId ? nodeMap.get(branch.startNodeId) : undefined;
   const endNode = branch.endNodeId ? nodeMap.get(branch.endNodeId) : undefined;
+  const hasOpenBoundaryEndpoint = branchHasOpenBoundaryEndpoint(points, shape, startNode, endNode);
   if (
     !branch.isLoop &&
     rawLength < MIN_OPEN_BRANCH_LENGTH_MM &&
     shouldDropShortSkeletonBranch(branch, startNode, endNode, shape)
   ) {
-    return { points: [], inferredClosed: false, droppedShort: true };
+    return {
+      segment: {
+        points: [],
+        branch,
+        startDegree: startNode?.degree ?? 0,
+        endDegree: endNode?.degree ?? 0,
+        length: 0,
+        hasOpenBoundaryEndpoint: false,
+      },
+      droppedShort: true,
+    };
   }
-  const hasOpenBoundaryEndpoint = branchHasOpenBoundaryEndpoint(points, shape, startNode, endNode);
-  const inferredClosed = branch.isLoop || (!hasOpenBoundaryEndpoint && shouldForceCloseRunPath(points, shape));
-  if (inferredClosed && points.length >= 2) {
+  if (branch.isLoop && points.length >= 2) {
     const first = points[0];
     const last = points[points.length - 1];
     if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-6) {
@@ -839,19 +852,25 @@ function prepareSkeletonBranch(
   } else if (points.length >= 2) {
     if (startNode && startNode.degree <= 1) {
       points[0] = extendEndpointTowardBoundary(points[0], points[1], shape);
-    } else if (startNode && startNode.degree >= 3) {
+    } else if (JUNCTION_RETRACT_MM > 0 && startNode && startNode.degree >= 3) {
       trimPolylineStart(points, JUNCTION_RETRACT_MM);
     }
     if (endNode && endNode.degree <= 1) {
       const lastIndex = points.length - 1;
       points[lastIndex] = extendEndpointTowardBoundary(points[lastIndex], points[lastIndex - 1], shape);
-    } else if (endNode && endNode.degree >= 3) {
+    } else if (JUNCTION_RETRACT_MM > 0 && endNode && endNode.degree >= 3) {
       trimPolylineEnd(points, JUNCTION_RETRACT_MM);
     }
   }
   return {
-    points: processRunPolyline(points, stitchLenMm, inferredClosed),
-    inferredClosed,
+    segment: {
+      points: dedupeSequential(points),
+      branch,
+      startDegree: startNode?.degree ?? 0,
+      endDegree: endNode?.degree ?? 0,
+      length: polylineRawLength(points),
+      hasOpenBoundaryEndpoint,
+    },
     droppedShort: false,
   };
 }
@@ -891,6 +910,254 @@ function shouldForceCloseRunPath(points: Point2D[], shape: Shape): boolean {
   return shape.holes.length > 0 && pathLength > 1e-6 && endGap / pathLength <= 0.14 && endGap <= 2.5;
 }
 
+function assembleRunComponents(
+  rawSegments: RawRunSegment[],
+  shape: Shape,
+  stitchLenMm: number,
+  metrics: RunRoutingMetrics,
+): RunComponent[] {
+  const initial = rawSegments
+    .filter((segment) => isValidRunSegment(segment.points))
+    .map((segment) => ({
+      points: segment.points.map(([x, y]) => [x, y] as Point2D),
+      closed: segment.branch.isLoop || isExplicitlyClosedSegment(segment.points),
+      startDegree: segment.startDegree,
+      endDegree: segment.endDegree,
+      hasOpenBoundaryEndpoint: segment.hasOpenBoundaryEndpoint,
+    }));
+
+  const merged = mergeRunComponents(initial, metrics);
+  const deduped = dedupeOverlappingRunComponents(merged);
+  const finalized = deduped
+    .map((component) => finalizeRunComponent(component, shape, stitchLenMm))
+    .filter((component) => component.points.length >= 2);
+
+  return dedupeOverlappingRunComponents(finalized);
+}
+
+function isValidRunSegment(points: Point2D[]): boolean {
+  if (points.length < 2) return false;
+  return polylineRawLength(points) >= 0.25;
+}
+
+function mergeRunComponents(components: RunComponent[], metrics: RunRoutingMetrics): RunComponent[] {
+  const remaining = components.map((component) => ({
+    closed: component.closed,
+    startDegree: component.startDegree,
+    endDegree: component.endDegree,
+    hasOpenBoundaryEndpoint: component.hasOpenBoundaryEndpoint,
+    points: component.points.map(([x, y]) => [x, y] as Point2D),
+  }));
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    let best: { a: number; b: number; gap: number; merged: RunComponent } | null = null;
+
+    for (let i = 0; i < remaining.length; i++) {
+      for (let j = i + 1; j < remaining.length; j++) {
+        const candidate = bestComponentMerge(remaining[i], remaining[j]);
+        if (!candidate) continue;
+        if (!best || candidate.gap < best.gap) {
+          best = { a: i, b: j, gap: candidate.gap, merged: candidate.merged };
+        }
+      }
+    }
+
+    if (best) {
+      remaining[best.a] = best.merged;
+      remaining.splice(best.b, 1);
+      metrics.healedMergeCount += 1;
+      changed = true;
+    }
+  }
+
+  return remaining;
+}
+
+function bestComponentMerge(
+  a: RunComponent,
+  b: RunComponent,
+): { gap: number; merged: RunComponent } | null {
+  if (a.closed || b.closed) return null;
+
+  const variants: Array<[RunComponent, RunComponent]> = [
+    [a, b],
+    [a, reverseRunComponent(b)],
+    [reverseRunComponent(a), b],
+    [reverseRunComponent(a), reverseRunComponent(b)],
+  ];
+  let best: { gap: number; merged: RunComponent } | null = null;
+
+  for (const [left, right] of variants) {
+    const gap = endpointGap(left.points, right.points);
+    if (gap > COMPONENT_HEAL_GAP_MM) continue;
+    if (left.hasOpenBoundaryEndpoint !== right.hasOpenBoundaryEndpoint) continue;
+    if (left.endDegree >= 3 && right.startDegree >= 3) continue;
+    if (!componentTangentsCompatible(left.points, right.points)) continue;
+    const points = mergeOrientedSegmentsWithBridge(left.points, right.points);
+    const component = {
+      points,
+      closed: false,
+      startDegree: left.startDegree,
+      endDegree: right.endDegree,
+      hasOpenBoundaryEndpoint: left.hasOpenBoundaryEndpoint || right.hasOpenBoundaryEndpoint,
+    };
+    if (!best || gap < best.gap) best = { gap, merged: component };
+  }
+
+  return best;
+}
+
+function reverseRunComponent(component: RunComponent): RunComponent {
+  return {
+    points: reverseSegment(component.points),
+    closed: component.closed,
+    startDegree: component.endDegree,
+    endDegree: component.startDegree,
+    hasOpenBoundaryEndpoint: component.hasOpenBoundaryEndpoint,
+  };
+}
+
+function componentTangentsCompatible(left: Point2D[], right: Point2D[]): boolean {
+  if (left.length < 2 || right.length < 2) return true;
+  const leftPrev = left[left.length - 2];
+  const leftEnd = left[left.length - 1];
+  const rightStart = right[0];
+  const rightNext = right[1];
+  const bridge: Point2D = [rightStart[0] - leftEnd[0], rightStart[1] - leftEnd[1]];
+  const bridgeLength = Math.hypot(bridge[0], bridge[1]);
+  if (bridgeLength <= 1e-6) return true;
+  const leftDir: Point2D = [leftEnd[0] - leftPrev[0], leftEnd[1] - leftPrev[1]];
+  const rightDir: Point2D = [rightNext[0] - rightStart[0], rightNext[1] - rightStart[1]];
+  const minCos = Math.cos((40 * Math.PI) / 180);
+  return normalizedDot(leftDir, bridge) >= minCos && normalizedDot(bridge, rightDir) >= minCos;
+}
+
+function mergeOrientedSegmentsWithBridge(left: Point2D[], right: Point2D[]): Point2D[] {
+  const merged = left.map(([x, y]) => [x, y] as Point2D);
+  const gap = endpointGap(left, right);
+  if (gap > 0.2) {
+    const leftEnd = left[left.length - 1];
+    const rightStart = right[0];
+    merged.push([
+      (leftEnd[0] + rightStart[0]) / 2,
+      (leftEnd[1] + rightStart[1]) / 2,
+    ]);
+  }
+  const startIndex = gap <= 1e-6 ? 1 : 0;
+  for (let i = startIndex; i < right.length; i++) {
+    merged.push([right[i][0], right[i][1]]);
+  }
+  return dedupeSequential(merged);
+}
+
+function finalizeRunComponent(component: RunComponent, shape: Shape, stitchLenMm: number): RunComponent {
+  const closed = component.closed ||
+    (!component.hasOpenBoundaryEndpoint && shouldForceCloseRunPath(component.points, shape));
+  const line = closed ? closeComponentPolyline(component.points) : component.points;
+  const processed = processRunPolyline(line, stitchLenMm, closed);
+  const finalPoints = !closed && component.hasOpenBoundaryEndpoint && shape.holes.length > 0
+    ? extendOpenPathToShape(processed, shape)
+    : processed;
+  return {
+    closed,
+    startDegree: component.startDegree,
+    endDegree: component.endDegree,
+    hasOpenBoundaryEndpoint: component.hasOpenBoundaryEndpoint,
+    points: closed && closedProcessingShrankBounds(line, finalPoints)
+      ? resampleClosedLineByArcLength(dedupeSequential(line), stitchLenMm)
+      : finalPoints,
+  };
+}
+
+function closedProcessingShrankBounds(raw: Point2D[], processed: Point2D[]): boolean {
+  if (raw.length < 3 || processed.length < 3) return false;
+  const rawBox = polylineBBoxRaw(raw);
+  const processedBox = polylineBBoxRaw(processed);
+  const rawWidth = rawBox.maxX - rawBox.minX;
+  const rawHeight = rawBox.maxY - rawBox.minY;
+  const processedWidth = processedBox.maxX - processedBox.minX;
+  const processedHeight = processedBox.maxY - processedBox.minY;
+  return rawWidth - processedWidth > 1.0 || rawHeight - processedHeight > 1.0;
+}
+
+function closeComponentPolyline(points: Point2D[]): Point2D[] {
+  if (points.length < 3) return points.map(([x, y]) => [x, y]);
+  const first = points[0];
+  const last = points[points.length - 1];
+  const gap = Math.hypot(first[0] - last[0], first[1] - last[1]);
+  if (gap > 0.2) {
+    return points.concat([[(first[0] + last[0]) / 2, (first[1] + last[1]) / 2], [first[0], first[1]]]);
+  }
+  return ensureClosedLoop(points);
+}
+
+function dedupeOverlappingRunComponents(components: RunComponent[]): RunComponent[] {
+  const kept: RunComponent[] = [];
+  for (const component of components.sort((a, b) =>
+    Number(a.closed) - Number(b.closed) ||
+    componentBBoxArea(b) - componentBBoxArea(a) ||
+    polylineRawLength(b.points) - polylineRawLength(a.points)
+  )) {
+    if (
+      component.closed &&
+      kept.some((existing) => existing.closed && closedComponentsOverlap(existing.points, component.points))
+    ) {
+      continue;
+    }
+    kept.push(component);
+  }
+  return kept.sort((a, b) => Number(a.closed) - Number(b.closed));
+}
+
+function componentBBoxArea(component: RunComponent): number {
+  const box = polylineBBoxRaw(component.points);
+  return (box.maxX - box.minX) * (box.maxY - box.minY);
+}
+
+function closedComponentsOverlap(a: Point2D[], b: Point2D[]): boolean {
+  const abox = polylineBBoxRaw(a);
+  const bbox = polylineBBoxRaw(b);
+  const intersectionWidth = Math.max(0, Math.min(abox.maxX, bbox.maxX) - Math.max(abox.minX, bbox.minX));
+  const intersectionHeight = Math.max(0, Math.min(abox.maxY, bbox.maxY) - Math.max(abox.minY, bbox.minY));
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const minArea = Math.max(1e-6, Math.min(
+    (abox.maxX - abox.minX) * (abox.maxY - abox.minY),
+    (bbox.maxX - bbox.minX) * (bbox.maxY - bbox.minY),
+  ));
+  if (intersectionArea / minArea < 0.72) return false;
+  const ac = polylineCentroid(a);
+  const bc = polylineCentroid(b);
+  return Math.hypot(ac[0] - bc[0], ac[1] - bc[1]) <= 1.2;
+}
+
+function polylineBBoxRaw(points: Point2D[]): { minX: number; minY: number; maxX: number; maxY: number } {
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([, y]) => y);
+  return {
+    minX: Math.min(...xs),
+    minY: Math.min(...ys),
+    maxX: Math.max(...xs),
+    maxY: Math.max(...ys),
+  };
+}
+
+function polylineCentroid(points: Point2D[]): Point2D {
+  const total = points.reduce<Point2D>((sum, point) => [sum[0] + point[0], sum[1] + point[1]], [0, 0]);
+  return [total[0] / points.length, total[1] / points.length];
+}
+
+function averageRawSegmentLength(segments: RawRunSegment[]): number {
+  if (segments.length === 0) return 0;
+  return segments.reduce((sum, segment) => sum + segment.length, 0) / segments.length;
+}
+
+function averagePolylineLength(segments: Point2D[][]): number {
+  if (segments.length === 0) return 0;
+  return segments.reduce((sum, segment) => sum + polylineRawLength(segment), 0) / segments.length;
+}
+
 function branchHasOpenBoundaryEndpoint(
   points: Point2D[],
   shape: Shape,
@@ -898,6 +1165,7 @@ function branchHasOpenBoundaryEndpoint(
   endNode: { degree: number } | undefined,
 ): boolean {
   if (points.length < 2) return false;
+  if ((startNode && startNode.degree <= 1) || (endNode && endNode.degree <= 1)) return true;
   return (
     Boolean(startNode && startNode.degree <= 1 && distanceToPolygonBoundary(points[0], shape.outer) <= 0.65) ||
     Boolean(endNode && endNode.degree <= 1 && distanceToPolygonBoundary(points[points.length - 1], shape.outer) <= 0.65)

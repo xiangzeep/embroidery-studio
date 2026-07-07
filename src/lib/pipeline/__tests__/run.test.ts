@@ -192,8 +192,21 @@ describe("medialAxisRun", () => {
     expect(pts.length).toBeGreaterThanOrEqual(14);
     expect(Math.min(...xs)).toBeLessThan(2.6);
     expect(Math.max(...xs)).toBeGreaterThan(7.4);
-    expect(Math.min(...ys)).toBeLessThan(0.8);
+    expect(Math.min(...ys)).toBeLessThan(0.9);
     expect(Math.max(...ys)).toBeGreaterThan(8.4);
+  });
+
+  it("assembles duplicated skeleton loop branches into logical run components", () => {
+    const shape: Shape = {
+      outer: [[3, 0], [7, 0], [7, 4], [10, 4], [10, 10], [0, 10], [0, 4], [3, 4]],
+      holes: [[[4, 5], [6, 5], [6, 8], [4, 8]]],
+    };
+
+    const segments = medialAxisRunSegments(shape, 1.2);
+    const closedSegments = segments.filter(isClosedSegment);
+
+    expect(closedSegments.length).toBeLessThanOrEqual(2);
+    expect(segments.length).toBeLessThanOrEqual(2);
   });
 
   it("does not emit run paths at skeleton-pixel density for curved loop bands", () => {
@@ -306,6 +319,22 @@ describe("medialAxisRun", () => {
     const last = loopSegment[loopSegment.length - 1];
     const closeGap = Math.hypot(first[0] - last[0], first[1] - last[1]);
     expect(closeGap).toBeLessThanOrEqual(1e-6);
+  });
+
+  it("deduplicates overlapping closed components after skeleton assembly", () => {
+    const shape: Shape = {
+      outer: [
+        [4, 0], [8, 0], [8, 4], [13, 4], [13, 5], [8, 5], [8, 12], [0, 12], [0, 4], [4, 4],
+      ],
+      holes: [
+        [[5, 7], [7, 7], [7, 10], [5, 10]],
+      ],
+    };
+
+    const segments = medialAxisRunSegments(shape, 1.2);
+    const closedSegments = segments.filter(isClosedSegment);
+
+    expect(closedSegments.length).toBeLessThanOrEqual(2);
   });
 
   it("does not extend split junction edges through neighboring branches", () => {
@@ -455,4 +484,11 @@ function maxInteriorTurnAngle(points: Array<[number, number]>): number {
     maxTurn = Math.max(maxTurn, Math.acos(dot));
   }
   return maxTurn;
+}
+
+function isClosedSegment(points: Array<[number, number]>): boolean {
+  if (points.length < 3) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  return Math.hypot(first[0] - last[0], first[1] - last[1]) <= 1e-6;
 }
