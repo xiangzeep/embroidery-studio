@@ -14,6 +14,9 @@ type RunComponent = {
 const MERGE_GAP_MM = 1.5;
 const BRIDGE_MIN_GAP_MM = 0.2;
 const MERGE_MIN_COS = Math.cos((40 * Math.PI) / 180);
+const ELONGATED_STROKE_MIN_ASPECT = 6;
+const ELONGATED_STROKE_MAX_WIDTH_MM = 0.8;
+const ELONGATED_STROKE_MIN_LENGTH_MM = 1.2;
 
 export function connectLineArtRunObjects(graph: DesignGraph): DesignGraph {
   const runObjects = graph.design.objects.filter(isConnectableRunObject);
@@ -90,7 +93,8 @@ function connectRunGroup(objects: EmbroideryObject[]): EmbroideryObject[] {
 }
 
 function objectRunPath(object: EmbroideryObject): Point2D[] {
-  return stripClosingDuplicate(object.shape.outer).map(([x, y]) => [x, y]);
+  const outer = stripClosingDuplicate(object.shape.outer);
+  return elongatedStrokeCenterline(outer) ?? outer.map(([x, y]) => [x, y]);
 }
 
 function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: RunComponent } | null {
@@ -126,7 +130,69 @@ function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: 
 
 function isMergeableRunPath(object: EmbroideryObject): boolean {
   const outer = stripClosingDuplicate(object.shape.outer);
-  return outer.length >= 2 && outer.length <= 3 && !isExplicitlyClosed(object.shape.outer);
+  if (isExplicitlyClosed(object.shape.outer)) return false;
+  return (outer.length >= 2 && outer.length <= 3) || elongatedStrokeCenterline(outer) !== null;
+}
+
+function elongatedStrokeCenterline(points: Point2D[]): Point2D[] | null {
+  if (points.length < 4) return null;
+  const center = centroid(points);
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  for (const [x, y] of points) {
+    const dx = x - center[0];
+    const dy = y - center[1];
+    xx += dx * dx;
+    xy += dx * dy;
+    yy += dy * dy;
+  }
+  const trace = xx + yy;
+  const delta = Math.sqrt((xx - yy) ** 2 + 4 * xy * xy);
+  const lambda = (trace + delta) / 2;
+  let axis: Point2D = Math.abs(xy) > 1e-6 ? [lambda - yy, xy] : xx >= yy ? [1, 0] : [0, 1];
+  const axisLen = Math.hypot(axis[0], axis[1]);
+  if (axisLen <= 1e-6) return null;
+  axis = [axis[0] / axisLen, axis[1] / axisLen];
+  const normal: Point2D = [-axis[1], axis[0]];
+  let minAlong = Number.POSITIVE_INFINITY;
+  let maxAlong = Number.NEGATIVE_INFINITY;
+  let minAcross = Number.POSITIVE_INFINITY;
+  let maxAcross = Number.NEGATIVE_INFINITY;
+  for (const [x, y] of points) {
+    const dx = x - center[0];
+    const dy = y - center[1];
+    const along = dx * axis[0] + dy * axis[1];
+    const across = dx * normal[0] + dy * normal[1];
+    minAlong = Math.min(minAlong, along);
+    maxAlong = Math.max(maxAlong, along);
+    minAcross = Math.min(minAcross, across);
+    maxAcross = Math.max(maxAcross, across);
+  }
+  const length = maxAlong - minAlong;
+  const width = maxAcross - minAcross;
+  if (
+    length < ELONGATED_STROKE_MIN_LENGTH_MM ||
+    width <= 1e-6 ||
+    width > ELONGATED_STROKE_MAX_WIDTH_MM ||
+    length / width < ELONGATED_STROKE_MIN_ASPECT
+  ) {
+    return null;
+  }
+  return [
+    [center[0] + axis[0] * minAlong, center[1] + axis[1] * minAlong],
+    [center[0] + axis[0] * maxAlong, center[1] + axis[1] * maxAlong],
+  ];
+}
+
+function centroid(points: Point2D[]): Point2D {
+  let x = 0;
+  let y = 0;
+  for (const point of points) {
+    x += point[0];
+    y += point[1];
+  }
+  return [x / points.length, y / points.length];
 }
 
 function finalizeComponent(component: RunComponent): RunComponent {

@@ -104,6 +104,21 @@ describe("connectLineArtRunObjects", () => {
     expect(runObjects[0].shape.outer).toEqual(firstContour);
     expect(runObjects[1].shape.outer).toEqual(secondContour);
   });
+
+  it("merges nearby collinear elongated polygon stroke fragments by their centerlines", () => {
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("left-fragment", [[0, 0], [4, 0], [4, 0.25], [0, 0.25]], 0),
+      makeRun("right-fragment", [[4.6, 0], [8, 0], [8, 0.25], [4.6, 0.25]], 1),
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+    const runObjects = connected.design.objects.filter((object) => object.kind === "run");
+
+    expect(runObjects).toHaveLength(1);
+    expect(runObjects[0].id).toBe("left-fragment+right-fragment");
+    expect(runObjects[0].shape.outer[0]).toEqual([0, 0.125]);
+    expect(runObjects[0].shape.outer.at(-1)).toEqual([8, 0.125]);
+  });
 });
 
 function makeDesign(objects: EmbroideryObject[]): EmbroideryDesign {
