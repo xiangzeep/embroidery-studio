@@ -96,10 +96,6 @@ export async function runPrepipeline(
     imageBitmap,
     resolvePreprocessMaxDimension(config.digitizingMode, config.qualityPreset),
   );
-  const aspect = imageBitmap.height / imageBitmap.width;
-  const widthMm = config.widthMm;
-  const heightMm = widthMm * aspect;
-
   onProgress?.({ stage: "quantize", percent: 25 });
   const quantized = config.digitizingMode === "line-art"
     ? quantizeLineArt({
@@ -114,20 +110,28 @@ export async function runPrepipeline(
         colorCount: config.colorCount,
         smoothing: config.smoothing,
       });
+  const trimmed = trimLabelsToForegroundBounds(
+    quantized.labels,
+    imageData.width,
+    imageData.height,
+  );
+  const aspect = trimmed.height / trimmed.width;
+  const widthMm = resolveScaledOutputWidthMm(config);
+  const heightMm = widthMm * aspect;
 
   onProgress?.({ stage: "vectorize", percent: 50 });
   const regions = compactVectorizeRegionsForTransfer(
     config.digitizingMode === "line-art"
       ? vectorizeRasterLabels({
-          labels: quantized.labels,
-          width: imageData.width,
-          height: imageData.height,
+          labels: trimmed.labels,
+          width: trimmed.width,
+          height: trimmed.height,
           palette: quantized.palette,
         })
       : await vectorizeViaWorker({
-          labels: quantized.labels,
-          width: imageData.width,
-          height: imageData.height,
+          labels: trimmed.labels,
+          width: trimmed.width,
+          height: trimmed.height,
           palette: quantized.palette,
           turdsize: resolveVectorizeTurdsize(config.digitizingMode),
           dilatePx: resolveVectorizeDilatePx(config.digitizingMode, config.boundaryDilatePx),
@@ -138,11 +142,59 @@ export async function runPrepipeline(
     regions,
     widthMm,
     heightMm,
-    widthPx: imageData.width,
-    heightPx: imageData.height,
+    widthPx: trimmed.width,
+    heightPx: trimmed.height,
   }, config);
   assertPrepipelineWithinStitchBudget(pre, config);
   return pre;
+}
+
+export function resolveScaledOutputWidthMm(config: ConversionConfig): number {
+  const scale = Math.max(1, Math.min(config.outputScalePercent ?? 100, 400));
+  return config.widthMm * (scale / 100);
+}
+
+export function trimLabelsToForegroundBounds(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+): {
+  labels: Uint8Array;
+  width: number;
+  height: number;
+} {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (labels[y * width + x] === 255) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX || maxY < minY) {
+    return { labels, width, height };
+  }
+  if (minX === 0 && minY === 0 && maxX === width - 1 && maxY === height - 1) {
+    return { labels, width, height };
+  }
+  const croppedWidth = maxX - minX + 1;
+  const croppedHeight = maxY - minY + 1;
+  const cropped = new Uint8Array(croppedWidth * croppedHeight);
+  for (let y = 0; y < croppedHeight; y++) {
+    const sourceStart = (minY + y) * width + minX;
+    const sourceEnd = sourceStart + croppedWidth;
+    cropped.set(labels.subarray(sourceStart, sourceEnd), y * croppedWidth);
+  }
+  return {
+    labels: cropped,
+    width: croppedWidth,
+    height: croppedHeight,
+  };
 }
 
 export function resolveVectorizeDilatePx(

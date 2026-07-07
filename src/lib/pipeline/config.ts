@@ -56,6 +56,7 @@ export type ConversionConfig = {
   fabric: FabricKind;
   qualityPreset: QualityPreset;
   widthMm: number;
+  outputScalePercent?: number;
   colorCount: number;
   stitchDensity: number;
   satinMaxWidthMm: number;
@@ -96,6 +97,7 @@ export function makeDefaultConfig(fabric: FabricKind): ConversionConfig {
     fabric,
     qualityPreset: "balanced",
     widthMm: 100,
+    outputScalePercent: 100,
     colorCount: 6,
     stitchDensity: FABRIC_PROFILES[fabric].defaultDensityMm,
     satinMaxWidthMm: 5,

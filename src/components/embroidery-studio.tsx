@@ -106,6 +106,7 @@ export function EmbroideryStudio() {
     // English note.
     const invalidates =
       next.widthMm !== config.widthMm ||
+      next.outputScalePercent !== config.outputScalePercent ||
       next.qualityPreset !== config.qualityPreset ||
       next.colorCount !== config.colorCount ||
       next.smoothing !== config.smoothing ||

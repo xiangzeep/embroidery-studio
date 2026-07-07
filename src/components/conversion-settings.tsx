@@ -232,6 +232,15 @@ export function ConversionSettings({
           onChange={(v) => update("widthMm", v)}
         />
         <SliderField
+          label="Scale"
+          unit="%"
+          value={value.outputScalePercent ?? 100}
+          min={25}
+          max={200}
+          step={1}
+          onChange={(v) => update("outputScalePercent", v)}
+        />
+        <SliderField
           label="Color Count"
           unit=""
           value={value.colorCount}

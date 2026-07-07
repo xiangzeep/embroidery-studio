@@ -28,6 +28,7 @@ describe("makeDefaultConfig", () => {
     expect(cfg.format).toBe("dst");
     expect(cfg.digitizingMode).toBe("line-art");
     expect(cfg.widthMm).toBe(100);
+    expect(cfg.outputScalePercent).toBe(100);
     expect(cfg.colorCount).toBe(6);
     expect(cfg.satinMaxWidthMm).toBe(5);
     expect(cfg.smoothing).toBe(2);

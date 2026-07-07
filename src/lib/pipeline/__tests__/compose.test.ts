@@ -4,7 +4,9 @@ import {
   rerenderDesignAndWrite,
   resolveBuildMinRegionAreaPx,
   resolvePreprocessMaxDimension,
+  resolveScaledOutputWidthMm,
   resolveVectorizeTurdsize,
+  trimLabelsToForegroundBounds,
   resolveVectorizeDilatePx,
   runPrepipeline,
   runStitchAndWrite,
@@ -52,6 +54,36 @@ describe("compose", () => {
     expect(resolveVectorizeTurdsize("photo-stitch")).toBe(8);
     expect(resolveBuildMinRegionAreaPx("line-art", 12)).toBe(1);
     expect(resolveBuildMinRegionAreaPx("photo-stitch", 12)).toBe(12);
+  });
+
+  it("trims blank canvas around foreground before assigning embroidery dimensions", () => {
+    const labels = new Uint8Array([
+      255, 255, 255, 255, 255,
+      255,   0,   0,   0, 255,
+      255,   0, 255,   0, 255,
+      255,   0,   0,   0, 255,
+      255, 255, 255, 255, 255,
+    ]);
+
+    const cropped = trimLabelsToForegroundBounds(labels, 5, 5);
+
+    expect(cropped.width).toBe(3);
+    expect(cropped.height).toBe(3);
+    expect(Array.from(cropped.labels)).toEqual([
+      0, 0, 0,
+      0, 255, 0,
+      0, 0, 0,
+    ]);
+  });
+
+  it("applies output scale percentage to the physical embroidery width", () => {
+    const config = {
+      ...makeDefaultConfig("denim"),
+      widthMm: 80,
+      outputScalePercent: 125,
+    };
+
+    expect(resolveScaledOutputWidthMm(config)).toBe(100);
   });
 
   it("rerenders from edited design instead of rebuilding from source regions", async () => {
