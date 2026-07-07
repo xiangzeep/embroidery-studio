@@ -119,6 +119,21 @@ describe("connectLineArtRunObjects", () => {
     expect(runObjects[0].shape.outer[0]).toEqual([0, 0.125]);
     expect(runObjects[0].shape.outer.at(-1)).toEqual([8, 0.125]);
   });
+
+  it("heals wider gaps only when elongated stroke fragments remain strongly aligned", () => {
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("left-fragment", [[0, 0], [4, 0], [4, 0.25], [0, 0.25]], 0),
+      makeRun("right-fragment", [[6.1, 0.05], [11, 0.05], [11, 0.3], [6.1, 0.3]], 1),
+      makeRun("nearby-unrelated", [[4.9, 1.3], [10, 1.3], [10, 1.55], [4.9, 1.55]], 2),
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+    const runObjects = connected.design.objects.filter((object) => object.kind === "run");
+
+    expect(runObjects).toHaveLength(2);
+    expect(runObjects.map((object) => object.id)).toContain("left-fragment+right-fragment");
+    expect(runObjects.map((object) => object.id)).toContain("nearby-unrelated");
+  });
 });
 
 function makeDesign(objects: EmbroideryObject[]): EmbroideryDesign {

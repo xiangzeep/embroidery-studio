@@ -25,6 +25,7 @@ const LOOP_CLOSE_THRESHOLD_MM = 0.85;
 const MIN_OPEN_BRANCH_LENGTH_MM = 1.2;
 const HEAL_GAP_MM = 1.2;
 const COMPONENT_HEAL_GAP_MM = 1.5;
+const EXTENDED_ALIGNED_COMPONENT_HEAL_GAP_MM = 2.4;
 const HEAL_DIRECTION_COS = 0.25;
 
 /**
@@ -991,10 +992,10 @@ function bestComponentMerge(
 
   for (const [left, right] of variants) {
     const gap = endpointGap(left.points, right.points);
-    if (gap > COMPONENT_HEAL_GAP_MM) continue;
+    if (gap > EXTENDED_ALIGNED_COMPONENT_HEAL_GAP_MM) continue;
     if (left.hasOpenBoundaryEndpoint !== right.hasOpenBoundaryEndpoint) continue;
     if (left.endDegree >= 3 && right.startDegree >= 3) continue;
-    if (!componentTangentsCompatible(left.points, right.points)) continue;
+    if (!componentTangentsCompatible(left.points, right.points, gap)) continue;
     const points = mergeOrientedSegmentsWithBridge(left.points, right.points);
     const component = {
       points,
@@ -1019,7 +1020,7 @@ function reverseRunComponent(component: RunComponent): RunComponent {
   };
 }
 
-function componentTangentsCompatible(left: Point2D[], right: Point2D[]): boolean {
+function componentTangentsCompatible(left: Point2D[], right: Point2D[], gap: number): boolean {
   if (left.length < 2 || right.length < 2) return true;
   const leftPrev = left[left.length - 2];
   const leftEnd = left[left.length - 1];
@@ -1030,7 +1031,9 @@ function componentTangentsCompatible(left: Point2D[], right: Point2D[]): boolean
   if (bridgeLength <= 1e-6) return true;
   const leftDir: Point2D = [leftEnd[0] - leftPrev[0], leftEnd[1] - leftPrev[1]];
   const rightDir: Point2D = [rightNext[0] - rightStart[0], rightNext[1] - rightStart[1]];
-  const minCos = Math.cos((40 * Math.PI) / 180);
+  const minCos = gap <= COMPONENT_HEAL_GAP_MM
+    ? Math.cos((40 * Math.PI) / 180)
+    : Math.cos((25 * Math.PI) / 180);
   return normalizedDot(leftDir, bridge) >= minCos && normalizedDot(bridge, rightDir) >= minCos;
 }
 

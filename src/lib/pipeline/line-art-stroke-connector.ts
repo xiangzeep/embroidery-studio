@@ -13,8 +13,10 @@ type RunComponent = {
 };
 
 const MERGE_GAP_MM = 1.5;
+const EXTENDED_ALIGNED_MERGE_GAP_MM = 2.4;
 const BRIDGE_MIN_GAP_MM = 0.2;
 const MERGE_MIN_COS = Math.cos((40 * Math.PI) / 180);
+const EXTENDED_MERGE_MIN_COS = Math.cos((25 * Math.PI) / 180);
 const ELONGATED_STROKE_MIN_ASPECT = 6;
 const ELONGATED_STROKE_MAX_WIDTH_MM = 0.8;
 const ELONGATED_STROKE_MIN_LENGTH_MM = 1.2;
@@ -109,8 +111,8 @@ function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: 
   let best: { gap: number; path: Point2D[] } | null = null;
   for (const [left, right] of variants) {
     const gap = endpointDistance(left, right);
-    if (gap > MERGE_GAP_MM) continue;
-    if (!tangentCompatible(left, right)) continue;
+    if (gap > EXTENDED_ALIGNED_MERGE_GAP_MM) continue;
+    if (!tangentCompatible(left, right, gap)) continue;
     const path = mergePaths(left, right, gap);
     if (!best || gap < best.gap) best = { gap, path };
   }
@@ -259,13 +261,14 @@ function mergePaths(left: Point2D[], right: Point2D[], gap: number): Point2D[] {
   return dedupe(out);
 }
 
-function tangentCompatible(left: Point2D[], right: Point2D[]): boolean {
+function tangentCompatible(left: Point2D[], right: Point2D[], gap: number): boolean {
   if (left.length < 2 || right.length < 2) return true;
   const bridge: Point2D = [right[0][0] - left[left.length - 1][0], right[0][1] - left[left.length - 1][1]];
   if (Math.hypot(bridge[0], bridge[1]) <= 1e-6) return true;
   const leftDir: Point2D = [left[left.length - 1][0] - left[left.length - 2][0], left[left.length - 1][1] - left[left.length - 2][1]];
   const rightDir: Point2D = [right[1][0] - right[0][0], right[1][1] - right[0][1]];
-  return normalizedDot(leftDir, bridge) >= MERGE_MIN_COS && normalizedDot(bridge, rightDir) >= MERGE_MIN_COS;
+  const minCos = gap <= MERGE_GAP_MM ? MERGE_MIN_COS : EXTENDED_MERGE_MIN_COS;
+  return normalizedDot(leftDir, bridge) >= minCos && normalizedDot(bridge, rightDir) >= minCos;
 }
 
 function buildNodes(objects: EmbroideryObject[]): DesignGraphNode[] {
