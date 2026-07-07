@@ -950,6 +950,40 @@ describe("renderRun", () => {
     expect(Math.max(...ys)).toBeLessThan(3.6);
   });
 
+  it("keeps line-art centerline fallback open instead of doubling back to the start", () => {
+    const obj: EmbroideryObject = {
+      id: "0-0",
+      kind: "run",
+      strokeKind: "thin-run",
+      colorIndex: 0,
+      rgb: [0, 120, 255],
+      shape: {
+        outer: [[2, 2], [18, 2], [18, 3], [2, 3]],
+        holes: [],
+      },
+      props: DUMMY_PROPS,
+      order: 0,
+    };
+
+    const stitches = renderRun(obj, makeCtx({
+      digitizingMode: "line-art",
+      disableMedialAxis: true,
+      stitchDensityMm: 0.4,
+    }));
+    const runStitches = stitches.filter((stitch) => stitch.kind === "run");
+    const xDirections = runStitches
+      .slice(1)
+      .map((stitch, index) => stitch.x - runStitches[index].x)
+      .filter((dx) => Math.abs(dx) > 0.05)
+      .map((dx) => Math.sign(dx));
+    const directionChanges = xDirections.filter((dir, index) =>
+      index > 0 && dir !== xDirections[index - 1]
+    );
+
+    expect(runStitches.length).toBeGreaterThan(4);
+    expect(directionChanges).toHaveLength(0);
+  });
+
   it("uses a looser stitch length for thin-run than the global fill density", () => {
     const obj: EmbroideryObject = {
       id: "0-0",

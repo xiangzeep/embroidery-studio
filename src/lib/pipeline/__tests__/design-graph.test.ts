@@ -197,6 +197,52 @@ describe("graph RUN fidelity", () => {
     expect(stitches.some((stitch) => stitch.kind === "run" && stitch.x > 4.1 && stitch.x < 4.5)).toBe(true);
   });
 
+  it("bridges aligned line-art run gaps while preserving angled intersections as jumps", () => {
+    const alignedDesign: EmbroideryDesign = {
+      widthMm: 12,
+      heightMm: 4,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
+        makeRun("run-b", [[5.05, 0], [9, 0], [9, 0.8], [5.05, 0.8]], 1),
+      ],
+    };
+    const angledDesign: EmbroideryDesign = {
+      widthMm: 12,
+      heightMm: 6,
+      fabric: FABRIC_PROFILES.denim,
+      objects: [
+        makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
+        makeRun("run-b", [[4, 1.6], [4.8, 1.6], [4.8, 5], [4, 5]], 1),
+      ],
+    };
+    const opts = {
+      widthPx: 120,
+      digitizingMode: "line-art" as const,
+      stitchDensityMm: 0.5,
+      satinMaxWidthMm: 2,
+      disableUnderlay: true,
+      disableCompensation: true,
+      disableLockstitch: true,
+      disableMedialAxis: true,
+    };
+
+    const aligned = renderDesignGraph(buildDesignGraph(alignedDesign), {
+      ...opts,
+      widthMm: 12,
+      heightMm: 4,
+    }).blocks[0].stitches;
+    const angled = renderDesignGraph(buildDesignGraph(angledDesign), {
+      ...opts,
+      widthMm: 12,
+      heightMm: 6,
+    }).blocks[0].stitches;
+
+    expect(aligned.some((stitch) => stitch.kind === "jump" || stitch.kind === "trim")).toBe(false);
+    expect(aligned.some((stitch) => stitch.kind === "run" && stitch.x > 4.4 && stitch.x < 5.2)).toBe(true);
+    expect(angled.some((stitch) => stitch.kind === "jump")).toBe(true);
+  });
+
   it("keeps larger line-art run gaps as jumps", () => {
     const design: EmbroideryDesign = {
       widthMm: 14,
@@ -204,7 +250,7 @@ describe("graph RUN fidelity", () => {
       fabric: FABRIC_PROFILES.denim,
       objects: [
         makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
-        makeRun("run-b", [[4.75, 0], [10, 0], [10, 0.8], [4.75, 0.8]], 1),
+        makeRun("run-b", [[5.6, 0], [10, 0], [10, 0.8], [5.6, 0.8]], 1),
       ],
     };
 
@@ -233,7 +279,7 @@ describe("graph RUN fidelity", () => {
       objects: [
         makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
         makeRun("run-far", [[7.6, 0], [11, 0], [11, 0.8], [7.6, 0.8]], 1),
-        makeRun("run-near", [[4.55, 0], [6.2, 0], [6.2, 0.8], [4.55, 0.8]], 2),
+        makeRun("run-near", [[5.6, 0], [6.2, 0], [6.2, 0.8], [5.6, 0.8]], 2),
       ],
     };
 
@@ -252,7 +298,7 @@ describe("graph RUN fidelity", () => {
     const stitches = pattern.blocks[0].stitches;
     const jumps = stitches.filter((stitch) => stitch.kind === "jump");
     expect(jumps).toHaveLength(2);
-    expect(jumps[0].x).toBeGreaterThan(4.2);
+    expect(jumps[0].x).toBeGreaterThan(5.2);
     expect(jumps[0].x).toBeLessThan(6.5);
     expect(jumps[1].x).toBeGreaterThan(7);
   });

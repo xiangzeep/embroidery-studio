@@ -300,7 +300,7 @@ function geometricCenterlineFallback(
   const line: Point[] = width >= height
     ? [[bbox.minX, centerY], [bbox.maxX, centerY]]
     : [[centerX, bbox.minY], [centerX, bbox.maxY]];
-  return resamplePolyline(line, stitchLenMm);
+  return resampleOpenPolyline(line, stitchLenMm);
 }
 
 function shapeBBox(poly: Polygon): {
@@ -357,6 +357,13 @@ function orientPolylineToPreferredEntry(
   preferredEntry: Point | undefined,
 ): Point[] {
   if (!preferredEntry || pts.length < 2) return pts;
+  if (!isClosedRunSegment(pts)) {
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const firstDist = distance(first[0], first[1], preferredEntry[0], preferredEntry[1]);
+    const lastDist = distance(last[0], last[1], preferredEntry[0], preferredEntry[1]);
+    return lastDist < firstDist ? pts.slice().reverse() : pts;
+  }
   let bestIndex = 0;
   let bestDist = Infinity;
   for (let i = 0; i < pts.length; i++) {
@@ -828,20 +835,32 @@ export function renderDesignGraph(
     let previousNode: DesignGraph["nodes"][number] | null = null;
     for (const node of nodes) {
       assertObjectRenderEstimateWithinBudget(node.object, ctx, totalStitches, maxRenderStitches);
-      const stitches = renderObjectByKind(node.object, ctx);
+      const previous = block.stitches[block.stitches.length - 1];
+      const nodeCtx: RenderContext = previous
+        ? { opts: { ...ctx.opts, preferredEntry: [previous.x, previous.y] } }
+        : { opts: { ...ctx.opts, preferredEntry: node.entry } };
+      const stitches = renderObjectByKind(node.object, nodeCtx);
       if (stitches.length === 0) continue;
       const nextRealStitches = countRealStitches(stitches);
       assertWithinRenderBudget(
         totalStitches + nextRealStitches,
         maxRenderStitches,
       );
-      const previous = block.stitches[block.stitches.length - 1];
       if (previous) {
-        block.stitches.push(...routeGraphTransition(previousNode?.object ?? null, node.object, previous, stitches[0], ctx, {
-          colorIndex,
-          jumpThresholdMm: 1.5,
-          trimThresholdMm: Math.min(trimThresholdMm, 3),
-        }));
+        block.stitches.push(...routeGraphTransition(
+          previousNode?.object ?? null,
+          node.object,
+          previous,
+          stitches[0],
+          ctx,
+          {
+            colorIndex,
+            jumpThresholdMm: 1.5,
+            trimThresholdMm: Math.min(trimThresholdMm, 3),
+          },
+          block.stitches,
+          stitches,
+        ));
       }
       block.stitches.push(...stitches);
       previousNode = node;
@@ -881,8 +900,19 @@ function routeGraphTransition(
     jumpThresholdMm: number;
     trimThresholdMm: number;
   },
+  previousStitches: Stitch[] = [previous],
+  nextStitches: Stitch[] = [next],
 ): Stitch[] {
-  const bridge = lineArtRunBridge(prevObj, nextObj, previous, next, ctx, opts.colorIndex);
+  const bridge = lineArtRunBridge(
+    prevObj,
+    nextObj,
+    previous,
+    next,
+    ctx,
+    opts.colorIndex,
+    previousStitches,
+    nextStitches,
+  );
   if (bridge) return bridge;
   return routeGraphObjects(previous, next, opts);
 }
@@ -894,14 +924,76 @@ function lineArtRunBridge(
   next: Stitch,
   ctx: RenderContext,
   colorIndex: number,
+  previousStitches: Stitch[],
+  nextStitches: Stitch[],
 ): Stitch[] | null {
   if (ctx.opts.digitizingMode !== "line-art") return null;
   if (!prevObj || prevObj.colorIndex !== nextObj.colorIndex) return null;
   if (!strictRunObject(prevObj) || !strictRunObject(nextObj)) return null;
   if (closedRunLoopObject(prevObj) || closedRunLoopObject(nextObj)) return null;
   const gap = distance(previous.x, previous.y, next.x, next.y);
-  if (gap > 0.65) return null;
+  if (gap > 1.35) return null;
+  if (gap > 0.65 && !isSmoothRunContinuation(previousStitches, nextStitches, previous, next)) {
+    return null;
+  }
   return [{ x: next.x, y: next.y, kind: "run", colorIndex }];
+}
+
+function isSmoothRunContinuation(
+  previousStitches: Stitch[],
+  nextStitches: Stitch[],
+  previous: Stitch,
+  next: Stitch,
+): boolean {
+  const bridge: Point = [next.x - previous.x, next.y - previous.y];
+  const bridgeLen = Math.hypot(bridge[0], bridge[1]);
+  if (bridgeLen <= 1e-6) return true;
+  const prevDir = lastDrawableDirection(previousStitches);
+  const nextDir = firstDrawableDirection(nextStitches);
+  if (!prevDir || !nextDir) return false;
+  return directionCos(prevDir, bridge) >= 0.65 && directionCos(bridge, nextDir) >= 0.65;
+}
+
+function lastDrawableDirection(stitches: Stitch[]): Point | null {
+  let last: Stitch | null = null;
+  for (let i = stitches.length - 1; i >= 0; i--) {
+    const stitch = stitches[i];
+    if (isControlStitch(stitch)) continue;
+    if (!last) {
+      last = stitch;
+      continue;
+    }
+    const dx = last.x - stitch.x;
+    const dy = last.y - stitch.y;
+    if (Math.hypot(dx, dy) > 0.2) return [dx, dy];
+  }
+  return null;
+}
+
+function firstDrawableDirection(stitches: Stitch[]): Point | null {
+  let first: Stitch | null = null;
+  for (const stitch of stitches) {
+    if (isControlStitch(stitch)) continue;
+    if (!first) {
+      first = stitch;
+      continue;
+    }
+    const dx = stitch.x - first.x;
+    const dy = stitch.y - first.y;
+    if (Math.hypot(dx, dy) > 0.2) return [dx, dy];
+  }
+  return null;
+}
+
+function isControlStitch(stitch: Stitch): boolean {
+  return stitch.kind === "jump" || stitch.kind === "trim" || stitch.kind === "stop";
+}
+
+function directionCos(a: Point, b: Point): number {
+  const al = Math.hypot(a[0], a[1]);
+  const bl = Math.hypot(b[0], b[1]);
+  if (al <= 1e-6 || bl <= 1e-6) return 1;
+  return (a[0] * b[0] + a[1] * b[1]) / (al * bl);
 }
 
 function resolveGraphRenderOptions(
@@ -1328,6 +1420,34 @@ export function resamplePolyline(polyline: Polygon, densityMm: number): Point[] 
       acc = 0;
     }
     acc += remaining;
+  }
+  return out;
+}
+
+function resampleOpenPolyline(polyline: Polygon, densityMm: number): Point[] {
+  if (polyline.length === 0) return [];
+  if (polyline.length === 1 || densityMm <= 0) return polyline.map(([x, y]) => [x, y]);
+  const out: Point[] = [[polyline[0][0], polyline[0][1]]];
+  let acc = 0;
+  for (let i = 1; i < polyline.length; i++) {
+    const [x1, y1] = polyline[i];
+    let [cx, cy] = polyline[i - 1];
+    let remaining = Math.hypot(x1 - cx, y1 - cy);
+    if (remaining === 0) continue;
+    while (acc + remaining >= densityMm) {
+      const t = (densityMm - acc) / remaining;
+      cx = cx + (x1 - cx) * t;
+      cy = cy + (y1 - cy) * t;
+      out.push([cx, cy]);
+      remaining = Math.hypot(x1 - cx, y1 - cy);
+      acc = 0;
+    }
+    acc += remaining;
+  }
+  const last = polyline[polyline.length - 1];
+  const tail = out[out.length - 1];
+  if (Math.hypot(last[0] - tail[0], last[1] - tail[1]) > 1e-6) {
+    out.push([last[0], last[1]]);
   }
   return out;
 }
