@@ -19,6 +19,7 @@ import { buildDesignGraph } from "./design-graph";
 import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
 import { regularizeShapes } from "./shape-regularizer";
+import { normalizeThreadColors } from "./thread-normalizer";
 import {
   assertPrepipelineWithinStitchBudget,
   fitPrepipelineWithinStitchBudget,
@@ -244,7 +245,8 @@ export async function runStitchAndWriteDirect(
 ): Promise<PipelineResult> {
   onProgress?.({ stage: "stitch", percent: 75 });
   const builtGraph = buildDesignGraph(pre, config);
-  const regularizedGraph = regularizeShapes(builtGraph);
+  const normalizedGraph = normalizeThreadColors(builtGraph, { digitizingMode: config.digitizingMode });
+  const regularizedGraph = regularizeShapes(normalizedGraph);
   const graph = config.digitizingMode === "line-art"
     ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
     : regularizedGraph;
@@ -289,7 +291,8 @@ export async function rerenderDesignAndWrite(
   };
 
   const builtGraph = buildDesignGraph(visibleDesign);
-  const regularizedGraph = regularizeShapes(builtGraph);
+  const normalizedGraph = normalizeThreadColors(builtGraph, { digitizingMode: config.digitizingMode });
+  const regularizedGraph = regularizeShapes(normalizedGraph);
   const graph = config.digitizingMode === "line-art"
     ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
     : regularizedGraph;

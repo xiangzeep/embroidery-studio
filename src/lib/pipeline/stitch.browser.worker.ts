@@ -6,6 +6,7 @@ import { buildDesignGraph } from "./design-graph";
 import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
 import { regularizeShapes } from "./shape-regularizer";
+import { normalizeThreadColors } from "./thread-normalizer";
 import { renderDesignGraph } from "./render";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { optimizePatternCommands } from "./command-optimizer";
@@ -32,7 +33,8 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
     const { pre, config } = input;
     assertPrepipelineWithinStitchBudget(pre, config);
     const builtGraph = buildDesignGraph(pre, config);
-    const regularizedGraph = regularizeShapes(builtGraph);
+    const normalizedGraph = normalizeThreadColors(builtGraph, { digitizingMode: config.digitizingMode });
+    const regularizedGraph = regularizeShapes(normalizedGraph);
     const graph = config.digitizingMode === "line-art"
       ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
       : regularizedGraph;
