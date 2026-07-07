@@ -20,6 +20,7 @@ import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
 import { regularizeShapes } from "./shape-regularizer";
 import { normalizeThreadColors } from "./thread-normalizer";
+import { assertValidStitches } from "./stitch-validator";
 import {
   assertPrepipelineWithinStitchBudget,
   fitPrepipelineWithinStitchBudget,
@@ -265,7 +266,7 @@ export async function runStitchAndWriteDirect(
     disableCompensation: config.disableCompensation,
     policy: TRIM_POLICY_BY_FORMAT[config.format],
   });
-  const pattern = optimizePatternCommands(renderedPattern);
+  const pattern = assertValidStitches(optimizePatternCommands(renderedPattern));
 
   onProgress?.({ stage: "write", percent: 90 });
   const stats = analyzePattern(pattern);
@@ -312,7 +313,7 @@ export async function rerenderDesignAndWrite(
     disableCompensation: config.disableCompensation,
     policy: TRIM_POLICY_BY_FORMAT[config.format],
   });
-  const pattern = optimizePatternCommands(renderedPattern);
+  const pattern = assertValidStitches(optimizePatternCommands(renderedPattern));
 
   onProgress?.({ stage: "write", percent: 90 });
   const stats = analyzePattern(pattern);

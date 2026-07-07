@@ -7,6 +7,7 @@ import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
 import { regularizeShapes } from "./shape-regularizer";
 import { normalizeThreadColors } from "./thread-normalizer";
+import { assertValidStitches } from "./stitch-validator";
 import { renderDesignGraph } from "./render";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { optimizePatternCommands } from "./command-optimizer";
@@ -53,7 +54,7 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
       disableCompensation: config.disableCompensation,
       policy: TRIM_POLICY_BY_FORMAT[config.format],
     });
-    const pattern = optimizePatternCommands(renderedPattern);
+    const pattern = assertValidStitches(optimizePatternCommands(renderedPattern));
     const stats = analyzePattern(pattern);
     const bytes = writeDstBytes(pattern);
     const fileBuffer = new ArrayBuffer(bytes.byteLength);
