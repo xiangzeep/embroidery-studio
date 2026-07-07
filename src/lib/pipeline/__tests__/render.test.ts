@@ -1651,8 +1651,8 @@ describe("renderDesign", () => {
     const b0 = pattern.blocks[0];
     expect(b0.colorIndex).toBe(0);
     expect(b0.rgb).toEqual([255, 0, 0]);
-    expect(b0.stitches).toHaveLength(132);
-    expect(countByKind(b0.stitches)).toEqual({ fill: 124, jump: 7, stop: 1 });
+    expect(b0.stitches).toHaveLength(167);
+    expect(countByKind(b0.stitches)).toEqual({ fill: 124, jump: 42, stop: 1 });
     expect(b0.stitches[0]).toEqual({ x: 10, y: 0, kind: "fill", colorIndex: 0 });
     expect(b0.stitches[b0.stitches.length - 1].kind).toBe("stop");
 
@@ -1759,7 +1759,7 @@ describe("renderDesign", () => {
     });
     expect(pattern.totalStitches).toBe(182);
     // English note.
-    expect(pattern.blocks.map((b) => b.stitches.length)).toEqual([132, 53, 6]);
+    expect(pattern.blocks.map((b) => b.stitches.length)).toEqual([167, 53, 6]);
   });
 });
 

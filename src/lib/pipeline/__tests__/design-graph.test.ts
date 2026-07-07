@@ -4,6 +4,7 @@ import { buildDesignGraph, mapObjectType } from "../design-graph";
 import { cleanPath } from "../path-cleaner";
 import { routeGraphObjects } from "../object-router";
 import { renderDesignGraph } from "../render";
+import { classifyRunSegmentStyle } from "../run-style";
 import type { EmbroideryDesign, EmbroideryObject, Point2D, Stitch } from "../types";
 
 const makeRun = (id: string, outer: Point2D[], order: number): EmbroideryObject => ({
@@ -65,6 +66,14 @@ describe("cleanPath", () => {
       const pt = cleaned[i];
       expect(Math.hypot(pt[0] - prev[0], pt[1] - prev[1])).toBeLessThanOrEqual(2.25);
     }
+  });
+});
+
+describe("run style controller", () => {
+  it("keeps short open run fragments single so noise is not amplified", () => {
+    expect(classifyRunSegmentStyle(3.5, false, "bean-run")).toBe("single");
+    expect(classifyRunSegmentStyle(3.5, false, "none")).toBe("single");
+    expect(classifyRunSegmentStyle(3.5, true, "bean-run")).toBe("bean");
   });
 });
 

@@ -33,6 +33,7 @@ export function classifyRunSegmentStyle(
   strokeKind?: string,
 ): RunStitchStyle {
   if (closed) return lengthMm <= CLOSED_LOOP_STYLE_MAX_MM ? "bean" : "triple";
+  if (lengthMm < 4) return "single";
   if (strokeKind === "thin-run") return "single";
   if (lengthMm >= BACKBONE_MIN_MM) return "triple";
   if (lengthMm <= SHORT_DECORATIVE_MAX_MM) return "double";

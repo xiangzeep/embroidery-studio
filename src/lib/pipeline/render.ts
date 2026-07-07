@@ -17,6 +17,7 @@ import { intersectScanline } from "./scanline";
 import { routeFillSegmentsSafely, tatamiBrick } from "./fill";
 import { lightweightRunSegments, medialAxisRunSegments } from "./run";
 import { isClosedRunSegment, styleRunSegment } from "./run-style";
+import { regularizeShapeForStitch } from "./shape-regularizer";
 import { renderCurvedStrokeSatin } from "./curved-satin";
 import { brickSplit, estimateSatinWidthStats, extractRails, renderSatin2Rail } from "./satin";
 import { generateUnderlayStitches } from "./underlay";
@@ -177,7 +178,11 @@ export function renderSatin(
   ctx: RenderContext,
 ): Stitch[] {
   const objForTop = applyCompForRender(obj, ctx);
-  const top = renderSatinTopOnly(objForTop, ctx);
+  const cleanObj = {
+    ...objForTop,
+    shape: regularizeShapeForStitch(objForTop.shape, "satin"),
+  };
+  const top = renderSatinTopOnly(cleanObj, ctx);
   return assembleWithUnderlayAndLockstitch(obj, top, ctx);
 }
 
@@ -190,7 +195,11 @@ export function renderFill(
   ctx: RenderContext,
 ): Stitch[] {
   const objForTop = applyCompForRender(obj, ctx);
-  const top = renderFillTopOnly(objForTop, ctx);
+  const cleanObj = {
+    ...objForTop,
+    shape: regularizeShapeForStitch(objForTop.shape, "fill"),
+  };
+  const top = renderFillTopOnly(cleanObj, ctx);
   return assembleWithUnderlayAndLockstitch(obj, top, ctx);
 }
 
@@ -209,6 +218,10 @@ function renderRunTopOnly(
   let segments: Point[][] = ctx.opts.disableMedialAxis
     ? lightweightRunFallbackSegments(obj, ctx, runStitchLenMm)
     : medialAxisRunSegments(obj.shape, runStitchLenMm);
+  if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj) && skeletonRunTooFragmented(segments)) {
+    const fallback = lightweightRunFallbackSegments(obj, ctx, runStitchLenMm);
+    if (fallback.length > 0) segments = fallback;
+  }
   if (ctx.opts.digitizingMode === "line-art" && strictRunObject(obj)) {
     segments = filterRunSegmentsForLineArt(segments);
   }
@@ -248,6 +261,13 @@ function renderRunTopOnly(
     );
   }
   return block.stitches;
+}
+
+function skeletonRunTooFragmented(segments: Point[][]): boolean {
+  if (segments.length <= 6) return false;
+  const lengths = segments.map((segment) => polylineLength(segment));
+  const average = lengths.reduce((sum, length) => sum + length, 0) / Math.max(lengths.length, 1);
+  return average < 4;
 }
 
 function filterRunSegmentsForLineArt(segments: Point[][]): Point[][] {

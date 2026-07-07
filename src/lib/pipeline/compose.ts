@@ -16,6 +16,7 @@ import { optimizePatternCommands } from "./command-optimizer";
 import type { DigitizingMode } from "./config";
 import { runStitchAndWriteViaWorker } from "./stitch-worker";
 import { buildDesignGraph } from "./design-graph";
+import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import {
   assertPrepipelineWithinStitchBudget,
   fitPrepipelineWithinStitchBudget,
@@ -240,7 +241,8 @@ export async function runStitchAndWriteDirect(
   onProgress?: (p: PipelineProgress) => void,
 ): Promise<PipelineResult> {
   onProgress?.({ stage: "stitch", percent: 75 });
-  const graph = buildDesignGraph(pre, config);
+  const builtGraph = buildDesignGraph(pre, config);
+  const graph = config.digitizingMode === "line-art" ? connectLineArtRunObjects(builtGraph) : builtGraph;
   const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,
@@ -281,7 +283,8 @@ export async function rerenderDesignAndWrite(
     objects: design.objects.filter((object) => object.visible !== false),
   };
 
-  const graph = buildDesignGraph(visibleDesign);
+  const builtGraph = buildDesignGraph(visibleDesign);
+  const graph = config.digitizingMode === "line-art" ? connectLineArtRunObjects(builtGraph) : builtGraph;
   const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,

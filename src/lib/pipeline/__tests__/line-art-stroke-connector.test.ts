@@ -1,0 +1,69 @@
+import { describe, expect, it } from "vitest";
+import { buildDesignGraph } from "../design-graph";
+import { connectLineArtRunObjects } from "../line-art-stroke-connector";
+import { FABRIC_PROFILES } from "../fabric";
+import type { EmbroideryDesign, EmbroideryObject, Point2D } from "../types";
+
+const makeRun = (id: string, outer: Point2D[], order: number): EmbroideryObject => ({
+  id,
+  kind: "run",
+  baseKind: "run",
+  colorIndex: 0,
+  rgb: [0, 128, 255],
+  shape: { outer, holes: [] },
+  props: { densityMm: 0.4, maxStitchMm: 4 },
+  strokeKind: "thin-run",
+  strokeRole: "outline",
+  order,
+});
+
+describe("connectLineArtRunObjects", () => {
+  it("merges nearby aligned run objects into one logical path", () => {
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("a", [[0, 0], [4, 0]], 0),
+      makeRun("b", [[4.7, 0], [8, 0]], 1),
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+    const runObjects = connected.design.objects.filter((object) => object.kind === "run");
+
+    expect(runObjects).toHaveLength(1);
+    expect(runObjects[0].shape.outer.some(([x]) => x > 4.2 && x < 4.6)).toBe(true);
+    expect(connected.nodes).toHaveLength(1);
+  });
+
+  it("removes isolated short noisy run fragments without touching fill objects", () => {
+    const fill: EmbroideryObject = {
+      id: "fill",
+      kind: "fill",
+      baseKind: "fill",
+      colorIndex: 1,
+      rgb: [0, 128, 255],
+      shape: { outer: [[0, 2], [8, 2], [8, 6], [0, 6]], holes: [] },
+      props: { densityMm: 1, maxStitchMm: 4 },
+      strokeKind: "none",
+      strokeRole: "area",
+      order: 2,
+    };
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("noise", [[1, 2.5], [1.8, 2.5]], 0),
+      makeRun("main", [[3, 0], [8, 0]], 1),
+      fill,
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+
+    expect(connected.design.objects.some((object) => object.id.includes("noise"))).toBe(false);
+    expect(connected.design.objects.some((object) => object.id === "fill")).toBe(true);
+    expect(connected.design.objects.filter((object) => object.kind === "run")).toHaveLength(1);
+  });
+});
+
+function makeDesign(objects: EmbroideryObject[]): EmbroideryDesign {
+  return {
+    widthMm: 12,
+    heightMm: 8,
+    fabric: FABRIC_PROFILES.denim,
+    objects,
+  };
+}

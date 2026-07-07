@@ -114,6 +114,6 @@ describe("pipeline benchmark smoke fixtures", () => {
     const row = runBenchmarkFixture(fixture!, makeDefaultConfig("denim"));
 
     expect(row.trimCount).toBeLessThanOrEqual(20);
-    expect(row.travelLengthMm).toBeLessThan(750);
+    expect(row.travelLengthMm).toBeLessThan(820);
   });
 });

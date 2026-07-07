@@ -66,5 +66,7 @@ export { shouldRenderAsStrokeSatin } from "./curved-satin";
 export { isStrokeBranchGroup, orderStrokeBranchObjects } from "./stroke-graph";
 
 export { buildDesignGraph, mapObjectType, type DesignGraph, type DesignGraphNode, type DesignGraphEdge, type GraphObjectType } from "./design-graph";
+export { connectLineArtRunObjects } from "./line-art-stroke-connector";
+export { regularizeShapeForStitch, type ShapeRegularizerOptions } from "./shape-regularizer";
 export { cleanPath, filterNearDuplicates, resampleClosed, resampleOpen } from "./path-cleaner";
 export { routeGraphObjects } from "./object-router";
