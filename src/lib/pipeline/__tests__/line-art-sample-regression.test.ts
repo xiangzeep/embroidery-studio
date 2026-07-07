@@ -160,8 +160,72 @@ describe("line-art c_00012 regression", () => {
     });
     expect(pattern.totalStitches).toBeGreaterThan(100);
     expect(pattern.totalStitches).toBeLessThanOrEqual(60_000);
+
+    const offSourceRunRatio = measureOffSourceRunRatio(
+      pattern,
+      quantized.labels,
+      width,
+      height,
+      widthMm,
+      heightMm,
+    );
+    expect(offSourceRunRatio).toBeLessThan(0.06);
   }, 30_000);
 });
+
+function measureOffSourceRunRatio(
+  pattern: ReturnType<typeof renderDesignGraph>,
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  widthMm: number,
+  heightMm: number,
+): number {
+  let checked = 0;
+  let offSource = 0;
+  for (const block of pattern.blocks) {
+    for (let i = 1; i < block.stitches.length; i++) {
+      const prev = block.stitches[i - 1];
+      const next = block.stitches[i];
+      if (prev.kind !== "run" || next.kind !== "run") continue;
+      const length = Math.hypot(next.x - prev.x, next.y - prev.y);
+      if (length < 0.35) continue;
+      const sampleCount = Math.max(1, Math.ceil(length / 1.5));
+      for (let sample = 1; sample <= sampleCount; sample++) {
+        const t = sample / (sampleCount + 1);
+        const x = prev.x + (next.x - prev.x) * t;
+        const y = prev.y + (next.y - prev.y) * t;
+        checked++;
+        if (!nearForeground(labels, width, height, x, y, widthMm, heightMm)) {
+          offSource++;
+        }
+      }
+    }
+  }
+  return checked === 0 ? 0 : offSource / checked;
+}
+
+function nearForeground(
+  labels: Uint8Array,
+  width: number,
+  height: number,
+  xMm: number,
+  yMm: number,
+  widthMm: number,
+  heightMm: number,
+): boolean {
+  const x = Math.round((xMm / widthMm) * (width - 1));
+  const y = Math.round((yMm / heightMm) * (height - 1));
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+      if (labels[ny * width + nx] !== 255) return true;
+    }
+  }
+  return false;
+}
 
 function boundsForRegions(regions: ReturnType<typeof compactVectorizeRegionsForTransfer>) {
   let minX = Number.POSITIVE_INFINITY;

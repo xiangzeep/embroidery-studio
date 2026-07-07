@@ -828,24 +828,16 @@ export function renderDesignGraph(
     let previousNode: DesignGraph["nodes"][number] | null = null;
     for (const node of nodes) {
       assertObjectRenderEstimateWithinBudget(node.object, ctx, totalStitches, maxRenderStitches);
-      const previous = block.stitches[block.stitches.length - 1];
-      const nodeCtx = previous && ctx.opts.digitizingMode === "line-art" && strictRunObject(node.object)
-        ? {
-            opts: {
-              ...ctx.opts,
-              preferredEntry: [previous.x, previous.y] as Point,
-            },
-          }
-        : ctx;
-      const stitches = renderObjectByKind(node.object, nodeCtx);
+      const stitches = renderObjectByKind(node.object, ctx);
       if (stitches.length === 0) continue;
       const nextRealStitches = countRealStitches(stitches);
       assertWithinRenderBudget(
         totalStitches + nextRealStitches,
         maxRenderStitches,
       );
+      const previous = block.stitches[block.stitches.length - 1];
       if (previous) {
-        block.stitches.push(...routeGraphTransition(previousNode?.object ?? null, node.object, previous, stitches[0], nodeCtx, {
+        block.stitches.push(...routeGraphTransition(previousNode?.object ?? null, node.object, previous, stitches[0], ctx, {
           colorIndex,
           jumpThresholdMm: 1.5,
           trimThresholdMm: Math.min(trimThresholdMm, 3),
@@ -908,7 +900,7 @@ function lineArtRunBridge(
   if (!strictRunObject(prevObj) || !strictRunObject(nextObj)) return null;
   if (closedRunLoopObject(prevObj) || closedRunLoopObject(nextObj)) return null;
   const gap = distance(previous.x, previous.y, next.x, next.y);
-  if (gap > 1.25) return null;
+  if (gap > 0.45) return null;
   return [{ x: next.x, y: next.y, kind: "run", colorIndex }];
 }
 

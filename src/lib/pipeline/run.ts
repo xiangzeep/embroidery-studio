@@ -48,10 +48,10 @@ export function medialAxisRunSegments(shape: Shape, stitchLenMm: number): Point2
 }
 
 export function lightweightRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
-  const rail = railMidlineRun(shape, stitchLenMm);
-  if (rail.length >= 2) return [processRunPolyline(finalizeRunPath(rail, shape), stitchLenMm)];
   const centerline = centerRunUnderlay(shape, stitchLenMm);
-  return centerline.length >= 2 ? [processRunPolyline(finalizeRunPath(centerline, shape), stitchLenMm)] : [];
+  if (centerline.length >= 2) return [processLightweightRunPolyline(finalizeRunPath(centerline, shape), stitchLenMm)];
+  const rail = railMidlineRun(shape, stitchLenMm);
+  return rail.length >= 2 ? [processLightweightRunPolyline(finalizeRunPath(rail, shape), stitchLenMm)] : [];
 }
 
 function branchAwareSkeletonRunSegments(shape: Shape, stitchLenMm: number): Point2D[][] {
@@ -224,9 +224,9 @@ function prepareRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
 
   const toleranceMm = clamp(stitchLenMm * 0.06, 0.08, 0.15);
   const simplified = simplifyRdp(line, toleranceMm);
-  const smoothingIterations = simplified.length >= 6 ? 2 : 1;
+  const smoothingIterations = simplified.length >= 6 ? 3 : 2;
   const smoothed = chaikinSmoothOpenLine(simplified, smoothingIterations);
-  const fitted = clampedCatmullRomSpline(smoothed, 4);
+  const fitted = clampedCatmullRomSpline(smoothed, 6);
   return dedupeSequential(fitted);
 }
 
@@ -245,8 +245,8 @@ function prepareClosedRunPolyline(line: Point2D[], stitchLenMm: number): Point2D
 function resampleAdaptiveOpenLine(line: Point2D[], stitchLenMm: number): Point2D[] {
   if (line.length < 2 || stitchLenMm <= 0) return resampleOpenLine(line, stitchLenMm);
 
-  const minStep = clamp(stitchLenMm * 0.7, 1.2, 1.5);
-  const curveStep = clamp(stitchLenMm, 1.8, 2.0);
+  const minStep = clamp(stitchLenMm * 0.45, 0.65, 1.2);
+  const curveStep = clamp(stitchLenMm * 0.8, 1.0, 1.6);
   const maxStep = clamp(stitchLenMm * 1.15, 2.2, 2.5);
   const out: Point2D[] = [[line[0][0], line[0][1]]];
   let distSinceLast = 0;
@@ -784,6 +784,14 @@ function processRunPolyline(line: Point2D[], stitchLenMm: number, closed = false
   }
   const prepared = prepareRunPolyline(dedupeSequential(line), stitchLenMm);
   return resampleAdaptiveOpenLine(prepared, stitchLenMm);
+}
+
+function processLightweightRunPolyline(line: Point2D[], stitchLenMm: number): Point2D[] {
+  if (line.length < 2) return line.map(([x, y]) => [x, y]);
+  const simplified = simplifyRdp(dedupeSequential(line), clamp(stitchLenMm * 0.04, 0.04, 0.1));
+  const smoothed = chaikinSmoothOpenLine(simplified, simplified.length >= 6 ? 7 : 5);
+  const fitted = clampedCatmullRomSpline(smoothed, 10);
+  return resampleAdaptiveOpenLine(dedupeSequential(fitted), stitchLenMm);
 }
 
 function trimPolylineStart(points: Point2D[], amountMm: number): void {

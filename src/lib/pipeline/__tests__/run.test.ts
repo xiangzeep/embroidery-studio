@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { medialAxisRun, medialAxisRunSegments } from "../run";
+import { lightweightRunSegments, medialAxisRun, medialAxisRunSegments } from "../run";
 import type { Shape } from "../types";
 
 describe("medialAxisRun", () => {
@@ -109,6 +109,33 @@ describe("medialAxisRun", () => {
     expect(Math.max(...pts.map(([x]) => x)) - Math.min(...pts.map(([x]) => x))).toBeGreaterThan(15);
     const avgAbsY = pts.reduce((sum, [, y]) => sum + Math.abs(y), 0) / pts.length;
     expect(avgAbsY).toBeLessThan(0.25);
+  });
+
+  it("does not shortcut across curved open line-art bands in lightweight mode", () => {
+    const shape: Shape = {
+      outer: [
+        [0, 0],
+        [10, 0],
+        [10, 1],
+        [1.1, 1],
+        [1.1, 6],
+        [9, 6],
+        [9, 7],
+        [0, 7],
+      ],
+      holes: [],
+    };
+
+    const [segment] = lightweightRunSegments(shape, 1.4);
+
+    expect(segment.length).toBeGreaterThan(8);
+    expect(maxInteriorTurnAngle(segment)).toBeLessThan(1.25);
+    for (let i = 1; i < segment.length; i++) {
+      const prev = segment[i - 1];
+      const next = segment[i];
+      const step = Math.hypot(next[0] - prev[0], next[1] - prev[1]);
+      expect(step).toBeLessThan(3.2);
+    }
   });
 
   it("routes branched thin strokes through both side arms and the stem", () => {
@@ -357,6 +384,25 @@ function maxTurnAngle(points: Array<[number, number]>, closed: boolean): number 
     const prev = points[(i - 1 + points.length) % points.length];
     const current = points[i];
     const next = points[(i + 1) % points.length];
+    const ax = current[0] - prev[0];
+    const ay = current[1] - prev[1];
+    const bx = next[0] - current[0];
+    const by = next[1] - current[1];
+    const al = Math.hypot(ax, ay);
+    const bl = Math.hypot(bx, by);
+    if (al <= 1e-6 || bl <= 1e-6) continue;
+    const dot = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (al * bl)));
+    maxTurn = Math.max(maxTurn, Math.acos(dot));
+  }
+  return maxTurn;
+}
+
+function maxInteriorTurnAngle(points: Array<[number, number]>): number {
+  let maxTurn = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1];
+    const current = points[i];
+    const next = points[i + 1];
     const ax = current[0] - prev[0];
     const ay = current[1] - prev[1];
     const bx = next[0] - current[0];

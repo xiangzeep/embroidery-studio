@@ -176,7 +176,7 @@ describe("graph RUN fidelity", () => {
       fabric: FABRIC_PROFILES.denim,
       objects: [
         makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
-        makeRun("run-b", [[4.55, 0], [8, 0], [8, 0.8], [4.55, 0.8]], 1),
+        makeRun("run-b", [[4.25, 0], [8, 0], [8, 0.8], [4.25, 0.8]], 1),
       ],
     };
 
@@ -194,7 +194,7 @@ describe("graph RUN fidelity", () => {
 
     const stitches = pattern.blocks[0].stitches;
     expect(stitches.some((stitch) => stitch.kind === "jump" || stitch.kind === "trim")).toBe(false);
-    expect(stitches.some((stitch) => stitch.kind === "run" && stitch.x > 4.2 && stitch.x < 4.8)).toBe(true);
+    expect(stitches.some((stitch) => stitch.kind === "run" && stitch.x > 4.1 && stitch.x < 4.5)).toBe(true);
   });
 
   it("keeps larger line-art run gaps as jumps", () => {
@@ -204,7 +204,7 @@ describe("graph RUN fidelity", () => {
       fabric: FABRIC_PROFILES.denim,
       objects: [
         makeRun("run-a", [[0, 0], [4, 0], [4, 0.8], [0, 0.8]], 0),
-        makeRun("run-b", [[6.2, 0], [10, 0], [10, 0.8], [6.2, 0.8]], 1),
+        makeRun("run-b", [[4.75, 0], [10, 0], [10, 0.8], [4.75, 0.8]], 1),
       ],
     };
 
@@ -225,7 +225,7 @@ describe("graph RUN fidelity", () => {
     expect(stitches.some((stitch) => stitch.kind === "trim")).toBe(false);
   });
 
-  it("orders nearby line-art run fragments before distant fragments", () => {
+  it("orders nearby line-art run fragments before distant fragments without forcing stitches", () => {
     const design: EmbroideryDesign = {
       widthMm: 12,
       heightMm: 4,
@@ -251,8 +251,10 @@ describe("graph RUN fidelity", () => {
 
     const stitches = pattern.blocks[0].stitches;
     const jumps = stitches.filter((stitch) => stitch.kind === "jump");
-    expect(jumps).toHaveLength(1);
-    expect(jumps[0].x).toBeGreaterThan(7);
+    expect(jumps).toHaveLength(2);
+    expect(jumps[0].x).toBeGreaterThan(4.2);
+    expect(jumps[0].x).toBeLessThan(6.5);
+    expect(jumps[1].x).toBeGreaterThan(7);
   });
 
   it("stops graph rendering as soon as object-level stitch budget is exceeded", () => {
