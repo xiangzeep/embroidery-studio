@@ -5,6 +5,7 @@ import type { PrepipelineResult } from "./compose";
 import { buildDesignGraph } from "./design-graph";
 import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
+import { regularizeShapes } from "./shape-regularizer";
 import { renderDesignGraph } from "./render";
 import { TRIM_POLICY_BY_FORMAT } from "./policy";
 import { optimizePatternCommands } from "./command-optimizer";
@@ -31,9 +32,10 @@ self.onmessage = (event: MessageEvent<StitchWorkerRequest>) => {
     const { pre, config } = input;
     assertPrepipelineWithinStitchBudget(pre, config);
     const builtGraph = buildDesignGraph(pre, config);
+    const regularizedGraph = regularizeShapes(builtGraph);
     const graph = config.digitizingMode === "line-art"
-      ? removeDuplicatePaths(connectLineArtRunObjects(builtGraph))
-      : builtGraph;
+      ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
+      : regularizedGraph;
     const renderedPattern = renderDesignGraph(graph, {
       widthMm: pre.widthMm,
       heightMm: pre.heightMm,

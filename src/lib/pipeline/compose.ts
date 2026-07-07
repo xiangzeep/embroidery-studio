@@ -18,6 +18,7 @@ import { runStitchAndWriteViaWorker } from "./stitch-worker";
 import { buildDesignGraph } from "./design-graph";
 import { connectLineArtRunObjects } from "./line-art-stroke-connector";
 import { removeDuplicatePaths } from "./polyline-deduplicator";
+import { regularizeShapes } from "./shape-regularizer";
 import {
   assertPrepipelineWithinStitchBudget,
   fitPrepipelineWithinStitchBudget,
@@ -243,9 +244,10 @@ export async function runStitchAndWriteDirect(
 ): Promise<PipelineResult> {
   onProgress?.({ stage: "stitch", percent: 75 });
   const builtGraph = buildDesignGraph(pre, config);
+  const regularizedGraph = regularizeShapes(builtGraph);
   const graph = config.digitizingMode === "line-art"
-    ? removeDuplicatePaths(connectLineArtRunObjects(builtGraph))
-    : builtGraph;
+    ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
+    : regularizedGraph;
   const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,
@@ -287,9 +289,10 @@ export async function rerenderDesignAndWrite(
   };
 
   const builtGraph = buildDesignGraph(visibleDesign);
+  const regularizedGraph = regularizeShapes(builtGraph);
   const graph = config.digitizingMode === "line-art"
-    ? removeDuplicatePaths(connectLineArtRunObjects(builtGraph))
-    : builtGraph;
+    ? removeDuplicatePaths(connectLineArtRunObjects(regularizedGraph))
+    : regularizedGraph;
   const renderedPattern = renderDesignGraph(graph, {
     widthMm: pre.widthMm,
     heightMm: pre.heightMm,

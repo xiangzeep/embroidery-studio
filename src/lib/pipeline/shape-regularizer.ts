@@ -1,4 +1,5 @@
-import type { ObjectKind, Point2D, Polygon, Shape } from "./types";
+import type { DesignGraph, DesignGraphEdge, DesignGraphNode, GraphObjectType } from "./design-graph";
+import type { EmbroideryObject, ObjectKind, Point2D, Polygon, Shape } from "./types";
 
 export type ShapeRegularizerOptions = Partial<{
   rdpToleranceMm: number;
@@ -47,6 +48,55 @@ export function regularizeShapeForStitch(
     outer: regularizePolygon(shape.outer, preset),
     holes: shape.holes.map((hole) => regularizePolygon(hole, kind === "run" ? PRESETS.run : PRESETS.satin)),
   };
+}
+
+export function regularizeShapes(graph: DesignGraph): DesignGraph {
+  const objects = graph.design.objects.map((object) => {
+    if (object.kind === "run") return object;
+    return {
+      ...object,
+      shape: regularizeShapeForStitch(object.shape, object.kind),
+    };
+  });
+  const design = { ...graph.design, objects };
+  const nodes = buildNodes(objects);
+  return { ...graph, design, nodes, edges: buildGraphEdges(nodes) };
+}
+
+function buildNodes(objects: EmbroideryObject[]): DesignGraphNode[] {
+  return objects.map((object) => {
+    const entry = object.shape.outer[0] ?? [0, 0];
+    const exit = object.shape.outer[object.shape.outer.length - 1] ?? entry;
+    return {
+      id: object.id,
+      type: mapObjectType(object),
+      object,
+      entry: [entry[0], entry[1]],
+      exit: [exit[0], exit[1]],
+    };
+  });
+}
+
+function buildGraphEdges(nodes: DesignGraphNode[]): DesignGraphEdge[] {
+  const edges: DesignGraphEdge[] = [];
+  for (let i = 1; i < nodes.length; i++) {
+    const prev = nodes[i - 1];
+    const next = nodes[i];
+    const distanceMm = distance(prev.exit, next.entry);
+    edges.push({
+      fromObjectId: prev.id,
+      toObjectId: next.id,
+      distanceMm,
+      command: distanceMm > 3 ? "trim" : "jump",
+    });
+  }
+  return edges;
+}
+
+function mapObjectType(object: EmbroideryObject): GraphObjectType {
+  if (object.kind === "run") return "RUN";
+  if (object.kind === "satin") return "SATIN";
+  return "TATAMI";
 }
 
 function regularizePolygon(poly: Polygon, opts: Required<ShapeRegularizerOptions>): Polygon {
