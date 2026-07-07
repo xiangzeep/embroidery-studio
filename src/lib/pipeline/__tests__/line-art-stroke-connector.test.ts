@@ -77,6 +77,33 @@ describe("connectLineArtRunObjects", () => {
     expect(run).toBeDefined();
     expect(run?.shape.outer).toEqual(contour);
   });
+
+  it("does not merge polygonal run contours by arbitrary contour endpoints", () => {
+    const firstContour: Point2D[] = [
+      [0, 0],
+      [0, 1],
+      [4, 1],
+      [4, 0],
+    ];
+    const secondContour: Point2D[] = [
+      [4, -0.8],
+      [4, -2],
+      [5, -2],
+      [5, -0.8],
+    ];
+    const graph = buildDesignGraph(makeDesign([
+      makeRun("first", firstContour, 0),
+      makeRun("second", secondContour, 1),
+    ]));
+
+    const connected = connectLineArtRunObjects(graph);
+    const runObjects = connected.design.objects.filter((object) => object.kind === "run");
+
+    expect(runObjects).toHaveLength(2);
+    expect(runObjects.map((object) => object.id)).toEqual(["first", "second"]);
+    expect(runObjects[0].shape.outer).toEqual(firstContour);
+    expect(runObjects[1].shape.outer).toEqual(secondContour);
+  });
 });
 
 function makeDesign(objects: EmbroideryObject[]): EmbroideryDesign {

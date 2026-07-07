@@ -8,6 +8,7 @@ type RunComponent = {
   layer: string;
   merged: boolean;
   closed: boolean;
+  canMerge: boolean;
 };
 
 const MERGE_GAP_MM = 1.5;
@@ -61,6 +62,7 @@ function connectRunGroup(objects: EmbroideryObject[]): EmbroideryObject[] {
     layer: object.layer ?? "none",
     merged: false,
     closed: false,
+    canMerge: isMergeableRunPath(object),
   }));
 
   let changed = true;
@@ -92,7 +94,7 @@ function objectRunPath(object: EmbroideryObject): Point2D[] {
 }
 
 function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: RunComponent } | null {
-  if (a.colorIndex !== b.colorIndex || a.layer !== b.layer || a.closed || b.closed) return null;
+  if (!a.canMerge || !b.canMerge || a.colorIndex !== b.colorIndex || a.layer !== b.layer || a.closed || b.closed) return null;
   const variants: Array<[Point2D[], Point2D[]]> = [
     [a.path, b.path],
     [a.path, reversePath(b.path)],
@@ -117,8 +119,14 @@ function bestMerge(a: RunComponent, b: RunComponent): { gap: number; component: 
       layer: a.layer,
       merged: true,
       closed: false,
+      canMerge: true,
     },
   };
+}
+
+function isMergeableRunPath(object: EmbroideryObject): boolean {
+  const outer = stripClosingDuplicate(object.shape.outer);
+  return outer.length >= 2 && outer.length <= 3 && !isExplicitlyClosed(object.shape.outer);
 }
 
 function finalizeComponent(component: RunComponent): RunComponent {
@@ -147,7 +155,7 @@ function isNoiseComponent(component: RunComponent): boolean {
 
 function componentToObject(component: RunComponent): EmbroideryObject {
   const source = component.objects[0];
-  if (component.objects.length === 1 && !component.merged && !component.closed) {
+  if (component.objects.length === 1 && !component.merged) {
     return source;
   }
   const path = component.path.map(([x, y]) => [x, y] as Point2D);
@@ -167,6 +175,10 @@ function stripClosingDuplicate(points: Point2D[]): Point2D[] {
   const out = points.map(([x, y]) => [x, y] as Point2D);
   if (distance(out[0], out[out.length - 1]) <= 1e-6) out.pop();
   return out;
+}
+
+function isExplicitlyClosed(points: Point2D[]): boolean {
+  return points.length >= 3 && distance(points[0], points[points.length - 1]) <= 1e-6;
 }
 
 function inferClosed(path: Point2D[], hasHoles: boolean): boolean {
