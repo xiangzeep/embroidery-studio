@@ -216,30 +216,47 @@ class ExportEngine:
         last_x: Optional[int],
         last_y: Optional[int],
     ) -> Tuple[Optional[int], Optional[int]]:
-        """Write one continuous path. Never stitch-connect separate paths."""
+        """Write one continuous path, stitching safe in-object gaps."""
         if len(path) < 2:
             return last_x, last_y
 
         first_x, first_y = int(round(path[0][0])), int(round(path[0][1]))
+        connected_to_previous = False
         if last_x is not None and last_y is not None:
             gap = float(np.hypot(first_x - last_x, first_y - last_y))
-            if gap > self.trim_threshold_units:
+            if gap <= self.jump_threshold_units:
+                self._write_stitch_segment(pattern, last_x, last_y, first_x, first_y)
+                connected_to_previous = True
+            elif gap > self.trim_threshold_units:
                 pattern.add_stitch_absolute(pyembroidery.TRIM, last_x, last_y)
-        pattern.add_stitch_absolute(pyembroidery.JUMP, first_x, first_y)
+        if not connected_to_previous:
+            pattern.add_stitch_absolute(pyembroidery.JUMP, first_x, first_y)
 
         prev_x, prev_y = first_x, first_y
         for x, y in path[1:]:
             ix, iy = int(round(x)), int(round(y))
-            dist = float(np.hypot(ix - prev_x, iy - prev_y))
-            if dist > self.max_stitch_units:
-                n_splits = int(np.ceil(dist / self.max_stitch_units))
-                for s in range(1, n_splits + 1):
-                    t = s / n_splits
-                    sx = int(round(prev_x + t * (ix - prev_x)))
-                    sy = int(round(prev_y + t * (iy - prev_y)))
-                    pattern.add_stitch_absolute(pyembroidery.STITCH, sx, sy)
-            else:
-                pattern.add_stitch_absolute(pyembroidery.STITCH, ix, iy)
+            self._write_stitch_segment(pattern, prev_x, prev_y, ix, iy)
             prev_x, prev_y = ix, iy
 
         return prev_x, prev_y
+
+    def _write_stitch_segment(
+        self,
+        pattern: pyembroidery.EmbPattern,
+        prev_x: int,
+        prev_y: int,
+        ix: int,
+        iy: int,
+    ):
+        dist = float(np.hypot(ix - prev_x, iy - prev_y))
+        if dist <= 1e-6:
+            return
+        if dist > self.max_stitch_units:
+            n_splits = int(np.ceil(dist / self.max_stitch_units))
+            for s in range(1, n_splits + 1):
+                t = s / n_splits
+                sx = int(round(prev_x + t * (ix - prev_x)))
+                sy = int(round(prev_y + t * (iy - prev_y)))
+                pattern.add_stitch_absolute(pyembroidery.STITCH, sx, sy)
+        else:
+            pattern.add_stitch_absolute(pyembroidery.STITCH, ix, iy)

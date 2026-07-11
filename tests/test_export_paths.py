@@ -159,6 +159,48 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(regions[0][0], 1)
         self.assertEqual(int(np.count_nonzero(regions[0][1])), 40)
 
+    def test_segmentation_preserves_dark_outline_on_canvas(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        image = np.full((40, 40, 3), 52, dtype=np.uint8)
+        image[10:30, 10:30] = (0, 0, 0)
+        image[14:26, 14:26] = (80, 190, 110)
+        thread_map = np.zeros((40, 40), dtype=np.int32)
+        thread_map[10:30, 10:30] = 1
+        thread_map[14:26, 14:26] = 2
+
+        settings = project_mod.QuantizationSettings(min_region_area_px=1)
+        regions = image_mod.ImageEngine.segment_regions(thread_map, settings, image)
+        tids = {tid for tid, _ in regions}
+
+        self.assertNotIn(0, tids)
+        self.assertIn(1, tids)
+        self.assertIn(2, tids)
+
+    def test_tiny_real_color_layers_are_not_merged_away(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(110, 220, 130)),
+            thread_mod.ThreadColor(name="Mid Green", color_rgb=(40, 175, 60)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(15, 110, 30)),
+        ]
+        mask_large = np.zeros((100, 100), dtype=np.uint8)
+        mask_large[10:60, 10:60] = 255
+        mask_tiny = np.zeros((100, 100), dtype=np.uint8)
+        mask_tiny[70:75, 70:75] = 255
+        mask_dark = np.zeros((100, 100), dtype=np.uint8)
+        mask_dark[80:86, 20:26] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, mask_large), (1, mask_tiny), (2, mask_dark)],
+            palette,
+        )
+
+        self.assertEqual({layer.thread_name for layer in layers}, {"Light Green", "Mid Green", "Dark Green"})
+
     def test_scanline_fill_chains_rows_to_reduce_jumps(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -177,6 +219,55 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertLessEqual(len(paths), 2)
         self.assertGreater(sum(len(path) for path in paths), 8)
+
+    def test_default_fill_settings_are_dense_and_compensated(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        mask = np.zeros((60, 60), dtype=np.uint8)
+        mask[10:50, 14:46] = 255
+
+        settings = image_mod.ImageEngine._default_stitch_settings_for_mask(mask)
+
+        self.assertEqual(settings.fill_mode, "scanline")
+        self.assertLessEqual(settings.row_spacing_mm, 0.20)
+        self.assertGreaterEqual(settings.density, 1.35)
+        self.assertGreaterEqual(settings.pull_compensation_mm, 0.18)
+
+    def test_mask_polygon_regularizes_jagged_edges(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        for y in range(8, 32):
+            x0 = 8 + (y % 3)
+            x1 = 32 - (y % 2)
+            mask[y, x0:x1] = 255
+
+        poly = engine._mask_to_polygon(mask, compensation_mm=0.25)
+
+        self.assertIsNotNone(poly)
+        self.assertTrue(poly.is_valid)
+        self.assertGreater(poly.area, float(np.count_nonzero(mask)))
+        self.assertLess(len(poly.exterior.coords), 40)
+
+    def test_export_stitch_connects_nearby_paths_to_reduce_jumps(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(12.0, 0.0), (20.0, 0.0)],
+        ]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [cmd for _, _, cmd in pattern.stitches]
+
+        self.assertEqual(commands.count(pyembroidery.JUMP), 1)
 
     def test_export_omits_empty_layers_from_threadlist(self):
         install_fake_pyembroidery()

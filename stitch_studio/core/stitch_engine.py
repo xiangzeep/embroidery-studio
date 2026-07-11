@@ -1118,15 +1118,21 @@ class StitchEngine:
 
     def _mask_to_polygon(self, mask: np.ndarray, compensation_mm: float = 0) -> Optional[Polygon]:
         """Convert binary mask to Shapely polygon."""
+        clean = (mask > 0).astype(np.uint8) * 255
+        if np.count_nonzero(clean) == 0:
+            return None
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=1)
         contours, _ = cv2.findContours(
-            mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+            clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
         if not contours:
             return None
 
         # Take largest contour
         contour = max(contours, key=cv2.contourArea)
-        epsilon = max(0.6, 0.12 * self.px_per_mm)
+        epsilon = max(0.9, 0.18 * self.px_per_mm)
         contour = cv2.approxPolyDP(contour, epsilon, closed=True)
         pts = contour[:, 0, :].tolist()
         if len(pts) < 3:
@@ -1139,7 +1145,16 @@ class StitchEngine:
         # Apply pull compensation (expand polygon)
         if compensation_mm > 0:
             comp_px = compensation_mm * self.px_per_mm
-            poly = poly.buffer(comp_px)
+            poly = poly.buffer(comp_px, join_style=1)
+
+        smooth_px = max(0.3, 0.08 * self.px_per_mm)
+        poly = poly.buffer(smooth_px, join_style=1).buffer(-smooth_px, join_style=1)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        simplify_px = max(0.5, 0.12 * self.px_per_mm)
+        poly = poly.simplify(simplify_px, preserve_topology=True)
+        if hasattr(poly, "geoms"):
+            poly = max(poly.geoms, key=lambda geom: geom.area)
 
         return poly
 

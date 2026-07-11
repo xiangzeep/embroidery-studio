@@ -192,7 +192,7 @@ class ImageEngine:
         # First pass: dominant border color. The tolerance covers antialiased
         # canvas edges without swallowing saturated artwork.
         candidate = dist <= 36
-        neutral_canvas = (chroma <= 18) & ((luminance >= 238) | (luminance <= 24))
+        neutral_canvas = (chroma <= 18) & (luminance >= 238)
         candidate |= neutral_canvas
 
         # Keep only components that are actually connected to the image border.
@@ -269,7 +269,7 @@ class ImageEngine:
 
         layers = list(layer_map.items())
         areas = {tid: layer_area(layer) for tid, layer in layers}
-        tiny_limit = max(8, int(0.004 * image_area))
+        tiny_limit = max(8, int(0.0015 * image_area))
 
         for tid, layer in list(layers):
             area = areas.get(tid, 0)
@@ -282,7 +282,7 @@ class ImageEngine:
                     continue
                 other_color = np.array(other.thread_color_rgb, dtype=np.float64)
                 dist = float(np.linalg.norm(color - other_color))
-                if dist <= 58:
+                if dist <= 28:
                     candidates.append((dist, other_tid, other))
             if not candidates:
                 continue
@@ -337,13 +337,13 @@ class ImageEngine:
 
         return StitchSettings(
             fill_mode="scanline",
-            stitch_length_mm=2.2,
-            row_spacing_mm=0.24,
-            density=1.25,
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
             underlay=False,
             underlay_density=0.25,
             contour_count=0,
-            pull_compensation_mm=0.12,
+            pull_compensation_mm=0.22,
         )
 
 
