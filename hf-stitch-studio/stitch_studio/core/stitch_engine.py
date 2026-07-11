@@ -175,7 +175,7 @@ class StitchEngine:
         rotated = shapely_rotate(poly, -angle, origin=centroid)
         minx, miny, maxx, maxy = rotated.bounds
 
-        paths: List[List[Tuple[float, float]]] = []
+        row_paths: List[List[Tuple[float, float]]] = []
         y = miny + pitch_px / 2
         row_idx = 0
 
@@ -202,12 +202,15 @@ class StitchEngine:
                     pt = shapely_rotate(Point(px, py), angle, origin=centroid)
                     path.append((pt.x, pt.y))
                 if len(path) >= 2:
-                    paths.append(path)
+                    row_paths.append(path)
 
             y += pitch_px
             row_idx += 1
 
-        return paths
+        return self._chain_fill_rows(
+            row_paths,
+            max_gap_px=max(pitch_px * 2.8, stitch_len_px * 1.8),
+        )
 
     # ========== CONTOUR FILL ==========
 
@@ -650,118 +653,35 @@ class StitchEngine:
                 filtered[labels == lbl] = 255
         return filtered
 
-    def _restore_line_art_run_mask(
-        self,
-        combined: np.ndarray,
-        image: Optional[np.ndarray],
-    ) -> np.ndarray:
-        """Recover quantization-dropped line pixels close to known run regions."""
-        prepared = (combined > 0).astype(np.uint8) * 255
-        if image is None or image.shape[:2] != prepared.shape:
-            return prepared
-
-        rgb = image[:, :, :3]
-        near_white = np.min(rgb, axis=2) >= 245
-        if float(np.mean(near_white)) < 0.55:
-            return prepared
-
-        foreground = (np.min(rgb, axis=2) < 248).astype(np.uint8) * 255
-        radius = max(1, min(6, int(np.ceil(self.px_per_mm * 2.0))))
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (radius * 2 + 1, radius * 2 + 1),
-        )
-        support = cv2.dilate(prepared, kernel)
-        restored = cv2.bitwise_or(prepared, cv2.bitwise_and(foreground, support))
-        tiny = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, tiny)
-        restored = self._restore_compact_source_loops(restored, foreground)
-        return cv2.morphologyEx(restored, cv2.MORPH_CLOSE, tiny)
-
-    def _restore_compact_source_loops(
-        self,
-        restored: np.ndarray,
-        foreground: np.ndarray,
-    ) -> np.ndarray:
-        contours, hierarchy = cv2.findContours(
-            foreground, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE
-        )
-        if hierarchy is None:
-            return restored
-
-        distance = cv2.distanceTransform((restored == 0).astype(np.uint8), cv2.DIST_L2, 5)
-        support = np.zeros_like(restored)
-        near_limit = max(3.0, self.px_per_mm * 2.5)
-        stroke_width = max(2, min(5, int(np.ceil(self.px_per_mm * 1.5))))
-        for index, contour in enumerate(contours):
-            if hierarchy[0][index][3] < 0:
-                continue
-            area = abs(cv2.contourArea(contour))
-            perimeter = cv2.arcLength(contour, True)
-            if area < 20.0 or perimeter < 18.0:
-                continue
-            compactness = 4.0 * np.pi * area / max(perimeter * perimeter, 1.0)
-            if compactness < 0.14:
-                continue
-            points = contour[:, 0, :]
-            near_ratio = float(np.mean([distance[y, x] <= near_limit for x, y in points]))
-            if near_ratio < 0.70:
-                continue
-            cv2.drawContours(support, [contour], -1, 255, stroke_width)
-
-        if not np.any(support):
-            return restored
-        halo = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        source_loops = cv2.bitwise_and(foreground, cv2.dilate(support, halo))
-        return cv2.bitwise_or(restored, source_loops)
-
-    def _extract_closed_run_loops(
-        self,
-        mask: np.ndarray,
-    ) -> Tuple[List[List[Tuple[float, float]]], np.ndarray]:
-        contours, hierarchy = cv2.findContours(
-            (mask > 0).astype(np.uint8) * 255,
-            cv2.RETR_CCOMP,
-            cv2.CHAIN_APPROX_NONE,
-        )
-        exclusion = np.zeros_like(mask, dtype=np.uint8)
-        if hierarchy is None:
-            return [], exclusion
-
-        loops: List[List[Tuple[float, float]]] = []
-        stitch_len = max(1.0, 1.8 * self.px_per_mm)
-        for index, contour in enumerate(contours):
-            if hierarchy[0][index][3] < 0:
-                continue
-            area = abs(cv2.contourArea(contour))
-            perimeter = cv2.arcLength(contour, True)
-            if area < 20.0 or perimeter < 18.0:
-                continue
-            compactness = 4.0 * np.pi * area / max(perimeter * perimeter, 1.0)
-            if compactness < 0.12:
-                continue
-            points = [(float(x), float(y)) for x, y in contour[:, 0, :]]
-            if len(points) < 4:
-                continue
-            points.append(points[0])
-            simplified = self._simplify_run_path(points, closed=True)
-            smoothed = self._chaikin_smooth(simplified, closed=True, iterations=2)
-            resampled = self._resample_run_path(smoothed, stitch_len, closed=True)
-            if len(resampled) >= 4:
-                loops.append(self._ensure_closed_path(resampled))
-                cv2.drawContours(exclusion, [contour], -1, 255, thickness=max(2, int(self.px_per_mm)))
-
-        return loops, exclusion
-
     def _trace_skeleton_component(
         self, component: np.ndarray,
     ) -> List[List[Tuple[float, float]]]:
+        """Split a skeleton component into graph edges, preserving loops.
+
+        A previous implementation walked pixels with a global visited set. That
+        cut paths at junction pixels and made later branches unable to reuse the
+        same junction, leaving visible breaks. This walks unvisited graph edges
+        instead, so every incident branch gets a clean endpoint at the junction
+        and can be reassembled by _assemble_run_components().
+        """
         ys, xs = np.where(component)
         pixels = {(int(x), int(y)) for x, y in zip(xs, ys)}
         if not pixels:
             return []
 
-        degree = {p: len(self._skeleton_neighbors(p, pixels)) for p in pixels}
+        def neighbors(pixel):
+            x, y = pixel
+            result = []
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nb = (x + dx, y + dy)
+                    if nb in pixels:
+                        result.append(nb)
+            return result
+
+        degree = {p: len(neighbors(p)) for p in pixels}
         nodes = {p for p, d in degree.items() if d != 2}
         visited_edges = set()
         paths = []
@@ -776,10 +696,7 @@ class StitchEngine:
             return edge_key(a, b) in visited_edges
 
         def choose_next(prev, current):
-            options = [
-                p for p in self._skeleton_neighbors(current, pixels)
-                if p != prev and not is_marked(current, p)
-            ]
+            options = [p for p in neighbors(current) if p != prev and not is_marked(current, p)]
             if not options:
                 return None
             vx = current[0] - prev[0]
@@ -795,8 +712,9 @@ class StitchEngine:
 
             return max(options, key=score)
 
+        # Trace edges that begin/end at endpoints or junctions.
         for node in sorted(nodes):
-            for nb in self._skeleton_neighbors(node, pixels):
+            for nb in neighbors(node):
                 if is_marked(node, nb):
                     continue
                 path = [node, nb]
@@ -814,21 +732,16 @@ class StitchEngine:
                 if len(path) >= 2:
                     paths.append([(float(x), float(y)) for x, y in path])
 
+        # Components with no endpoints/junctions are closed loops.
         for start in sorted(pixels):
-            unused = [
-                nb for nb in self._skeleton_neighbors(start, pixels)
-                if not is_marked(start, nb)
-            ]
+            unused = [nb for nb in neighbors(start) if not is_marked(start, nb)]
             if not unused:
                 continue
             path = [start]
             prev = None
             current = start
             while True:
-                options = [
-                    p for p in self._skeleton_neighbors(current, pixels)
-                    if p != prev and not is_marked(current, p)
-                ]
+                options = [p for p in neighbors(current) if p != prev and not is_marked(current, p)]
                 if not options:
                     break
                 nxt = options[0]
@@ -842,29 +755,12 @@ class StitchEngine:
 
         return paths
 
-    def _skeleton_neighbors(self, pixel, point_set):
-        x, y = pixel
-        result = []
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                nb = (x + dx, y + dy)
-                if nb not in point_set:
-                    continue
-                if dx != 0 and dy != 0:
-                    horizontal = (x + dx, y)
-                    vertical = (x, y + dy)
-                    if horizontal in point_set or vertical in point_set:
-                        continue
-                result.append(nb)
-        return result
-
     def _assemble_run_components(
         self,
         raw_paths: List[List[Tuple[float, float]]],
         mask: np.ndarray,
     ) -> List[List[Tuple[float, float]]]:
+        """Merge skeleton graph edges into logical continuous run components."""
         min_noise_len = 0.55 * self.px_per_mm
         kept = []
         for path in raw_paths:
@@ -878,12 +774,17 @@ class StitchEngine:
         if not kept:
             return []
 
-        merged = self._merge_close_run_paths(kept, max_gap_px=2.6 * self.px_per_mm)
+        merged = self._merge_close_run_paths(
+            kept,
+            max_gap_px=2.6 * self.px_per_mm,
+        )
+
         repaired = []
         for path in merged:
             if len(path) < 2:
                 continue
-            if self._should_close_path(path, mask):
+            closed = self._should_close_path(path, mask)
+            if closed:
                 path = self._ensure_closed_path(path)
             repaired.append(path)
         return repaired
@@ -901,6 +802,7 @@ class StitchEngine:
         if length > 0 and gap / length <= 0.10 and gap <= 3.0 * self.px_per_mm:
             return True
 
+        # Closed bitmap islands should become closed run loops if endpoints are near.
         contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         has_hole = hierarchy is not None and any(h[3] >= 0 for h in hierarchy[0])
         return bool(has_hole and gap <= 3.2 * self.px_per_mm)
@@ -908,6 +810,7 @@ class StitchEngine:
     def _merge_close_run_paths(
         self, paths: List[List[Tuple[float, float]]], max_gap_px: float,
     ) -> List[List[Tuple[float, float]]]:
+        """Heal small line-art gaps while avoiding long accidental connectors."""
         changed = True
         paths = [p[:] for p in paths if len(p) >= 2]
         while changed:
@@ -924,15 +827,18 @@ class StitchEngine:
             if best is None:
                 break
             _, i, j, a, b = best
-            paths[i] = self._join_paths(paths[i], paths[j], a, b)
+            merged = self._join_paths(paths[i], paths[j], a, b)
+            paths[i] = merged
             del paths[j]
             changed = True
         return paths
 
     def _best_endpoint_match(self, a, b, max_gap):
+        ends_a = [a[0], a[-1]]
+        ends_b = [b[0], b[-1]]
         best = None
-        for ia, pa in enumerate([a[0], a[-1]]):
-            for ib, pb in enumerate([b[0], b[-1]]):
+        for ia, pa in enumerate(ends_a):
+            for ib, pb in enumerate(ends_b):
                 gap = float(np.hypot(pa[0] - pb[0], pa[1] - pb[1]))
                 if gap > max_gap:
                     continue
@@ -940,18 +846,21 @@ class StitchEngine:
                 right = b[:] if ib == 0 else b[::-1]
                 angle = self._path_end_angle(left) - self._path_start_angle(right)
                 angle = abs((angle + np.pi) % (2 * np.pi) - np.pi)
-                is_smooth_continuation = angle <= np.deg2rad(68)
-                is_cusp_closure = angle >= np.deg2rad(135) and gap <= 1.25 * self.px_per_mm
-                if is_smooth_continuation or is_cusp_closure:
+                # Allow near-touching endpoints even at a sharp angle. This keeps
+                # junctions connected without inventing long diagonal bridges.
+                if angle <= np.deg2rad(68) or gap <= 1.25 * self.px_per_mm:
                     if best is None or gap + angle * self.px_per_mm < best[0] + best[3] * self.px_per_mm:
                         best = (gap, ia, ib, angle)
         return best
 
-    def _best_path_join(self, a, b, max_gap):
-        match = self._best_endpoint_match(a, b, max_gap)
-        if match is None:
-            return None
-        return self._join_paths(a, b, match[1], match[2])
+    def _endpoint_angle(self, path, end_index):
+        if len(path) < 2:
+            return 0.0
+        if end_index == 0:
+            p0, p1 = path[1], path[0]
+        else:
+            p0, p1 = path[-2], path[-1]
+        return float(np.arctan2(p1[1] - p0[1], p1[0] - p0[0]))
 
     def _path_start_angle(self, path):
         if len(path) < 2:
@@ -1002,110 +911,47 @@ class StitchEngine:
             return points
         return points + [points[0]]
 
-    def _simplify_run_path(
+    def _chain_fill_rows(
         self,
-        points: List[Tuple[float, float]],
-        closed: bool,
-    ) -> List[Tuple[float, float]]:
-        if len(points) < 4:
-            return points
-        source = self._ensure_closed_path(points) if closed else points[:]
-        corner_source = source[:-1] if closed and source[0] == source[-1] else source
-        corners = [p for i, p in enumerate(corner_source) if self._is_acute_corner(source, i, closed)]
-        arr = np.array(source, dtype=np.float32)
-        epsilon = max(0.50, self.px_per_mm * 0.55)
-        simplified = cv2.approxPolyDP(arr.reshape((-1, 1, 2)), epsilon, closed=closed)
-        result = [(float(p[0][0]), float(p[0][1])) for p in simplified]
-        for corner in corners:
-            if not any(np.hypot(corner[0] - p[0], corner[1] - p[1]) <= 0.35 for p in result):
-                insert_at = min(
-                    range(len(result)),
-                    key=lambda idx: np.hypot(corner[0] - result[idx][0], corner[1] - result[idx][1]),
-                )
-                result.insert(insert_at, corner)
-        return self._ensure_closed_path(result) if closed else result
+        paths: List[List[Tuple[float, float]]],
+        max_gap_px: float,
+    ) -> List[List[Tuple[float, float]]]:
+        """Join adjacent fill rows into boustrophedon components.
 
-    def _chaikin_smooth(
-        self,
-        points: List[Tuple[float, float]],
-        closed: bool = False,
-        iterations: int = 1,
-    ) -> List[Tuple[float, float]]:
-        if len(points) < 3:
-            return points
-        current = self._ensure_closed_path(points) if closed else points[:]
-        for _ in range(iterations):
-            corners = {i for i in range(len(current)) if self._is_acute_corner(current, i, closed)}
-            source = current[:-1] if closed and current[0] == current[-1] else current
-            refined = []
-            if not closed:
-                refined.append(source[0])
-            count = len(source)
-            limit = count if closed else count - 1
-            for i in range(limit):
-                p0 = np.array(source[i], dtype=np.float64)
-                p1 = np.array(source[(i + 1) % count], dtype=np.float64)
-                q = 0.75 * p0 + 0.25 * p1
-                r = 0.25 * p0 + 0.75 * p1
-                if i in corners:
-                    refined.append((float(p0[0]), float(p0[1])))
-                refined.append((float(q[0]), float(q[1])))
-                if (i + 1) % count in corners:
-                    refined.append((float(p1[0]), float(p1[1])))
-                refined.append((float(r[0]), float(r[1])))
-            if not closed:
-                refined.append(source[-1])
-            elif refined:
-                refined.append(refined[0])
-            current = self._remove_duplicate_points(refined, min_dist=0.05)
-        return self._ensure_closed_path(current) if closed else current
+        Export treats every path boundary as a jump. Scanline fill naturally
+        has many rows, but adjacent rows are meant to be connected inside the
+        filled object. Chaining nearby rows preserves island boundaries while
+        preventing one jump per row in dense tatami/scanline fills.
+        """
+        chains: List[List[Tuple[float, float]]] = []
+        current: List[Tuple[float, float]] = []
 
-    def _is_acute_corner(self, points, index, closed=False) -> bool:
-        if len(points) < 3:
-            return False
-        if not closed and (index <= 0 or index >= len(points) - 1):
-            return False
-        pts = points[:-1] if closed and points[0] == points[-1] else points
-        if not pts:
-            return False
-        i = index % len(pts)
-        prev_pt = np.array(pts[(i - 1) % len(pts)], dtype=np.float64)
-        cur_pt = np.array(pts[i], dtype=np.float64)
-        next_pt = np.array(pts[(i + 1) % len(pts)], dtype=np.float64)
-        v1 = prev_pt - cur_pt
-        v2 = next_pt - cur_pt
-        n1 = np.linalg.norm(v1)
-        n2 = np.linalg.norm(v2)
-        if n1 < 1e-6 or n2 < 1e-6:
-            return False
-        angle = np.arccos(float(np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)))
-        return angle <= np.deg2rad(62)
+        for path in paths:
+            if len(path) < 2:
+                continue
+            if not current:
+                current = path[:]
+                continue
 
-    def _resample_run_path(
-        self,
-        points: List[Tuple[float, float]],
-        stitch_len: float,
-        closed: bool,
-    ) -> List[Tuple[float, float]]:
-        if len(points) < 2:
-            return points
+            forward_gap = float(np.hypot(
+                current[-1][0] - path[0][0],
+                current[-1][1] - path[0][1],
+            ))
+            reverse_gap = float(np.hypot(
+                current[-1][0] - path[-1][0],
+                current[-1][1] - path[-1][1],
+            ))
 
-        source = self._ensure_closed_path(points) if closed else points[:]
-        anchors = {
-            tuple(source[i])
-            for i in range(len(source))
-            if self._is_acute_corner(source, i, closed)
-        }
-        resampled = self._resample_line(source, stitch_len, 0)
-        for anchor in anchors:
-            if not any(np.hypot(anchor[0] - p[0], anchor[1] - p[1]) <= 0.35 for p in resampled):
-                insert_at = min(
-                    range(len(resampled)),
-                    key=lambda idx: np.hypot(anchor[0] - resampled[idx][0], anchor[1] - resampled[idx][1]),
-                )
-                resampled.insert(insert_at, anchor)
+            if min(forward_gap, reverse_gap) <= max_gap_px:
+                next_path = path if forward_gap <= reverse_gap else path[::-1]
+                current.extend(next_path)
+            else:
+                chains.append(current)
+                current = path[:]
 
-        return self._ensure_closed_path(resampled) if closed else resampled
+        if current:
+            chains.append(current)
+        return chains
 
     def _polyline_length(self, points: List[Tuple[float, float]]) -> float:
         if len(points) < 2:

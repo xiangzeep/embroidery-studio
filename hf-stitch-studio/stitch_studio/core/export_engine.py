@@ -40,13 +40,23 @@ class ExportEngine:
         # Metadata
         pattern.extras['name'] = project.name
 
-        # Process layers in order
-        sorted_layers = sorted(project.layers, key=lambda l: l.order)
-
-        for layer_idx, layer in enumerate(sorted_layers):
+        # Process only layers that will actually write stitches. This prevents
+        # blank/background or empty antialias layers from becoming DST colors.
+        drawable_layers = []
+        for layer in sorted(project.layers, key=lambda l: l.order):
             if not layer.visible:
                 continue
+            region_paths = []
+            for region in layer.regions:
+                if not region.visible:
+                    continue
+                paths = self._region_paths(region)
+                if paths:
+                    region_paths.append((region, paths))
+            if region_paths:
+                drawable_layers.append((layer, region_paths))
 
+        for layer_idx, (layer, region_paths) in enumerate(drawable_layers):
             # Add thread for this layer
             thread = pyembroidery.EmbThread()
             r, g, b = layer.thread_color_rgb
@@ -59,17 +69,10 @@ class ExportEngine:
             if layer_idx > 0:
                 pattern.add_stitch_absolute(pyembroidery.COLOR_BREAK, 0, 0)
 
-            wrote_layer_stitches = False
             last_x, last_y = None, None
-            for region in layer.regions:
-                if not region.visible:
-                    continue
-                for path in self._region_paths(region):
+            for _, paths in region_paths:
+                for path in self._order_paths_from(paths, last_x, last_y):
                     last_x, last_y = self._write_path(pattern, path, last_x, last_y)
-                    wrote_layer_stitches = True
-
-            if not wrote_layer_stitches:
-                continue
 
         # End pattern
         pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
@@ -171,6 +174,40 @@ class ExportEngine:
         if region.stitch_points:
             return [region.stitch_points]
         return []
+
+    def _order_paths_from(
+        self,
+        paths: List[List[Tuple[float, float]]],
+        last_x: Optional[int],
+        last_y: Optional[int],
+    ) -> List[List[Tuple[float, float]]]:
+        """Nearest-neighbor path ordering with reversible path direction."""
+        remaining = [p[:] for p in paths if len(p) >= 2]
+        ordered: List[List[Tuple[float, float]]] = []
+        current = None if last_x is None or last_y is None else (float(last_x), float(last_y))
+
+        while remaining:
+            if current is None:
+                path = remaining.pop(0)
+                ordered.append(path)
+                current = path[-1]
+                continue
+
+            best = None
+            for idx, path in enumerate(remaining):
+                d_start = float(np.hypot(path[0][0] - current[0], path[0][1] - current[1]))
+                d_end = float(np.hypot(path[-1][0] - current[0], path[-1][1] - current[1]))
+                if best is None or min(d_start, d_end) < best[0]:
+                    best = (min(d_start, d_end), idx, d_end < d_start)
+
+            _, idx, reverse = best
+            path = remaining.pop(idx)
+            if reverse:
+                path = path[::-1]
+            ordered.append(path)
+            current = path[-1]
+
+        return ordered
 
     def _write_path(
         self,

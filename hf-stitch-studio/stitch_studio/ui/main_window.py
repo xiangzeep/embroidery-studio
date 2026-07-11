@@ -460,7 +460,9 @@ class MainWindow(QMainWindow):
             self.project.quantized_map = thread_map
 
             # Segment
-            regions = self.image_engine.segment_regions(thread_map, quant_settings)
+            regions = self.image_engine.segment_regions(
+                thread_map, quant_settings, processed
+            )
 
             # Build layers
             layers = self.image_engine.build_layers_from_regions(regions, all_threads)

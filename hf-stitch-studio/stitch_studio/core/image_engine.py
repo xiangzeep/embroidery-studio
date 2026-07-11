@@ -6,7 +6,7 @@ segmentation into regions, and flow field computation.
 
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from PIL import Image, ImageEnhance, ImageFilter
 from scipy.ndimage import gaussian_filter
 from skimage.color import rgb2lab, deltaE_ciede2000
@@ -115,6 +115,7 @@ class ImageEngine:
     def segment_regions(
         thread_map: np.ndarray,
         settings: QuantizationSettings,
+        source_image: Optional[np.ndarray] = None,
     ) -> List[Tuple[int, np.ndarray]]:
         """
         Segment thread_map into connected regions.
@@ -123,16 +124,26 @@ class ImageEngine:
             list of (thread_idx, mask) tuples where mask is H×W uint8
         """
         regions = []
+        foreground = None
+        if source_image is not None:
+            foreground = ~ImageEngine._detect_background_mask(source_image)
+
         kernel_size = settings.morphology_kernel_size
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                            (kernel_size, kernel_size))
 
         for tid in np.unique(thread_map):
             binary = (thread_map == tid).astype(np.uint8)
+            if foreground is not None:
+                binary = (binary & foreground.astype(np.uint8)).astype(np.uint8)
+                if int(binary.sum()) == 0:
+                    continue
 
             if settings.smooth_regions:
                 binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-                binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+                # Avoid MORPH_OPEN here: line-art strokes in the butterfly
+                # sample are often only a few pixels wide and opening with the
+                # default 5px kernel erases them before run-stitch generation.
 
             n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
                 binary, connectivity=8
@@ -149,14 +160,75 @@ class ImageEngine:
         return regions
 
     @staticmethod
+    def _detect_background_mask(image: np.ndarray) -> np.ndarray:
+        """Detect the dominant canvas/background from image borders.
+
+        Uploaded art commonly sits on white, black, or gray canvas. K-means
+        otherwise turns that canvas into a large stitch region, which then
+        covers the design and explodes jump/color counts. Border-connected
+        color matching removes only that canvas while preserving interior dark
+        outlines or highlights.
+        """
+        if image.ndim != 3 or image.shape[2] < 3:
+            return np.zeros(image.shape[:2], dtype=bool)
+
+        h, w = image.shape[:2]
+        if h == 0 or w == 0:
+            return np.zeros((h, w), dtype=bool)
+
+        rgb = image[:, :, :3].astype(np.int16)
+        border = np.concatenate([
+            rgb[0, :, :],
+            rgb[-1, :, :],
+            rgb[:, 0, :],
+            rgb[:, -1, :],
+        ], axis=0)
+        # Median is robust when a foreground stroke touches a small border area.
+        bg = np.median(border, axis=0)
+        dist = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+        luminance = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        chroma = rgb.max(axis=2) - rgb.min(axis=2)
+
+        # First pass: dominant border color. The tolerance covers antialiased
+        # canvas edges without swallowing saturated artwork.
+        candidate = dist <= 36
+        neutral_canvas = (chroma <= 18) & ((luminance >= 238) | (luminance <= 24))
+        candidate |= neutral_canvas
+
+        # Keep only components that are actually connected to the image border.
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            candidate.astype(np.uint8), connectivity=8
+        )
+        background = np.zeros((h, w), dtype=bool)
+        image_area = h * w
+        for lbl in range(1, n_labels):
+            touches_border = (
+                np.any(labels[0, :] == lbl) or
+                np.any(labels[-1, :] == lbl) or
+                np.any(labels[:, 0] == lbl) or
+                np.any(labels[:, -1] == lbl)
+            )
+            area = stats[lbl, cv2.CC_STAT_AREA]
+            if touches_border and area >= max(4, int(0.01 * image_area)):
+                background[labels == lbl] = True
+        return background
+
+    @staticmethod
     def build_layers_from_regions(
         regions: List[Tuple[int, np.ndarray]],
         palette_threads: List[ThreadColor],
     ) -> List[Layer]:
         """Group regions by thread color into layers."""
         layer_map = {}  # thread_idx -> Layer
+        if not regions:
+            return []
+
+        image_area = regions[0][1].shape[0] * regions[0][1].shape[1]
+        min_layer_area = max(3, int(0.0005 * image_area))
 
         for tid, mask in regions:
+            if int(np.count_nonzero(mask)) < min_layer_area:
+                continue
             if tid not in layer_map:
                 thread = palette_threads[tid] if tid < len(palette_threads) else None
                 layer = Layer(
@@ -174,6 +246,8 @@ class ImageEngine:
             region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(mask)
             layer_map[tid].add_region(region)
 
+        ImageEngine._merge_tiny_similar_layers(layer_map, image_area)
+
         # Sort layers: largest area (background) first
         layers = sorted(layer_map.values(),
                         key=lambda l: sum(r.mask.sum() for r in l.regions if r.mask is not None),
@@ -183,6 +257,40 @@ class ImageEngine:
             layer.order = i
 
         return layers
+
+    @staticmethod
+    def _merge_tiny_similar_layers(layer_map: Dict[int, Layer], image_area: int):
+        """Fold antialias slivers into nearby main colors instead of threads."""
+        if len(layer_map) <= 1:
+            return
+
+        def layer_area(layer: Layer) -> int:
+            return int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
+
+        layers = list(layer_map.items())
+        areas = {tid: layer_area(layer) for tid, layer in layers}
+        tiny_limit = max(8, int(0.004 * image_area))
+
+        for tid, layer in list(layers):
+            area = areas.get(tid, 0)
+            if area <= 0 or area > tiny_limit:
+                continue
+            color = np.array(layer.thread_color_rgb, dtype=np.float64)
+            candidates = []
+            for other_tid, other in layer_map.items():
+                if other_tid == tid or areas.get(other_tid, 0) <= area:
+                    continue
+                other_color = np.array(other.thread_color_rgb, dtype=np.float64)
+                dist = float(np.linalg.norm(color - other_color))
+                if dist <= 58:
+                    candidates.append((dist, other_tid, other))
+            if not candidates:
+                continue
+            _, target_tid, target = min(candidates, key=lambda item: item[0])
+            for region in layer.regions:
+                region.name = f"{target.name} region {len(target.regions) + 1}"
+                target.add_region(region)
+            del layer_map[tid]
 
     @staticmethod
     def _default_stitch_settings_for_mask(mask: np.ndarray) -> StitchSettings:
@@ -229,13 +337,13 @@ class ImageEngine:
 
         return StitchSettings(
             fill_mode="scanline",
-            stitch_length_mm=2.5,
-            row_spacing_mm=0.32,
-            density=1.15,
-            underlay=True,
-            underlay_density=0.35,
+            stitch_length_mm=2.2,
+            row_spacing_mm=0.24,
+            density=1.25,
+            underlay=False,
+            underlay_density=0.25,
             contour_count=0,
-            pull_compensation_mm=0.08,
+            pull_compensation_mm=0.12,
         )
 
 
