@@ -106,6 +106,19 @@ class ImageEngine:
         # Step 3: Map pixels to thread indices
         thread_map = np.array(assignments)[labels].reshape(h, w)
 
+        black_thread_idx = ImageEngine._find_black_thread_index(palette_threads)
+        if black_thread_idx is not None:
+            rgb = image[:, :, :3].astype(np.int16)
+            luminance = (
+                0.299 * rgb[:, :, 0] +
+                0.587 * rgb[:, :, 1] +
+                0.114 * rgb[:, :, 2]
+            )
+            chroma = rgb.max(axis=2) - rgb.min(axis=2)
+            near_black = (luminance <= 38) & (chroma <= 28)
+            thread_map[near_black] = black_thread_idx
+            assignments.append(black_thread_idx)
+
         # Deduplicate: if multiple clusters map to same thread
         used_indices = sorted(set(assignments))
 
@@ -151,13 +164,57 @@ class ImageEngine:
 
             for lbl in range(1, n_labels):
                 area = stats[lbl, cv2.CC_STAT_AREA]
-                if area >= settings.min_region_area_px:
+                min_area = ImageEngine._component_min_area(
+                    source_image,
+                    labels,
+                    lbl,
+                    settings.min_region_area_px,
+                )
+                if area >= min_area:
                     mask = (labels == lbl).astype(np.uint8) * 255
                     regions.append((int(tid), mask))
 
         # Sort by area (largest first = background first)
         regions.sort(key=lambda x: x[1].sum(), reverse=True)
         return regions
+
+    @staticmethod
+    def _find_black_thread_index(palette_threads: List[ThreadColor]) -> Optional[int]:
+        best = None
+        best_luminance = 255.0
+        for idx, thread in enumerate(palette_threads):
+            rgb = np.array(thread.color_rgb, dtype=np.float64)
+            luminance = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+            chroma = float(rgb.max() - rgb.min())
+            if luminance <= 45 and chroma <= 35 and luminance < best_luminance:
+                best = idx
+                best_luminance = luminance
+        return best
+
+    @staticmethod
+    def _component_min_area(
+        source_image: Optional[np.ndarray],
+        labels: np.ndarray,
+        label: int,
+        configured_min_area: int,
+    ) -> int:
+        if source_image is None:
+            return configured_min_area
+
+        pixels = source_image[labels == label]
+        if pixels.size == 0:
+            return configured_min_area
+
+        rgb = pixels[:, :3].astype(np.float64)
+        mean = rgb.mean(axis=0)
+        luminance = 0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2]
+        chroma = float(mean.max() - mean.min())
+        is_real_detail = luminance <= 115 or chroma >= 35
+        if not is_real_detail:
+            return configured_min_area
+
+        detail_floor = max(6, int(0.00012 * labels.size))
+        return min(configured_min_area, detail_floor)
 
     @staticmethod
     def _detect_background_mask(image: np.ndarray) -> np.ndarray:
@@ -313,11 +370,17 @@ class ImageEngine:
         short_axis = max(1, min(width, height))
         aspect = long_axis / short_axis
 
+        is_compact_fill_detail = (
+            fill_ratio >= 0.38 and
+            aspect <= 2.4 and
+            max_width_px >= 5.5
+        )
         is_thin_stroke = (
             area >= 8 and
             long_axis >= 12 and
+            not is_compact_fill_detail and
             (
-                median_width_px <= 5.0 or
+                (median_width_px <= 5.0 and (fill_ratio < 0.45 or aspect >= 2.4)) or
                 (fill_ratio < 0.34 and aspect >= 2.0 and max_width_px <= 12.0)
             )
         )

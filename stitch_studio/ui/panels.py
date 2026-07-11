@@ -836,8 +836,8 @@ class ImagePanel(QWidget):
 
         ql.addWidget(QLabel("Min Region (px²):"), 3, 0)
         self.spin_min_area = QSpinBox()
-        self.spin_min_area.setRange(10, 10000)
-        self.spin_min_area.setValue(200)
+        self.spin_min_area.setRange(1, 10000)
+        self.spin_min_area.setValue(40)
         ql.addWidget(self.spin_min_area, 3, 1)
 
         ql.addWidget(QLabel("Smooth Kernel:"), 4, 0)

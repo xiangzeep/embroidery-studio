@@ -178,6 +178,44 @@ class ExportPathTests(unittest.TestCase):
         self.assertIn(1, tids)
         self.assertIn(2, tids)
 
+    def test_default_segmentation_keeps_small_dark_detail_regions(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        image = np.full((80, 80, 3), 48, dtype=np.uint8)
+        image[22:62, 24:64] = (90, 190, 110)
+        image[10:20, 30:45] = (0, 0, 0)
+        thread_map = np.zeros((80, 80), dtype=np.int32)
+        thread_map[22:62, 24:64] = 2
+        thread_map[10:20, 30:45] = 1
+
+        regions = image_mod.ImageEngine.segment_regions(
+            thread_map,
+            project_mod.QuantizationSettings(),
+            image,
+        )
+        tids = {tid for tid, _ in regions}
+
+        self.assertNotIn(0, tids)
+        self.assertIn(1, tids)
+        self.assertIn(2, tids)
+
+    def test_compact_dark_detail_defaults_to_scanline_fill(self):
+        import cv2
+
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        cv2.fillPoly(
+            mask,
+            [np.array([[9, 24], [22, 9], [25, 27]], dtype=np.int32)],
+            255,
+        )
+
+        settings = image_mod.ImageEngine._default_stitch_settings_for_mask(mask)
+
+        self.assertEqual(settings.fill_mode, "scanline")
+
     def test_tiny_real_color_layers_are_not_merged_away(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
