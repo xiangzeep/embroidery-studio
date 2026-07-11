@@ -494,6 +494,132 @@ class StitchEngine:
 
         return self._merge_close_run_paths(paths, max_gap_px=2.4 * self.px_per_mm)
 
+    def _restore_line_art_run_mask(
+        self,
+        mask: np.ndarray,
+        image: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Recover nearby source line pixels that segmentation split away.
+
+        Run-stitch line art often arrives as a broken mask because anti-aliased
+        pixels quantize into small neighboring color islands. Only restore
+        source pixels that are both visibly non-background and close to the
+        current mask, so blank canvas/background areas cannot become stitches.
+        """
+        restored = (mask > 0).astype(np.uint8) * 255
+        if image is None or restored.size == 0 or np.count_nonzero(restored) == 0:
+            return restored
+        if image.shape[0] != restored.shape[0] or image.shape[1] != restored.shape[1]:
+            return restored
+
+        img = image
+        if img.ndim == 2:
+            rgb = np.repeat(img[:, :, None], 3, axis=2).astype(np.int16)
+            alpha = np.ones(restored.shape, dtype=bool)
+        else:
+            rgb = img[:, :, :3].astype(np.int16)
+            alpha = img[:, :, 3] > 8 if img.shape[2] >= 4 else np.ones(restored.shape, dtype=bool)
+
+        max_channel = rgb.max(axis=2)
+        min_channel = rgb.min(axis=2)
+        mean_channel = rgb.mean(axis=2)
+        chroma = max_channel - min_channel
+        non_background = alpha & (mean_channel < 248) & ((chroma > 6) | (mean_channel < 220))
+
+        radius_px = max(2, int(round(2.0 * self.px_per_mm)))
+        kernel_size = radius_px * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        near_existing_line = cv2.dilate(restored, kernel, iterations=1) > 0
+
+        recovered = np.where(non_background & near_existing_line, 255, 0).astype(np.uint8)
+        combined = np.maximum(restored, recovered)
+
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        return combined
+
+    def _extract_closed_run_loops(
+        self,
+        mask: np.ndarray,
+    ) -> Tuple[List[List[Tuple[float, float]]], np.ndarray]:
+        """Extract compact closed line-art islands as explicit run loops."""
+        loop_paths: List[List[Tuple[float, float]]] = []
+        exclusion = np.zeros_like(mask, dtype=np.uint8)
+        contours, hierarchy = cv2.findContours(
+            (mask > 0).astype(np.uint8) * 255,
+            cv2.RETR_CCOMP,
+            cv2.CHAIN_APPROX_NONE,
+        )
+        if hierarchy is None:
+            return loop_paths, exclusion
+
+        for idx, contour in enumerate(contours):
+            area = float(cv2.contourArea(contour))
+            if area < max(4.0, 0.12 * self.px_per_mm * self.px_per_mm):
+                continue
+
+            perimeter = float(cv2.arcLength(contour, closed=True))
+            if perimeter < max(6.0, 2.0 * self.px_per_mm):
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < 3 or h < 3:
+                continue
+
+            # Filled blobs and broad borders should stay in the skeleton route.
+            region = mask[y:y + h, x:x + w] > 0
+            fill_ratio = float(region.mean()) if region.size else 0.0
+            if fill_ratio > 0.72:
+                continue
+
+            epsilon = max(0.35, 0.08 * self.px_per_mm)
+            approx = cv2.approxPolyDP(contour, epsilon, closed=True)
+            points = [(float(p[0][0]), float(p[0][1])) for p in approx]
+            if len(points) < 4:
+                continue
+
+            points = self._ensure_closed_path(points)
+            loop_paths.append(points)
+            cv2.drawContours(exclusion, [contour], -1, 255, thickness=max(1, int(round(self.px_per_mm))))
+
+        return loop_paths, exclusion
+
+    def _simplify_run_path(
+        self,
+        points: List[Tuple[float, float]],
+        closed: bool,
+    ) -> List[Tuple[float, float]]:
+        if len(points) < 3:
+            return points
+        pts = np.array(points, dtype=np.float32)
+        epsilon = max(0.18, 0.05 * self.px_per_mm)
+        approx = cv2.approxPolyDP(pts.reshape((-1, 1, 2)), epsilon, closed=closed)
+        simplified = [(float(p[0][0]), float(p[0][1])) for p in approx]
+        if closed:
+            simplified = self._ensure_closed_path(simplified)
+        return simplified if len(simplified) >= 2 else points
+
+    def _chaikin_smooth(
+        self,
+        points: List[Tuple[float, float]],
+        closed: bool,
+        iterations: int = 1,
+    ) -> List[Tuple[float, float]]:
+        return self._smooth_polyline(points, closed=closed, iterations=iterations)
+
+    def _resample_run_path(
+        self,
+        points: List[Tuple[float, float]],
+        stitch_len: float,
+        closed: bool,
+    ) -> List[Tuple[float, float]]:
+        if closed:
+            points = self._ensure_closed_path(points)
+        resampled = self._resample_line(points, stitch_len)
+        if closed:
+            resampled = self._ensure_closed_path(resampled)
+        return resampled
+
     # ========== RADIAL FILL ==========
 
     def _generate_radial_fill(

@@ -105,6 +105,31 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertGreater(engine._polyline_length(merged[0]), 25.0)
 
+    def test_run_generation_restores_line_art_mask_from_source_image(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        image = np.full((30, 50, 3), 255, dtype=np.uint8)
+        image[15, 5:45] = (0, 120, 255)
+
+        mask = np.zeros((30, 50), dtype=np.uint8)
+        mask[15, 5:18] = 255
+        mask[15, 32:45] = 255
+
+        region = project_mod.Region(mask=mask)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=2.0,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region, image=image)
+
+        self.assertTrue(paths)
+        total_length = sum(engine._polyline_length(path) for path in paths)
+        self.assertGreater(total_length, 80.0)
+
     def test_run_component_closed_loop_is_explicitly_closed(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         engine = stitch_mod.StitchEngine(px_per_mm=4.0)
