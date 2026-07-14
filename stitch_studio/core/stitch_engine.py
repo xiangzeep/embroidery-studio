@@ -1147,16 +1147,59 @@ class StitchEngine:
             comp_px = compensation_mm * self.px_per_mm
             poly = poly.buffer(comp_px, join_style=1)
 
-        smooth_px = max(0.3, 0.08 * self.px_per_mm)
-        poly = poly.buffer(smooth_px, join_style=1).buffer(-smooth_px, join_style=1)
+        smooth_px = max(0.5, 0.16 * self.px_per_mm)
+        poly = poly.buffer(smooth_px, quad_segs=8, join_style=1).buffer(
+            -smooth_px,
+            quad_segs=8,
+            join_style=1,
+        )
         if not poly.is_valid:
             poly = poly.buffer(0)
-        simplify_px = max(0.5, 0.12 * self.px_per_mm)
+        simplify_px = max(1.2, 0.30 * self.px_per_mm)
         poly = poly.simplify(simplify_px, preserve_topology=True)
         if hasattr(poly, "geoms"):
             poly = max(poly.geoms, key=lambda geom: geom.area)
+        if poly.area >= 500:
+            poly = self._smooth_polygon(poly, iterations=2)
 
         return poly
+
+    def _smooth_polygon(self, poly: Polygon, iterations: int = 1) -> Polygon:
+        """Round polygon corners into embroidery-friendly curves."""
+        if poly.is_empty or not hasattr(poly, "exterior"):
+            return poly
+
+        exterior = self._chaikin_ring(list(poly.exterior.coords), iterations)
+        interiors = [
+            self._chaikin_ring(list(ring.coords), iterations)
+            for ring in poly.interiors
+            if len(ring.coords) >= 4
+        ]
+        smoothed = Polygon(exterior, interiors)
+        if not smoothed.is_valid:
+            smoothed = smoothed.buffer(0)
+        if hasattr(smoothed, "geoms"):
+            smoothed = max(smoothed.geoms, key=lambda geom: geom.area)
+        return smoothed if not smoothed.is_empty else poly
+
+    def _chaikin_ring(
+        self,
+        coords: List[Tuple[float, float]],
+        iterations: int,
+    ) -> List[Tuple[float, float]]:
+        if len(coords) < 4:
+            return coords
+        ring = [(float(x), float(y)) for x, y in coords[:-1]]
+        for _ in range(iterations):
+            next_ring = []
+            for i, p0 in enumerate(ring):
+                p1 = ring[(i + 1) % len(ring)]
+                q = (0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1])
+                r = (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])
+                next_ring.extend([q, r])
+            ring = next_ring
+        ring.append(ring[0])
+        return ring
 
     def _resample_line(
         self,

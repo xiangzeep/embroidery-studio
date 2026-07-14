@@ -465,7 +465,11 @@ class MainWindow(QMainWindow):
             )
 
             # Build layers
-            layers = self.image_engine.build_layers_from_regions(regions, all_threads)
+            layers = self.image_engine.build_layers_from_regions(
+                regions,
+                all_threads,
+                processed,
+            )
             self.project.layers = layers
             self.project.modified = True
 

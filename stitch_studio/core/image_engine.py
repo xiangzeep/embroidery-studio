@@ -116,13 +116,51 @@ class ImageEngine:
             )
             chroma = rgb.max(axis=2) - rgb.min(axis=2)
             near_black = (luminance <= 38) & (chroma <= 28)
-            thread_map[near_black] = black_thread_idx
+            outline_black = ImageEngine._expand_black_outline_pixels(
+                near_black,
+                luminance,
+                chroma,
+            )
+            thread_map[outline_black] = black_thread_idx
             assignments.append(black_thread_idx)
 
         # Deduplicate: if multiple clusters map to same thread
         used_indices = sorted(set(assignments))
 
         return thread_map, used_indices
+
+    @staticmethod
+    def _expand_black_outline_pixels(
+        near_black: np.ndarray,
+        luminance: np.ndarray,
+        chroma: np.ndarray,
+    ) -> np.ndarray:
+        """Absorb dark antialias pixels immediately attached to black artwork."""
+        if not np.any(near_black):
+            return near_black
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        dark_edge = (luminance <= 96) & (chroma <= 90)
+        near_outline = cv2.dilate(near_black.astype(np.uint8), kernel, iterations=1).astype(bool)
+        candidates = (near_outline & dark_edge & ~near_black).astype(np.uint8)
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidates, connectivity=8)
+
+        absorbed = near_black.copy()
+        for lbl in range(1, n_labels):
+            area = int(stats[lbl, cv2.CC_STAT_AREA])
+            width = int(stats[lbl, cv2.CC_STAT_WIDTH])
+            height = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+            short_axis = min(width, height)
+            long_axis = max(width, height)
+            is_antialias_edge = (
+                area <= 45 or
+                short_axis <= 3 or
+                (area <= 90 and long_axis >= short_axis * 3)
+            )
+            if is_antialias_edge:
+                absorbed[labels == lbl] = True
+
+        return absorbed
 
     @staticmethod
     def segment_regions(
@@ -140,6 +178,12 @@ class ImageEngine:
         foreground = None
         if source_image is not None:
             foreground = ~ImageEngine._detect_background_mask(source_image)
+        protected_black = None
+        black_tids = set()
+        if source_image is not None:
+            protected_black = ImageEngine._protected_black_art_mask(source_image, foreground)
+            if np.any(protected_black):
+                black_tids = {int(tid) for tid in np.unique(thread_map[protected_black])}
 
         kernel_size = settings.morphology_kernel_size
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
@@ -157,6 +201,14 @@ class ImageEngine:
                 # Avoid MORPH_OPEN here: line-art strokes in the butterfly
                 # sample are often only a few pixels wide and opening with the
                 # default 5px kernel erases them before run-stitch generation.
+
+            if protected_black is not None and black_tids:
+                if int(tid) in black_tids:
+                    binary = (binary.astype(bool) | protected_black).astype(np.uint8)
+                else:
+                    binary = (binary.astype(bool) & ~protected_black).astype(np.uint8)
+                if int(binary.sum()) == 0:
+                    continue
 
             n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
                 binary, connectivity=8
@@ -177,6 +229,28 @@ class ImageEngine:
         # Sort by area (largest first = background first)
         regions.sort(key=lambda x: x[1].sum(), reverse=True)
         return regions
+
+    @staticmethod
+    def _protected_black_art_mask(
+        image: np.ndarray,
+        foreground: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        rgb = image[:, :, :3].astype(np.int16)
+        luminance = (
+            0.299 * rgb[:, :, 0] +
+            0.587 * rgb[:, :, 1] +
+            0.114 * rgb[:, :, 2]
+        )
+        chroma = rgb.max(axis=2) - rgb.min(axis=2)
+        near_black = (luminance <= 38) & (chroma <= 28)
+        protected = ImageEngine._expand_black_outline_pixels(
+            near_black,
+            luminance,
+            chroma,
+        )
+        if foreground is not None:
+            protected &= foreground
+        return protected
 
     @staticmethod
     def _find_black_thread_index(palette_threads: List[ThreadColor]) -> Optional[int]:
@@ -251,6 +325,7 @@ class ImageEngine:
         candidate = dist <= 36
         neutral_canvas = (chroma <= 18) & (luminance >= 238)
         candidate |= neutral_canvas
+        candidate &= ~ImageEngine._preserve_foreground_dark_detail(rgb, candidate)
 
         # Keep only components that are actually connected to the image border.
         n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -271,9 +346,32 @@ class ImageEngine:
         return background
 
     @staticmethod
+    def _preserve_foreground_dark_detail(
+        rgb: np.ndarray,
+        background_candidate: np.ndarray,
+    ) -> np.ndarray:
+        """Keep dark art strokes that touch real colored foreground regions."""
+        luminance = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2])
+        chroma = rgb.max(axis=2) - rgb.min(axis=2)
+
+        colored_foreground = (
+            ~background_candidate &
+            (luminance >= 35) &
+            (chroma >= 24)
+        )
+        if not np.any(colored_foreground):
+            return np.zeros(background_candidate.shape, dtype=bool)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        near_foreground = cv2.dilate(colored_foreground.astype(np.uint8), kernel, iterations=1).astype(bool)
+        dark_candidate = background_candidate & (luminance <= 32) & (chroma <= 32)
+        return dark_candidate & near_foreground
+
+    @staticmethod
     def build_layers_from_regions(
         regions: List[Tuple[int, np.ndarray]],
         palette_threads: List[ThreadColor],
+        source_image: Optional[np.ndarray] = None,
     ) -> List[Layer]:
         """Group regions by thread color into layers."""
         layer_map = {}  # thread_idx -> Layer
@@ -300,15 +398,19 @@ class ImageEngine:
                 name=f"{layer_map[tid].name} region {len(layer_map[tid].regions) + 1}",
                 mask=mask,
             )
-            region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(mask)
+            region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                mask,
+                layer_map[tid].thread_color_rgb,
+            )
             layer_map[tid].add_region(region)
 
         ImageEngine._merge_tiny_similar_layers(layer_map, image_area)
+        if source_image is not None:
+            ImageEngine._apply_source_region_colors(layer_map, source_image)
 
-        # Sort layers: largest area (background) first
-        layers = sorted(layer_map.values(),
-                        key=lambda l: sum(r.mask.sum() for r in l.regions if r.mask is not None),
-                        reverse=True)
+        # Sort fill colors first, then near-black outlines/details last so
+        # they are stitched and previewed on top of expanded fill regions.
+        layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
 
         for i, layer in enumerate(layers):
             layer.order = i
@@ -316,41 +418,96 @@ class ImageEngine:
         return layers
 
     @staticmethod
+    def _apply_source_region_colors(
+        layer_map: Dict[int, Layer],
+        source_image: np.ndarray,
+    ):
+        for layer in layer_map.values():
+            combined = layer.get_combined_mask()
+            if combined is None:
+                continue
+            if combined.shape != source_image.shape[:2]:
+                continue
+            pixels = source_image[combined > 0, :3]
+            if pixels.size == 0:
+                continue
+
+            representative = np.median(pixels.astype(np.float64), axis=0)
+            layer.thread_color_rgb = tuple(int(round(v)) for v in representative)
+            for region in layer.regions:
+                if region.mask is None:
+                    continue
+                region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                    region.mask,
+                    layer.thread_color_rgb,
+                )
+
+    @staticmethod
+    def _layer_sort_key(layer: Layer) -> Tuple[int, int]:
+        area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
+        is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
+        return (1 if is_black_detail else 0, -area)
+
+    @staticmethod
     def _merge_tiny_similar_layers(layer_map: Dict[int, Layer], image_area: int):
         """Fold antialias slivers into nearby main colors instead of threads."""
         if len(layer_map) <= 1:
             return
 
-        def layer_area(layer: Layer) -> int:
-            return int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
-
         layers = list(layer_map.items())
-        areas = {tid: layer_area(layer) for tid, layer in layers}
-        tiny_limit = max(8, int(0.0015 * image_area))
+        tiny_limit = max(24, int(0.003 * image_area))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
         for tid, layer in list(layers):
-            area = areas.get(tid, 0)
-            if area <= 0 or area > tiny_limit:
+            if tid not in layer_map:
                 continue
-            color = np.array(layer.thread_color_rgb, dtype=np.float64)
-            candidates = []
-            for other_tid, other in layer_map.items():
-                if other_tid == tid or areas.get(other_tid, 0) <= area:
-                    continue
-                other_color = np.array(other.thread_color_rgb, dtype=np.float64)
-                dist = float(np.linalg.norm(color - other_color))
-                if dist <= 28:
-                    candidates.append((dist, other_tid, other))
-            if not candidates:
-                continue
-            _, target_tid, target = min(candidates, key=lambda item: item[0])
+
+            kept_regions = []
             for region in layer.regions:
+                if region.mask is None:
+                    kept_regions.append(region)
+                    continue
+
+                area = int(np.count_nonzero(region.mask))
+                if area <= 0 or area > tiny_limit:
+                    kept_regions.append(region)
+                    continue
+
+                dilated = cv2.dilate((region.mask > 0).astype(np.uint8), kernel, iterations=1).astype(bool)
+                candidates = []
+                for other_tid, other in layer_map.items():
+                    if other_tid == tid:
+                        continue
+                    if ImageEngine._is_near_black_rgb(other.thread_color_rgb):
+                        continue
+                    contact = 0
+                    other_area = 0
+                    for other_region in other.regions:
+                        if other_region.mask is None:
+                            continue
+                        other_mask = other_region.mask > 0
+                        other_area += int(np.count_nonzero(other_mask))
+                        contact += int(np.count_nonzero(dilated & other_mask))
+                    if contact > 0 and other_area > area:
+                        candidates.append((contact, other_area, other_tid, other))
+
+                if not candidates:
+                    kept_regions.append(region)
+                    continue
+
+                _, _, _, target = max(candidates, key=lambda item: (item[0], item[1]))
                 region.name = f"{target.name} region {len(target.regions) + 1}"
                 target.add_region(region)
-            del layer_map[tid]
+
+            layer.regions = kept_regions
+            if not layer.regions:
+                del layer_map[tid]
 
     @staticmethod
-    def _default_stitch_settings_for_mask(mask: np.ndarray) -> StitchSettings:
+    def _default_stitch_settings_for_mask(
+        mask: np.ndarray,
+        thread_color_rgb: Optional[Tuple[int, int, int]] = None,
+    ) -> StitchSettings:
         """Choose an initial stitch mode from region geometry."""
         binary = (mask > 0).astype(np.uint8)
         area = int(binary.sum())
@@ -385,7 +542,12 @@ class ImageEngine:
             )
         )
 
-        if is_thin_stroke:
+        is_outline_thread = (
+            thread_color_rgb is None or
+            ImageEngine._is_near_black_rgb(thread_color_rgb)
+        )
+        is_broad_art_stroke = area >= 180 and max_width_px >= 7.0
+        if is_thin_stroke and is_outline_thread and not is_broad_art_stroke:
             return StitchSettings(
                 fill_mode="run",
                 stitch_length_mm=2.0,
@@ -405,9 +567,16 @@ class ImageEngine:
             density=1.45,
             underlay=False,
             underlay_density=0.25,
-            contour_count=0,
+            contour_count=1,
             pull_compensation_mm=0.22,
         )
+
+    @staticmethod
+    def _is_near_black_rgb(rgb: Tuple[int, int, int]) -> bool:
+        color = np.array(rgb, dtype=np.float64)
+        luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+        chroma = float(color.max() - color.min())
+        return bool(luminance <= 45 and chroma <= 35)
 
 
 class FlowFieldEngine:

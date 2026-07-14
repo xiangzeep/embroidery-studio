@@ -76,6 +76,7 @@ class RegionMaskItem(QGraphicsPixmapItem):
         self._img_data = rgba
         pixmap = QPixmap.fromImage(img)
         self.setPixmap(pixmap)
+        self.setTransformationMode(Qt.SmoothTransformation)
         if scale != 1.0:
             self.setScale(scale)
 
@@ -150,6 +151,7 @@ class EmbroideryCanvas(QGraphicsView):
         pixmap = QPixmap.fromImage(img)
 
         self._bg_item = QGraphicsPixmapItem(pixmap)
+        self._bg_item.setTransformationMode(Qt.SmoothTransformation)
 
         # Scale image to match output size in scene units (1/10mm)
         out_w = output_size_mm[0] * self._units_per_mm

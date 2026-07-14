@@ -178,6 +178,135 @@ class ExportPathTests(unittest.TestCase):
         self.assertIn(1, tids)
         self.assertIn(2, tids)
 
+    def test_segmentation_keeps_black_outline_connected_to_black_canvas(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        image = np.zeros((60, 60, 3), dtype=np.uint8)
+        image[12:48, 12:48] = (150, 220, 120)
+        image[12:48, 12:15] = (0, 0, 0)
+        image[12:48, 45:48] = (0, 0, 0)
+        image[12:15, 12:48] = (0, 0, 0)
+        image[45:48, 12:48] = (0, 0, 0)
+        image[29:32, 14:46] = (0, 0, 0)
+
+        thread_map = np.zeros((60, 60), dtype=np.int32)
+        thread_map[12:48, 12:48] = 1
+        thread_map[np.all(image == (0, 0, 0), axis=2)] = 0
+
+        regions = image_mod.ImageEngine.segment_regions(
+            thread_map,
+            project_mod.QuantizationSettings(min_region_area_px=1),
+            image,
+        )
+        black_pixels = sum(int(np.count_nonzero(mask)) for tid, mask in regions if tid == 0)
+        green_pixels = sum(int(np.count_nonzero(mask)) for tid, mask in regions if tid == 1)
+
+        self.assertGreater(black_pixels, 250)
+        self.assertLess(black_pixels, 700)
+        self.assertGreater(green_pixels, 800)
+
+    def test_segmentation_keeps_green_layers_out_of_protected_black_art(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        image = np.zeros((42, 42, 3), dtype=np.uint8)
+        image[5:37, 5:37] = (62, 154, 62)
+        image[8:34, 19:23] = (0, 0, 0)
+
+        thread_map = np.zeros((42, 42), dtype=np.int32)
+        thread_map[5:37, 5:37] = 1
+        thread_map[8:34, 19:23] = 0
+
+        regions = image_mod.ImageEngine.segment_regions(
+            thread_map,
+            project_mod.QuantizationSettings(
+                min_region_area_px=1,
+                morphology_kernel_size=7,
+                smooth_regions=True,
+            ),
+            image,
+        )
+
+        black_union = np.zeros((42, 42), dtype=bool)
+        green_union = np.zeros((42, 42), dtype=bool)
+        for tid, mask in regions:
+            if tid == 0:
+                black_union |= mask > 0
+            if tid == 1:
+                green_union |= mask > 0
+
+        seam = np.zeros((42, 42), dtype=bool)
+        seam[8:34, 19:23] = True
+        self.assertTrue(np.all(black_union[seam]))
+        self.assertFalse(np.any(green_union[seam]))
+
+    def test_quantization_absorbs_dark_antialias_pixels_into_black_outline(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 80, 0)),
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(150, 220, 120)),
+        ]
+        image = np.full((24, 24, 3), (150, 220, 120), dtype=np.uint8)
+        image[:, 10:12] = (0, 0, 0)
+        image[:, 12:15] = (61, 114, 29)
+
+        thread_map, _ = image_mod.ImageEngine.quantize_to_palette(
+            image,
+            palette,
+            project_mod.QuantizationSettings(n_colors=3),
+        )
+
+        self.assertTrue(np.all(thread_map[:, 12:15] == 0))
+
+    def test_quantization_keeps_detached_dark_green_detail_green(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 80, 0)),
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(150, 220, 120)),
+        ]
+        image = np.full((28, 28, 3), (150, 220, 120), dtype=np.uint8)
+        image[2:6, 2:6] = (0, 0, 0)
+        image[18:24, 18:24] = (61, 114, 29)
+
+        thread_map, _ = image_mod.ImageEngine.quantize_to_palette(
+            image,
+            palette,
+            project_mod.QuantizationSettings(n_colors=3),
+        )
+
+        self.assertTrue(np.all(thread_map[18:24, 18:24] == 1))
+
+    def test_quantization_keeps_attached_dark_green_shapes_green(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 80, 0)),
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(150, 220, 120)),
+        ]
+        image = np.full((40, 40, 3), (150, 220, 120), dtype=np.uint8)
+        image[:, 10:13] = (0, 0, 0)
+        image[12:28, 13:27] = (61, 114, 29)
+
+        thread_map, _ = image_mod.ImageEngine.quantize_to_palette(
+            image,
+            palette,
+            project_mod.QuantizationSettings(n_colors=3),
+        )
+
+        self.assertTrue(np.all(thread_map[14:26, 16:25] == 1))
+
     def test_default_segmentation_keeps_small_dark_detail_regions(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -216,6 +345,67 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(settings.fill_mode, "scanline")
 
+    def test_colored_detail_layers_default_to_fill_not_run(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 80, 0)),
+        ]
+        detail = np.zeros((40, 40), dtype=np.uint8)
+        detail[18:21, 6:34] = 255
+        detail[21:24, 13:28] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, detail), (1, detail.copy())],
+            palette,
+        )
+        modes = {layer.thread_name: layer.regions[0].stitch_settings.fill_mode for layer in layers}
+
+        self.assertEqual(modes["Black"], "run")
+        self.assertEqual(modes["Dark Green"], "scanline")
+
+    def test_wide_black_art_region_defaults_to_fill_not_run(self):
+        import cv2
+
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0))]
+        mask = np.zeros((120, 120), dtype=np.uint8)
+        cv2.ellipse(mask, (60, 60), (48, 28), -20, 0, 360, 255, thickness=6)
+        cv2.line(mask, (18, 70), (100, 42), 255, 6)
+
+        layers = image_mod.ImageEngine.build_layers_from_regions([(0, mask)], palette)
+
+        self.assertEqual(layers[0].regions[0].stitch_settings.fill_mode, "scanline")
+
+    def test_black_detail_layer_stitches_after_green_fills(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(150, 220, 120)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 90, 0)),
+        ]
+        black = np.zeros((80, 80), dtype=np.uint8)
+        black[8:72, 8:14] = 255
+        black[34:40, 8:72] = 255
+        light = np.zeros((80, 80), dtype=np.uint8)
+        light[14:72, 14:72] = 255
+        dark = np.zeros((80, 80), dtype=np.uint8)
+        dark[20:32, 20:44] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, black), (1, light), (2, dark)],
+            palette,
+        )
+
+        self.assertEqual(layers[-1].thread_name, "Black")
+        self.assertGreater(layers[-1].order, layers[0].order)
+
     def test_tiny_real_color_layers_are_not_merged_away(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -238,6 +428,46 @@ class ExportPathTests(unittest.TestCase):
         )
 
         self.assertEqual({layer.thread_name for layer in layers}, {"Light Green", "Mid Green", "Dark Green"})
+
+    def test_tiny_green_antialias_regions_merge_into_larger_neighbor(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Light Green", color_rgb=(110, 220, 130)),
+            thread_mod.ThreadColor(name="Dark Green", color_rgb=(0, 80, 0)),
+        ]
+        mask_large = np.zeros((100, 100), dtype=np.uint8)
+        mask_large[20:60, 20:60] = 255
+        mask_sliver = np.zeros((100, 100), dtype=np.uint8)
+        mask_sliver[44:48, 55:60] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, mask_large), (1, mask_sliver)],
+            palette,
+        )
+
+        self.assertEqual([layer.thread_name for layer in layers], ["Light Green"])
+
+    def test_layers_use_source_region_color_for_quantized_preview(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Thread Green", color_rgb=(110, 220, 130)),
+        ]
+        source = np.full((20, 20, 3), (95, 158, 88), dtype=np.uint8)
+        mask = np.zeros((20, 20), dtype=np.uint8)
+        mask[4:16, 4:16] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, mask)],
+            palette,
+            source,
+        )
+
+        self.assertEqual(layers[0].thread_name, "Thread Green")
+        self.assertEqual(layers[0].thread_color_rgb, (95, 158, 88))
 
     def test_scanline_fill_chains_rows_to_reduce_jumps(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -270,6 +500,28 @@ class ExportPathTests(unittest.TestCase):
         self.assertLessEqual(settings.row_spacing_mm, 0.20)
         self.assertGreaterEqual(settings.density, 1.35)
         self.assertGreaterEqual(settings.pull_compensation_mm, 0.18)
+        self.assertGreaterEqual(settings.contour_count, 1)
+
+    def test_scanline_regions_include_edge_contour_for_fullness(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((40, 40), dtype=np.uint8)
+        region.mask[10:30, 10:30] = 255
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.3,
+            density=1.0,
+            contour_count=1,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertGreater(len(paths), 1)
 
     def test_mask_polygon_regularizes_jagged_edges(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -284,8 +536,66 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertIsNotNone(poly)
         self.assertTrue(poly.is_valid)
-        self.assertGreater(poly.area, float(np.count_nonzero(mask)))
-        self.assertLess(len(poly.exterior.coords), 40)
+        self.assertGreater(poly.area, float(np.count_nonzero(mask)) * 0.90)
+        self.assertLess(len(poly.exterior.coords), 140)
+
+    def test_mask_polygon_smooths_large_curved_surface(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((90, 70), dtype=np.uint8)
+        for y in range(10, 82):
+            center = 35 + int(8 * np.sin(y / 13.0))
+            radius = max(4, int(22 - abs(y - 46) * 0.18))
+            jag = y % 4
+            mask[y, center - radius + jag:center + radius - (jag % 2)] = 255
+
+        poly = engine._mask_to_polygon(mask, compensation_mm=0.0)
+
+        self.assertIsNotNone(poly)
+        self.assertTrue(poly.is_valid)
+        self.assertGreater(len(poly.exterior.coords), 100)
+        coords = np.array(poly.exterior.coords[:-1])
+        turns = []
+        for i in range(len(coords)):
+            p0, p1, p2 = coords[i - 1], coords[i], coords[(i + 1) % len(coords)]
+            v1 = p1 - p0
+            v2 = p2 - p1
+            if np.linalg.norm(v1) < 1e-6 or np.linalg.norm(v2) < 1e-6:
+                continue
+            cross = v1[0] * v2[1] - v1[1] * v2[0]
+            dot = v1[0] * v2[0] + v1[1] * v2[1]
+            turns.append(abs(np.arctan2(cross, dot)))
+
+        self.assertLess(max(turns), 1.0)
+
+    def test_small_pointed_detail_keeps_sharp_corner(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        cv2.fillPoly(
+            mask,
+            [np.array([[7, 30], [30, 10], [24, 30]], dtype=np.int32)],
+            255,
+        )
+
+        poly = engine._mask_to_polygon(mask, compensation_mm=0.0)
+
+        self.assertIsNotNone(poly)
+        coords = np.array(poly.exterior.coords[:-1])
+        turns = []
+        for i in range(len(coords)):
+            p0, p1, p2 = coords[i - 1], coords[i], coords[(i + 1) % len(coords)]
+            v1 = p1 - p0
+            v2 = p2 - p1
+            if np.linalg.norm(v1) < 1e-6 or np.linalg.norm(v2) < 1e-6:
+                continue
+            cross = v1[0] * v2[1] - v1[1] * v2[0]
+            dot = v1[0] * v2[0] + v1[1] * v2[1]
+            turns.append(abs(np.arctan2(cross, dot)))
+
+        self.assertGreater(max(turns), 1.2)
 
     def test_export_stitch_connects_nearby_paths_to_reduce_jumps(self):
         pyembroidery = install_fake_pyembroidery()
