@@ -579,6 +579,30 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(paths)
         self.assertGreater(sum(len(path) for path in paths), 20)
 
+    def test_hairline_detail_falls_back_to_centerline_fill(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((60, 100), dtype=np.uint8)
+        cv2.line(mask, (8, 48), (92, 10), 255, thickness=1)
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        paths = engine._generate_scanline_paths(mask, settings)
+
+        self.assertTrue(paths)
+        self.assertGreaterEqual(sum(len(path) for path in paths), 10)
+
     def test_large_scanline_shape_adds_local_fill_for_acute_tip(self):
         import cv2
 

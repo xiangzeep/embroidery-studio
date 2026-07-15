@@ -284,7 +284,7 @@ class StitchEngine:
         """Path-aware scanline fill. Each separated island row is its own path."""
         poly = self._mask_to_polygon(mask, settings.pull_compensation_mm)
         if poly is None or poly.is_empty:
-            return []
+            return self._generate_hairline_fill_paths(mask, settings)
 
         angle = settings.angle_deg
         pitch_px = settings.row_spacing_mm * self.px_per_mm / settings.density
@@ -331,6 +331,41 @@ class StitchEngine:
             row_paths,
             max_gap_px=max(pitch_px * 2.8, stitch_len_px * 1.8),
         )
+
+    def _generate_hairline_fill_paths(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Preserve one-pixel color details that cannot form an area polygon."""
+        from skimage.morphology import skeletonize
+
+        skeleton = skeletonize(mask > 0).astype(np.uint8)
+        n_labels, labels = cv2.connectedComponents(skeleton, connectivity=8)
+        stitch_len_px = max(1.0, settings.stitch_length_mm * self.px_per_mm)
+        raw_paths: List[List[Tuple[float, float]]] = []
+
+        for lbl in range(1, n_labels):
+            component = labels == lbl
+            if int(component.sum()) < 2:
+                continue
+            raw_paths.extend(self._trace_skeleton_component(component))
+
+        paths: List[List[Tuple[float, float]]] = []
+        for raw in self._assemble_run_components(raw_paths, mask):
+            if len(raw) < 2:
+                continue
+            simplified = self._simplify_run_path(raw, closed=False)
+            smoothed = self._chaikin_smooth(
+                simplified,
+                closed=False,
+                iterations=1,
+            )
+            resampled = self._resample_run_path(smoothed, stitch_len_px, closed=False)
+            if len(resampled) >= 2:
+                paths.append(resampled)
+
+        return paths
 
     # ========== CONTOUR FILL ==========
 
