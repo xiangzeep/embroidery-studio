@@ -68,10 +68,115 @@ class StitchEngine:
         if settings.contour_count > 0 and settings.fill_mode != "run":
             paths.extend(self._generate_contour_paths(mask, settings))
 
-        paths.extend(self._dispatch_fill_paths(mask, settings, image, flow_field))
+        fill_paths = self._dispatch_fill_paths(mask, settings, image, flow_field)
+        paths.extend(fill_paths)
+        if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
+            reinforce_settings = StitchSettings(
+                fill_mode="scanline",
+                angle_deg=settings.angle_deg + 90.0,
+                stitch_length_mm=max(1.2, settings.stitch_length_mm * 0.75),
+                row_spacing_mm=max(0.10, settings.row_spacing_mm * 0.75),
+                density=max(settings.density, 1.65),
+                underlay=False,
+                contour_count=0,
+                pull_compensation_mm=settings.pull_compensation_mm,
+                randomize_length=settings.randomize_length,
+            )
+            paths.extend(
+                self._dispatch_fill_paths(mask, reinforce_settings, image, flow_field)
+            )
+        if settings.fill_mode == "scanline":
+            paths.extend(self._generate_acute_tip_fill_paths(mask, settings))
 
         scale = UNITS_PER_MM / self.px_per_mm
         return [[(x * scale, y * scale) for x, y in path] for path in paths if len(path) >= 2]
+
+    def _needs_detail_reinforcement(self, mask: np.ndarray) -> bool:
+        """Add a second fill pass only for small narrow color details."""
+        binary = mask > 0
+        area = int(np.count_nonzero(binary))
+        if area <= 0 or area > 520:
+            return False
+
+        ys, xs = np.where(binary)
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        short_axis = min(width, height)
+        long_axis = max(width, height)
+        aspect = long_axis / max(1, short_axis)
+
+        return bool(area <= 180 or (short_axis <= 24 and aspect >= 1.4))
+
+    def _generate_acute_tip_fill_paths(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Add short local fill strokes that reach acute pointed tips."""
+        poly = self._mask_to_polygon(mask, settings.pull_compensation_mm)
+        if poly is None or poly.is_empty or not hasattr(poly, "exterior"):
+            return []
+
+        clean = (mask > 0).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return []
+        contour = max(contours, key=cv2.contourArea)
+        epsilon = max(0.8, 0.16 * self.px_per_mm)
+        approx = cv2.approxPolyDP(contour, epsilon, closed=True)
+        ring = [tuple(pt[0]) for pt in approx]
+        if len(ring) < 3:
+            return []
+
+        center = poly.centroid
+        if not poly.contains(center):
+            center = poly.representative_point()
+        center_xy = np.array([center.x, center.y], dtype=np.float64)
+
+        paths: List[List[Tuple[float, float]]] = []
+        stitch_len_px = max(2.0, settings.stitch_length_mm * self.px_per_mm * 0.65)
+        for i, current in enumerate(ring):
+            prev_pt = np.array(ring[i - 1], dtype=np.float64)
+            curr_pt = np.array(current, dtype=np.float64)
+            next_pt = np.array(ring[(i + 1) % len(ring)], dtype=np.float64)
+
+            v1 = prev_pt - curr_pt
+            v2 = next_pt - curr_pt
+            len1 = float(np.linalg.norm(v1))
+            len2 = float(np.linalg.norm(v2))
+            if len1 < 4.0 or len2 < 4.0:
+                continue
+
+            denom = max(1e-6, len1 * len2)
+            angle = float(np.arccos(np.clip(np.dot(v1, v2) / denom, -1.0, 1.0)))
+            if angle > np.deg2rad(72.0):
+                continue
+
+            inward = center_xy - curr_pt
+            inward_len = float(np.linalg.norm(inward))
+            if inward_len < 1e-6:
+                continue
+            inward /= inward_len
+
+            local_len = min(max(8.0, 2.5 * self.px_per_mm), inward_len * 0.45, max(len1, len2) * 0.9)
+            start = curr_pt + inward * local_len
+            if not poly.contains(Point(float(start[0]), float(start[1]))):
+                start = np.array([
+                    curr_pt[0] + inward[0] * min(local_len, inward_len * 0.25),
+                    curr_pt[1] + inward[1] * min(local_len, inward_len * 0.25),
+                ])
+            if not poly.buffer(0.2).contains(Point(float(start[0]), float(start[1]))):
+                continue
+
+            path = self._resample_line(
+                [(float(start[0]), float(start[1])), (float(curr_pt[0]), float(curr_pt[1]))],
+                stitch_len_px,
+                settings.randomize_length,
+            )
+            if len(path) >= 2:
+                paths.append(path)
+
+        return paths
 
     def _dispatch_fill_paths(
         self,

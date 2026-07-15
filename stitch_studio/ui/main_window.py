@@ -591,10 +591,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.export_engine.export(self.project, path)
+            written_files = self.export_engine.export(self.project, path)
             self.status_info.setText(f"Exported: {path}")
+            file_list = "\n".join(written_files)
             QMessageBox.information(self, "Export Complete",
-                                    f"Pattern exported to:\n{path}")
+                                    f"Pattern exported to:\n{file_list}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
 

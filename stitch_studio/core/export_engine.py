@@ -6,6 +6,7 @@ via pyembroidery (DST, PES, JEF, VP3, EXP, SVG, PNG).
 
 import pyembroidery
 import numpy as np
+import os
 from typing import List, Tuple, Optional, Dict
 from .project import Project, Layer, Region
 
@@ -38,7 +39,7 @@ class ExportEngine:
         pattern = pyembroidery.EmbPattern()
 
         # Metadata
-        pattern.extras['name'] = project.name
+        pattern.extras['name'] = self._safe_design_name(project.name)
 
         # Process only layers that will actually write stitches. This prevents
         # blank/background or empty antialias layers from becoming DST colors.
@@ -56,18 +57,19 @@ class ExportEngine:
             if region_paths:
                 drawable_layers.append((layer, region_paths))
 
+        # Project/UI order is visual stack order. Embroidery files stitch the
+        # first color first, so write the stack in reverse: bottom first,
+        # top/detail layers last.
+        drawable_layers.reverse()
+
         for layer_idx, (layer, region_paths) in enumerate(drawable_layers):
             # Add thread for this layer
-            thread = pyembroidery.EmbThread()
-            r, g, b = layer.thread_color_rgb
-            thread.color = (r << 16) | (g << 8) | b
-            thread.name = layer.thread_name or layer.name
-            thread.catalog_number = layer.thread_uid
+            thread = self._thread_for_layer(layer, layer_idx)
             pattern.add_thread(thread)
 
             # Color change if not first layer
             if layer_idx > 0:
-                pattern.add_stitch_absolute(pyembroidery.COLOR_BREAK, 0, 0)
+                pattern.add_stitch_absolute(pyembroidery.COLOR_CHANGE, 0, 0)
 
             last_x, last_y = None, None
             for _, paths in region_paths:
@@ -82,24 +84,29 @@ class ExportEngine:
 
         return pattern
 
-    def export(self, project: Project, filepath: str, settings: dict = None):
+    def export(self, project: Project, filepath: str, settings: dict = None) -> List[str]:
         """Export project to embroidery file."""
         pattern = self.build_pattern(project)
 
         write_settings = {}
         if settings:
             write_settings.update(settings)
+        if filepath.lower().endswith(".dst"):
+            write_settings.setdefault("version", "extended")
 
         pyembroidery.write(pattern, filepath, write_settings)
+        written_files = [filepath]
+        if filepath.lower().endswith(".dst"):
+            edr_path = os.path.splitext(filepath)[0] + ".edr"
+            pyembroidery.write(pattern, edr_path, {})
+            written_files.append(edr_path)
+        return written_files
 
     def export_layer(self, layer: Layer, filepath: str, settings: dict = None):
         """Export a single layer to its own embroidery file."""
         pattern = pyembroidery.EmbPattern()
 
-        thread = pyembroidery.EmbThread()
-        r, g, b = layer.thread_color_rgb
-        thread.color = (r << 16) | (g << 8) | b
-        thread.name = layer.thread_name or layer.name
+        thread = self._thread_for_layer(layer, 0)
         pattern.add_thread(thread)
 
         for region in layer.regions:
@@ -112,7 +119,52 @@ class ExportEngine:
         pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
 
         write_settings = settings or {}
+        if filepath.lower().endswith(".dst"):
+            write_settings = dict(write_settings)
+            write_settings.setdefault("version", "extended")
         pyembroidery.write(pattern, filepath, write_settings)
+
+    def _safe_design_name(self, name: str) -> str:
+        """Embroidery headers are safest with short ASCII design names."""
+        safe = "".join(ch if 32 <= ord(ch) <= 126 else "_" for ch in (name or "Untitled"))
+        safe = safe.strip(" _") or "Untitled"
+        return safe[:16]
+
+    def _thread_for_layer(self, layer: Layer, index: int) -> pyembroidery.EmbThread:
+        """Create a thread with fields used by embroidery writers."""
+        thread = pyembroidery.EmbThread()
+        r, g, b = layer.thread_color_rgb
+        thread.color = (r << 16) | (g << 8) | b
+
+        label = self._safe_thread_text(
+            layer.thread_name,
+            layer.name,
+            f"Color {index + 1}",
+            max_len=32,
+        )
+        catalog = self._safe_thread_text(
+            layer.thread_uid,
+            f"{index + 1}",
+            max_len=16,
+        )
+
+        thread.name = label
+        thread.description = label
+        thread.details = label
+        thread.chart = "Stitch Studio"
+        thread.catalog_number = catalog
+        return thread
+
+    def _safe_thread_text(self, *candidates: str, max_len: int) -> str:
+        """Return a printable ASCII value for conservative embroidery headers."""
+        for candidate in candidates:
+            if not candidate:
+                continue
+            safe = "".join(ch if 32 <= ord(ch) <= 126 else "_" for ch in str(candidate))
+            safe = safe.strip(" _")
+            if safe:
+                return safe[:max_len]
+        return "Thread"[:max_len]
 
     def get_stats(self, project: Project) -> Dict:
         """Get pattern statistics."""

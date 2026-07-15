@@ -207,7 +207,7 @@ class EmbroideryCanvas(QGraphicsView):
 
         if self._show_regions:
             qcolor = QColor(*color)
-            item = RegionMaskItem(mask, qcolor, opacity=0.2, scale=scale)
+            item = RegionMaskItem(mask, qcolor, opacity=1.0, scale=scale)
             item.setZValue(-50)
             self.scene.addItem(item)
             self._mask_items[region_uid] = item

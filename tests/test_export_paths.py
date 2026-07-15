@@ -1,5 +1,7 @@
 import importlib
+import os
 import sys
+import tempfile
 import types
 import unittest
 import numpy as np
@@ -523,6 +525,63 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertGreater(len(paths), 1)
 
+    def test_small_scanline_details_get_reinforcing_fill_pass(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((60, 60), dtype=np.uint8)
+        cv2.fillPoly(
+            region.mask,
+            [np.array([[8, 50], [22, 16], [30, 45]], dtype=np.int32)],
+            255,
+        )
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=1,
+            pull_compensation_mm=0.22,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertGreaterEqual(len(paths), 3)
+        self.assertGreater(sum(len(path) for path in paths), 280)
+
+    def test_large_scanline_shape_adds_local_fill_for_acute_tip(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((100, 140), dtype=np.uint8)
+        cv2.fillPoly(
+            region.mask,
+            [np.array([[10, 75], [42, 35], [122, 10], [96, 42], [36, 88]], dtype=np.int32)],
+            255,
+        )
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=1,
+            pull_compensation_mm=0.22,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertGreaterEqual(len(paths), 3)
+
     def test_mask_polygon_regularizes_jagged_edges(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         engine = stitch_mod.StitchEngine(px_per_mm=4.0)
@@ -635,6 +694,161 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(pattern.threadlist), 1)
         self.assertEqual(pattern.threadlist[0].color, 0x0000FF)
+
+    def test_export_uses_color_change_between_drawable_layers(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        for idx, color in enumerate([(0, 0, 0), (0, 255, 0)]):
+            layer = project_mod.Layer(thread_color_rgb=color, order=idx)
+            region = project_mod.Region()
+            region.stitch_paths = [[(0.0, idx * 10.0), (10.0, idx * 10.0)]]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [cmd for _, _, cmd in pattern.stitches]
+
+        self.assertIn(pyembroidery.COLOR_CHANGE, commands)
+        self.assertNotIn(pyembroidery.COLOR_BREAK, commands)
+
+    def test_export_writes_larger_visual_layers_before_small_details(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+
+        small = project_mod.Layer(thread_color_rgb=(0, 180, 0), order=0)
+        small.name = "Small detail"
+        small.thread_name = "Small detail"
+        small_region = project_mod.Region()
+        small_region.mask = np.zeros((80, 80), dtype=np.uint8)
+        small_region.mask[20:28, 20:28] = 255
+        small_region.stitch_paths = [[(20.0, 20.0), (28.0, 20.0)]]
+        small.regions = [small_region]
+
+        large = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=1)
+        large.name = "Large base"
+        large.thread_name = "Large base"
+        large_region = project_mod.Region()
+        large_region.mask = np.zeros((80, 80), dtype=np.uint8)
+        large_region.mask[5:75, 5:75] = 255
+        large_region.stitch_paths = [[(5.0, 5.0), (75.0, 5.0)]]
+        large.regions = [large_region]
+
+        project.layers = [small, large]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(pattern.threadlist[0].description, "Large base")
+        self.assertEqual(pattern.threadlist[1].description, "Small detail")
+
+    def test_export_writes_current_layer_stack_in_reverse_order(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        specs = [
+            ("Layer A", 0, (0, 80, 0), (5, 5, 55, 55)),
+            ("Layer B", 1, (0, 140, 0), (10, 10, 20, 20)),
+            ("Layer C", 2, (0, 0, 0), (15, 15, 45, 45)),
+        ]
+        for name, order, color, (x1, y1, x2, y2) in specs:
+            layer = project_mod.Layer(thread_color_rgb=color, order=order)
+            layer.name = name
+            layer.thread_name = name
+            region = project_mod.Region()
+            region.mask = np.zeros((80, 80), dtype=np.uint8)
+            region.mask[y1:y2, x1:x2] = 255
+            region.stitch_paths = [[(float(x1), float(y1)), (float(x2), float(y1))]]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(
+            [thread.description for thread in pattern.threadlist],
+            ["Layer C", "Layer B", "Layer A"],
+        )
+
+    def test_dst_export_writes_dst_and_edr_color_companion(self):
+        fake = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        calls = []
+
+        def capture_write(pattern, filepath, settings=None):
+            calls.append((filepath, settings.copy() if settings else {}))
+
+        fake.write = capture_write
+        export_mod.pyembroidery.write = capture_write
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(10, 120, 30), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "bean.dst")
+            written_files = export_mod.ExportEngine().export(project, filepath)
+
+        edr_path = os.path.join(tmpdir, "bean.edr")
+        self.assertEqual(
+            calls,
+            [
+                (filepath, {"version": "extended"}),
+                (edr_path, {}),
+            ],
+        )
+        self.assertEqual(written_files, [filepath, edr_path])
+
+    def test_export_sanitizes_non_ascii_internal_design_name(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        project.name = "豆角"
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(pattern.extras["name"], "Untitled")
+
+    def test_export_populates_dst_thread_metadata(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(10, 120, 30), order=0)
+        layer.thread_name = "深绿"
+        layer.name = "Seed shade"
+        layer.thread_uid = "thread-001"
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        thread = pattern.threadlist[0]
+
+        self.assertEqual(thread.description, "Seed shade")
+        self.assertEqual(thread.details, "Seed shade")
+        self.assertEqual(thread.chart, "Stitch Studio")
+        self.assertEqual(thread.name, "Seed shade")
+        self.assertEqual(thread.catalog_number, "thread-001")
 
 
 if __name__ == "__main__":
