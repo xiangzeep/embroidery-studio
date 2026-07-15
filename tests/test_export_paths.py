@@ -554,6 +554,31 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreaterEqual(len(paths), 3)
         self.assertGreater(sum(len(path) for path in paths), 280)
 
+    def test_thin_colored_detail_line_is_preserved_for_fill(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((50, 90), dtype=np.uint8)
+        cv2.line(region.mask, (10, 32), (78, 18), 255, thickness=2)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertTrue(paths)
+        self.assertGreater(sum(len(path) for path in paths), 20)
+
     def test_large_scanline_shape_adds_local_fill_for_acute_tip(self):
         import cv2
 
@@ -581,6 +606,64 @@ class ExportPathTests(unittest.TestCase):
         paths = engine.generate_region_paths(region)
 
         self.assertGreaterEqual(len(paths), 3)
+
+    def test_acute_tip_fill_adds_multiple_miter_cap_strokes(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((120, 160), dtype=np.uint8)
+        tip = (138, 18)
+        cv2.fillPoly(
+            region.mask,
+            [np.array([[16, 96], [76, 44], tip, [88, 72], [36, 106]], dtype=np.int32)],
+            255,
+        )
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        local_paths = engine._generate_acute_tip_fill_paths(
+            region.mask,
+            region.stitch_settings,
+        )
+        tip_paths = [
+            path for path in local_paths
+            if min(np.hypot(x - tip[0], y - tip[1]) for x, y in path) <= 2.0
+        ]
+
+        self.assertGreaterEqual(len(tip_paths), 4)
+
+    def test_mask_to_polygon_preserves_large_acute_corner(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((140, 180), dtype=np.uint8)
+        acute = np.array([150, 24], dtype=np.float64)
+        cv2.fillPoly(
+            mask,
+            [np.array([[18, 112], [80, 44], acute, [92, 74], [38, 124]], dtype=np.int32)],
+            255,
+        )
+
+        poly = engine._mask_to_polygon(mask, 0)
+        distances = [
+            np.hypot(x - acute[0], y - acute[1])
+            for x, y in poly.exterior.coords
+        ]
+
+        self.assertLess(min(distances), 3.0)
 
     def test_mask_polygon_regularizes_jagged_edges(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

@@ -158,23 +158,38 @@ class StitchEngine:
                 continue
             inward /= inward_len
 
-            local_len = min(max(8.0, 2.5 * self.px_per_mm), inward_len * 0.45, max(len1, len2) * 0.9)
-            start = curr_pt + inward * local_len
-            if not poly.contains(Point(float(start[0]), float(start[1]))):
-                start = np.array([
-                    curr_pt[0] + inward[0] * min(local_len, inward_len * 0.25),
-                    curr_pt[1] + inward[1] * min(local_len, inward_len * 0.25),
-                ])
-            if not poly.buffer(0.2).contains(Point(float(start[0]), float(start[1]))):
+            edge1 = v1 / len1
+            edge2 = v2 / len2
+            max_depth = min(
+                max(9.0, 2.8 * self.px_per_mm),
+                len1 * 0.82,
+                len2 * 0.82,
+                inward_len * 0.65,
+            )
+            if max_depth < 3.0:
                 continue
 
-            path = self._resample_line(
-                [(float(start[0]), float(start[1])), (float(curr_pt[0]), float(curr_pt[1]))],
-                stitch_len_px,
-                settings.randomize_length,
-            )
-            if len(path) >= 2:
-                paths.append(path)
+            row_pitch = max(1.2, settings.row_spacing_mm * self.px_per_mm / max(settings.density, 1e-3))
+            stroke_count = int(np.clip(np.ceil(max_depth / row_pitch), 4, 10))
+            depths = np.linspace(max_depth, max(1.6, min(max_depth * 0.22, 2.8)), stroke_count)
+
+            for row_idx, depth in enumerate(depths):
+                left = curr_pt + edge1 * depth
+                right = curr_pt + edge2 * depth
+                mid = (left + right + curr_pt) / 3.0
+                if not poly.buffer(0.35).contains(Point(float(mid[0]), float(mid[1]))):
+                    continue
+
+                # A tiny miter/cap fan: each local stitch points through the
+                # acute vertex, so the tip is filled instead of only outlined.
+                coords = [
+                    (float(left[0]), float(left[1])),
+                    (float(curr_pt[0]), float(curr_pt[1])),
+                    (float(right[0]), float(right[1])),
+                ]
+                if row_idx % 2:
+                    coords = coords[::-1]
+                paths.append(coords)
 
         return paths
 
@@ -1264,10 +1279,34 @@ class StitchEngine:
         poly = poly.simplify(simplify_px, preserve_topology=True)
         if hasattr(poly, "geoms"):
             poly = max(poly.geoms, key=lambda geom: geom.area)
-        if poly.area >= 500:
+        if poly.area >= 500 and not self._has_acute_vertices(poly):
             poly = self._smooth_polygon(poly, iterations=2)
 
         return poly
+
+    def _has_acute_vertices(self, poly: Polygon, threshold_deg: float = 55.0) -> bool:
+        """Detect sharp corners that should not be rounded away."""
+        if poly.is_empty or not hasattr(poly, "exterior"):
+            return False
+        coords = list(poly.exterior.coords)
+        if len(coords) < 4:
+            return False
+        pts = [np.array(pt, dtype=np.float64) for pt in coords[:-1]]
+        threshold = np.deg2rad(threshold_deg)
+        min_edge_len = max(8.0, 2.0 * self.px_per_mm)
+        for i, current in enumerate(pts):
+            prev_pt = pts[i - 1]
+            next_pt = pts[(i + 1) % len(pts)]
+            v1 = prev_pt - current
+            v2 = next_pt - current
+            len1 = float(np.linalg.norm(v1))
+            len2 = float(np.linalg.norm(v2))
+            if len1 < min_edge_len or len2 < min_edge_len:
+                continue
+            angle = float(np.arccos(np.clip(np.dot(v1, v2) / max(1e-6, len1 * len2), -1.0, 1.0)))
+            if angle <= threshold:
+                return True
+        return False
 
     def _smooth_polygon(self, poly: Polygon, iterations: int = 1) -> Polygon:
         """Round polygon corners into embroidery-friendly curves."""
