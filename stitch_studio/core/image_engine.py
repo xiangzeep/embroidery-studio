@@ -14,6 +14,7 @@ from sklearn.cluster import KMeans
 
 from .project import ImageSettings, QuantizationSettings, Layer, Region, StitchSettings
 from .thread_db import ThreadColor
+from .geometry_engine import GeometryEngine
 
 
 class ImageEngine:
@@ -409,6 +410,7 @@ class ImageEngine:
                 name=f"{layer_map[tid].name} region {len(layer_map[tid].regions) + 1}",
                 mask=mask,
             )
+            region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
             region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
                 mask,
                 layer_map[tid].thread_color_rgb,

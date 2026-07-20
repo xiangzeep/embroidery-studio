@@ -63,12 +63,18 @@ class StitchEngine:
                 row_spacing_mm=settings.row_spacing_mm / max(settings.underlay_density, 1e-3),
                 density=settings.underlay_density,
             )
-            paths.extend(self._dispatch_fill_paths(mask, underlay_settings, image, flow_field))
+            paths.extend(
+                self._dispatch_fill_paths(
+                    mask, underlay_settings, image, flow_field, getattr(region, "polygon", None)
+                )
+            )
 
         if settings.contour_count > 0 and settings.fill_mode != "run":
-            paths.extend(self._generate_contour_paths(mask, settings))
+            paths.extend(self._generate_contour_paths(mask, settings, getattr(region, "polygon", None)))
 
-        fill_paths = self._dispatch_fill_paths(mask, settings, image, flow_field)
+        fill_paths = self._dispatch_fill_paths(
+            mask, settings, image, flow_field, getattr(region, "polygon", None)
+        )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
             reinforce_settings = StitchSettings(
@@ -83,10 +89,16 @@ class StitchEngine:
                 randomize_length=settings.randomize_length,
             )
             paths.extend(
-                self._dispatch_fill_paths(mask, reinforce_settings, image, flow_field)
+                self._dispatch_fill_paths(
+                    mask, reinforce_settings, image, flow_field, getattr(region, "polygon", None)
+                )
             )
         if settings.fill_mode == "scanline":
-            paths.extend(self._generate_acute_tip_fill_paths(mask, settings))
+            paths.extend(
+                self._generate_acute_tip_fill_paths(
+                    mask, settings, getattr(region, "polygon", None)
+                )
+            )
 
         scale = UNITS_PER_MM / self.px_per_mm
         return [[(x * scale, y * scale) for x, y in path] for path in paths if len(path) >= 2]
@@ -111,20 +123,14 @@ class StitchEngine:
         self,
         mask: np.ndarray,
         settings: StitchSettings,
+        polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Add short local fill strokes that reach acute pointed tips."""
-        poly = self._mask_to_polygon(mask, settings.pull_compensation_mm)
+        poly = self._polygon_for_fill(mask, settings.pull_compensation_mm, polygon)
         if poly is None or poly.is_empty or not hasattr(poly, "exterior"):
             return []
 
-        clean = (mask > 0).astype(np.uint8) * 255
-        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
-            return []
-        contour = max(contours, key=cv2.contourArea)
-        epsilon = max(0.8, 0.16 * self.px_per_mm)
-        approx = cv2.approxPolyDP(contour, epsilon, closed=True)
-        ring = [tuple(pt[0]) for pt in approx]
+        ring = self._acute_tip_ring(mask, poly, polygon)
         if len(ring) < 3:
             return []
 
@@ -199,14 +205,15 @@ class StitchEngine:
         settings: StitchSettings,
         image: Optional[np.ndarray],
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]],
+        polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
             return self._generate_run_paths(mask, settings, image)
         if mode == "scanline":
-            return self._generate_scanline_paths(mask, settings)
+            return self._generate_scanline_paths(mask, settings, polygon)
         if mode == "contour":
-            return self._generate_contour_fill_paths(mask, settings)
+            return self._generate_contour_fill_paths(mask, settings, polygon)
         if mode == "satin":
             return [self._generate_satin_fill(mask, settings)]
         if mode == "flow_guided":
@@ -221,7 +228,7 @@ class StitchEngine:
             return [self._generate_cross_stitch_fill(mask, settings)]
         if mode == "none":
             return []
-        return self._generate_scanline_paths(mask, settings)
+        return self._generate_scanline_paths(mask, settings, polygon)
 
     def _dispatch_fill(
         self,
@@ -279,10 +286,13 @@ class StitchEngine:
         return [pt for path in self._generate_scanline_paths(mask, settings) for pt in path]
 
     def _generate_scanline_paths(
-        self, mask: np.ndarray, settings: StitchSettings,
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Path-aware scanline fill. Each separated island row is its own path."""
-        poly = self._mask_to_polygon(mask, settings.pull_compensation_mm)
+        poly = self._polygon_for_fill(mask, settings.pull_compensation_mm, polygon)
         if poly is None or poly.is_empty:
             return self._generate_hairline_fill_paths(mask, settings)
 
@@ -330,6 +340,7 @@ class StitchEngine:
         return self._chain_fill_rows(
             row_paths,
             max_gap_px=max(pitch_px * 2.8, stitch_len_px * 1.8),
+            containment_polygon=poly,
         )
 
     def _generate_hairline_fill_paths(
@@ -376,9 +387,22 @@ class StitchEngine:
         return [pt for path in self._generate_contour_paths(mask, settings) for pt in path]
 
     def _generate_contour_paths(
-        self, mask: np.ndarray, settings: StitchSettings
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate closed contour running stitch paths around boundaries."""
+        if polygon is not None and not polygon.is_empty and hasattr(polygon, "exterior"):
+            poly = self._polygon_for_fill(mask, settings.pull_compensation_mm, polygon)
+            if poly is not None and not poly.is_empty and hasattr(poly, "exterior"):
+                coords = list(poly.exterior.coords)
+                stitch_len = settings.stitch_length_mm * self.px_per_mm
+                resampled = self._resample_line(coords, stitch_len, 0)
+                if resampled and resampled[0] != resampled[-1]:
+                    resampled.append(resampled[0])
+                return [resampled] if len(resampled) >= 2 else []
+
         contours, _ = cv2.findContours(
             mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
@@ -408,10 +432,13 @@ class StitchEngine:
         return [pt for path in self._generate_contour_fill_paths(mask, settings) for pt in path]
 
     def _generate_contour_fill_paths(
-        self, mask: np.ndarray, settings: StitchSettings,
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Concentric inward contour fill with path boundaries preserved."""
-        poly = self._mask_to_polygon(mask, settings.pull_compensation_mm)
+        poly = self._polygon_for_fill(mask, settings.pull_compensation_mm, polygon)
         if poly is None or poly.is_empty:
             return []
 
@@ -1169,6 +1196,25 @@ class StitchEngine:
             return left + [bridge] + right
         return left + right
 
+    def _acute_tip_ring(
+        self,
+        mask: np.ndarray,
+        poly: Polygon,
+        source_polygon: Optional[Polygon] = None,
+    ) -> List[Tuple[float, float]]:
+        """Return the boundary ring used to detect acute fill caps."""
+        if source_polygon is not None and not source_polygon.is_empty and hasattr(poly, "exterior"):
+            return [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+
+        clean = (mask > 0).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            return []
+        contour = max(contours, key=cv2.contourArea)
+        epsilon = max(0.8, 0.16 * self.px_per_mm)
+        approx = cv2.approxPolyDP(contour, epsilon, closed=True)
+        return [(float(pt[0][0]), float(pt[0][1])) for pt in approx]
+
     def _remove_duplicate_points(
         self,
         points: List[Tuple[float, float]],
@@ -1196,6 +1242,7 @@ class StitchEngine:
         self,
         paths: List[List[Tuple[float, float]]],
         max_gap_px: float,
+        containment_polygon: Optional[Polygon] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Join adjacent fill rows into boustrophedon components.
 
@@ -1225,6 +1272,14 @@ class StitchEngine:
 
             if min(forward_gap, reverse_gap) <= max_gap_px:
                 next_path = path if forward_gap <= reverse_gap else path[::-1]
+                if not self._fill_row_connector_is_inside(
+                    current[-1],
+                    next_path[0],
+                    containment_polygon,
+                ):
+                    chains.append(current)
+                    current = path[:]
+                    continue
                 current.extend(next_path)
             else:
                 chains.append(current)
@@ -1234,11 +1289,49 @@ class StitchEngine:
             chains.append(current)
         return chains
 
+    def _fill_row_connector_is_inside(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        containment_polygon: Optional[Polygon],
+    ) -> bool:
+        if containment_polygon is None or containment_polygon.is_empty:
+            return True
+        connector = LineString([start, end])
+        if connector.length <= 0.25:
+            return True
+        safe_area = containment_polygon.buffer(0.35, join_style=2)
+        if not safe_area.covers(connector):
+            return False
+        if hasattr(containment_polygon, "interiors"):
+            for ring in containment_polygon.interiors:
+                hole = Polygon(ring)
+                if connector.crosses(hole) or connector.within(hole):
+                    return False
+        return True
+
     def _polyline_length(self, points: List[Tuple[float, float]]) -> float:
         if len(points) < 2:
             return 0.0
         pts = np.array(points, dtype=np.float64)
         return float(np.sqrt((np.diff(pts, axis=0) ** 2).sum(axis=1)).sum())
+
+    def _polygon_for_fill(
+        self,
+        mask: np.ndarray,
+        compensation_mm: float,
+        polygon: Optional[Polygon] = None,
+    ) -> Optional[Polygon]:
+        if polygon is not None and not polygon.is_empty:
+            poly = polygon
+            if compensation_mm > 0:
+                poly = poly.buffer(compensation_mm * self.px_per_mm, join_style=1)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if hasattr(poly, "geoms"):
+                poly = max(poly.geoms, key=lambda geom: geom.area)
+            return None if poly.is_empty else poly
+        return self._mask_to_polygon(mask, compensation_mm)
 
     def _smooth_polyline(
         self,

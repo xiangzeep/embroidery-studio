@@ -493,7 +493,8 @@ class MainWindow(QMainWindow):
                     if region.mask is not None:
                         self.canvas.set_region_mask(
                             region.uid, region.mask,
-                            layer.thread_color_rgb, mask_scale
+                            layer.thread_color_rgb, mask_scale,
+                            getattr(region, "polygon", None)
                         )
 
             self.canvas.fit_to_content()

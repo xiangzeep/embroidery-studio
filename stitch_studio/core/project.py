@@ -74,6 +74,7 @@ class Region:
     uid: str = ""
     name: str = "Region"
     mask: Optional[np.ndarray] = None  # H×W bool/uint8
+    polygon: Optional[Any] = None  # Shapely geometry reconstructed from mask
     stitch_settings: StitchSettings = field(default_factory=StitchSettings)
     visible: bool = True
     locked: bool = False

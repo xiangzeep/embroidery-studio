@@ -563,6 +563,32 @@ class ExportPathTests(unittest.TestCase):
         self.assertLess(scene_rect.top(), content.top())
         self.assertGreater(scene_rect.bottom(), content.bottom())
 
+    def test_canvas_region_preview_uses_vector_polygon_when_available(self):
+        from shapely.geometry import Polygon
+
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        mask[20:70, 10:70] = 255
+        polygon = Polygon([(40, 70), (70, 70), (70, 20)])
+
+        canvas.set_region_mask(
+            "region-1",
+            mask,
+            (32, 38, 93),
+            scale=2.0,
+            polygon=polygon,
+        )
+        app.processEvents()
+
+        item = canvas._mask_items["region-1"]
+        self.assertEqual(item.__class__.__name__, "RegionPolygonItem")
+        self.assertGreaterEqual(item.boundingRect().left(), 79.0)
+        self.assertLessEqual(item.boundingRect().right(), 141.0)
+
     def test_layers_use_source_region_color_for_quantized_preview(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -842,6 +868,132 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreater(float(max(start[0], end[0])), 253.0)
         self.assertLess(float(min(start[1], end[1])), 132.0)
         self.assertGreater(float(max(start[1], end[1])), 222.0)
+
+    def test_geometry_engine_reconstructs_stair_edge_as_vector_line(self):
+        geom_mod = importlib.import_module("stitch_studio.core.geometry_engine")
+        mask = np.zeros((256, 256), dtype=np.uint8)
+        for y in range(130, 225):
+            x0 = 255 - int((y - 130) * 0.55)
+            mask[y, x0:256] = 255
+
+        poly = geom_mod.GeometryEngine.reconstruct_region_polygon(mask)
+        coords = np.asarray(poly.exterior.coords[:-1])
+        diagonal_edges = []
+        for idx, start in enumerate(coords):
+            end = coords[(idx + 1) % len(coords)]
+            dx = abs(float(end[0] - start[0]))
+            dy = abs(float(end[1] - start[1]))
+            if dx > 20.0 and dy > 20.0:
+                diagonal_edges.append((start, end))
+
+        self.assertEqual(len(diagonal_edges), 1)
+        self.assertLessEqual(len(coords), 5)
+
+    def test_layer_regions_store_reconstructed_polygon(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [thread_mod.ThreadColor(name="Navy", color_rgb=(32, 38, 93))]
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        for y in range(20, 62):
+            x0 = 60 - int((y - 20) * 0.75)
+            mask[y, x0:70] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions([(0, mask)], palette)
+
+        self.assertIsNotNone(layers[0].regions[0].polygon)
+        self.assertTrue(layers[0].regions[0].polygon.is_valid)
+
+    def test_scanline_fill_prefers_region_polygon_over_mask_boundary(self):
+        from shapely.geometry import Polygon
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((80, 80), dtype=np.uint8)
+        region.mask[20:70, 10:70] = 255
+        region.polygon = Polygon([(40, 70), (70, 70), (70, 20)])
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            angle_deg=0.0,
+            stitch_length_mm=1.0,
+            row_spacing_mm=1.0,
+            density=1.0,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+        xs = [x for path in paths for x, _ in path]
+        self.assertTrue(xs)
+        self.assertGreater(min(xs), 90.0)
+
+    def test_scanline_fill_does_not_stitch_across_polygon_gap(self):
+        from shapely.geometry import Polygon
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((90, 150), dtype=np.uint8)
+        mask[20:70, 10:135] = 255
+        polygon = Polygon(
+            [(10, 20), (135, 20), (135, 70), (10, 70)],
+            holes=[[(64, 28), (72, 28), (72, 36), (64, 36)]],
+        )
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            angle_deg=0.0,
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        paths = engine._generate_scanline_paths(mask, settings, polygon)
+        gap = polygon.interiors[0]
+        gap_poly = Polygon(gap)
+        crossing_segments = 0
+        for path in paths:
+            for start, end in zip(path, path[1:]):
+                segment = stitch_mod.LineString([start, end])
+                if segment.crosses(gap_poly) or segment.within(gap_poly):
+                    crossing_segments += 1
+
+        self.assertEqual(crossing_segments, 0)
+
+    def test_polygon_acute_tip_fill_adds_fullness_strokes(self):
+        from shapely.geometry import Polygon
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        polygon = Polygon([(46, 92), (66, 52), (76, 10), (84, 92)])
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            angle_deg=45.0,
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.18,
+            density=1.45,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            underlay=False,
+        )
+
+        paths = engine._generate_acute_tip_fill_paths(mask, settings, polygon)
+        near_tip_paths = [
+            path for path in paths
+            if len(path) >= 2 and any(np.hypot(x - 76.0, y - 10.0) <= 3.0 for x, y in path)
+        ]
+
+        self.assertGreaterEqual(len(near_tip_paths), 4)
 
     def test_mask_polygon_smooths_large_curved_surface(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 )
 import cv2
 import numpy as np
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 
 
 def _render_region_mask_rgba(
@@ -146,6 +146,50 @@ class RegionMaskItem(QGraphicsPixmapItem):
             self.setScale(item_scale)
 
 
+class RegionPolygonItem(QGraphicsPathItem):
+    """Semi-transparent overlay showing a reconstructed vector region boundary."""
+
+    def __init__(self, polygon: Any, color: QColor, opacity: float = 0.3,
+                 scale: float = 1.0, parent=None):
+        super().__init__(parent)
+        self._polygon = polygon
+        self._scale = float(scale)
+        self._build_path()
+
+        fill = QColor(color)
+        fill.setAlpha(int(np.clip(255 * opacity, 0, 255)))
+        self.setBrush(QBrush(fill))
+        self.setPen(QPen(Qt.NoPen))
+
+    def _build_path(self):
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
+
+        geometries = getattr(self._polygon, "geoms", None)
+        if geometries is None:
+            geometries = [self._polygon]
+
+        for geom in geometries:
+            if geom.is_empty or not hasattr(geom, "exterior"):
+                continue
+            self._add_ring_to_path(path, geom.exterior.coords)
+            for interior in getattr(geom, "interiors", []):
+                self._add_ring_to_path(path, interior.coords)
+
+        self.setPath(path)
+
+    def _add_ring_to_path(self, path: QPainterPath, coords):
+        points = list(coords)
+        if not points:
+            return
+
+        first_x, first_y = points[0]
+        path.moveTo(first_x * self._scale, first_y * self._scale)
+        for x, y in points[1:]:
+            path.lineTo(x * self._scale, y * self._scale)
+        path.closeSubpath()
+
+
 class EmbroideryCanvas(QGraphicsView):
     """Main canvas for viewing and editing embroidery patterns."""
 
@@ -189,7 +233,7 @@ class EmbroideryCanvas(QGraphicsView):
         # Scene items
         self._bg_item: Optional[QGraphicsPixmapItem] = None
         self._layer_groups: Dict[str, QGraphicsItemGroup] = {}
-        self._mask_items: Dict[str, RegionMaskItem] = {}
+        self._mask_items: Dict[str, QGraphicsItem] = {}
         self._grid_items: List[QGraphicsLineItem] = []
 
         # Scale: 1 scene unit = 1/10 mm (matching pyembroidery)
@@ -269,14 +313,18 @@ class EmbroideryCanvas(QGraphicsView):
         self._update_scene_rect_for_panning()
 
     def set_region_mask(self, region_uid: str, mask: np.ndarray,
-                        color: Tuple[int, int, int], scale: float = 1.0):
+                        color: Tuple[int, int, int], scale: float = 1.0,
+                        polygon: Optional[Any] = None):
         """Show a semi-transparent region mask overlay."""
         if region_uid in self._mask_items:
             self.scene.removeItem(self._mask_items[region_uid])
 
         if self._show_regions:
             qcolor = QColor(*color)
-            item = RegionMaskItem(mask, qcolor, opacity=1.0, scale=scale)
+            if polygon is not None and not polygon.is_empty:
+                item = RegionPolygonItem(polygon, qcolor, opacity=1.0, scale=scale)
+            else:
+                item = RegionMaskItem(mask, qcolor, opacity=1.0, scale=scale)
             item.setZValue(-50)
             self.scene.addItem(item)
             self._mask_items[region_uid] = item
