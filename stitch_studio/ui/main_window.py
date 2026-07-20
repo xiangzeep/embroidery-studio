@@ -6,6 +6,7 @@ and the embroidery canvas.
 
 import os
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 from PySide6.QtWidgets import (
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QIcon
+from shapely.geometry import Polygon
+from shapely.affinity import scale as shapely_scale, translate as shapely_translate
 
 from ..core.thread_db import ThreadDatabase
 from ..core.project import Project, Layer, Region, StitchSettings
@@ -42,25 +45,59 @@ class StitchWorker(QThread):
     def run(self):
         try:
             total_regions = sum(len(l.regions) for l in self.project.layers)
-            done = 0
-            for layer in self.project.layers:
-                if not layer.visible:
-                    continue
-                for region in layer.regions:
-                    if not region.visible:
-                        done += 1
-                        continue
-                    paths = self.engine.generate_region_paths(
-                        region, self.image, self.flow_field
-                    )
-                    region.stitch_paths = paths
-                    pts = [pt for path in paths for pt in path]
-                    region.stitch_points = pts
+            jobs = [
+                region
+                for layer in self.project.layers
+                if layer.visible
+                for region in layer.regions
+                if region.visible
+            ]
+            done = total_regions - len(jobs)
+
+            worker_count = self._generation_worker_count(len(jobs))
+            if worker_count <= 1:
+                for region in jobs:
+                    self._generate_region(region)
                     done += 1
                     self.progress.emit(done, total_regions)
+            else:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_to_region = {
+                        executor.submit(
+                            self.engine.generate_region_paths,
+                            region,
+                            self.image,
+                            self.flow_field,
+                        ): region
+                        for region in jobs
+                    }
+                    for future in as_completed(future_to_region):
+                        region = future_to_region[future]
+                        paths = future.result()
+                        self._store_region_paths(region, paths)
+                        done += 1
+                        self.progress.emit(done, total_regions)
             self.finished.emit()
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _generation_worker_count(job_count: int) -> int:
+        if job_count <= 1:
+            return 1
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(job_count, cpu_count))
+
+    def _generate_region(self, region):
+        paths = self.engine.generate_region_paths(
+            region, self.image, self.flow_field
+        )
+        self._store_region_paths(region, paths)
+
+    @staticmethod
+    def _store_region_paths(region, paths):
+        region.stitch_paths = paths
+        region.stitch_points = [pt for path in paths for pt in path]
 
 
 class MainWindow(QMainWindow):
@@ -285,6 +322,12 @@ class MainWindow(QMainWindow):
         self.canvas.zoom_changed.connect(
             lambda z: self.status_zoom.setText(f"Zoom: {z * 100:.0f}%")
         )
+        self.canvas.object_selected.connect(self._on_canvas_object_selected)
+        self.canvas.object_scale_requested.connect(self._scale_stitch_object)
+        self.canvas.object_move_requested.connect(self._move_stitch_object)
+        self.canvas.object_resize_requested.connect(self._resize_stitch_object)
+        self.canvas.boundary_edit_requested.connect(self._start_boundary_edit)
+        self.canvas.boundary_edit_applied.connect(self._apply_boundary_edit)
 
         # Layer panel
         self.layer_panel.layer_selected.connect(self._on_layer_selected)
@@ -630,6 +673,8 @@ class MainWindow(QMainWindow):
 
     def _on_layer_selected(self, uid):
         """When user selects a layer or region, show its properties."""
+        self.canvas.select_object(uid)
+
         # Check if it's a layer
         layer = self.project.get_layer(uid)
         if layer:
@@ -642,6 +687,243 @@ class MainWindow(QMainWindow):
             if region:
                 self.props_panel.set_settings(uid, region.stitch_settings)
                 return
+
+    def _on_canvas_object_selected(self, uid):
+        self.layer_panel.select_uid(uid)
+        self._on_layer_selected(uid)
+
+    def _scale_stitch_object(self, uid: str, factor: float):
+        """Scale a generated layer or region and redraw from project data."""
+        layer = self.project.get_layer(uid)
+        if layer:
+            layer.scale_stitches(factor)
+            affected_layer = layer
+        else:
+            region = None
+            affected_layer = None
+            for candidate_layer in self.project.layers:
+                region = candidate_layer.get_region(uid)
+                if region:
+                    affected_layer = candidate_layer
+                    break
+            if not region or affected_layer is None:
+                return
+            region.scale_stitches(factor)
+
+        self.project.modified = True
+        self._refresh_layer_stitches(affected_layer)
+        self.canvas.select_object(uid)
+        self.layer_panel.refresh()
+        self.layer_panel.select_uid(uid)
+        self._update_stats()
+        self.status_info.setText(f"Scaled selected object: {factor:.2f}x")
+
+    def _move_stitch_object(self, uid: str, dx: float, dy: float):
+        """Move a generated layer or region and redraw from project data."""
+        layer = self.project.get_layer(uid)
+        if layer:
+            layer.translate_stitches(dx, dy)
+            affected_layer = layer
+        else:
+            region = None
+            affected_layer = None
+            for candidate_layer in self.project.layers:
+                region = candidate_layer.get_region(uid)
+                if region:
+                    affected_layer = candidate_layer
+                    break
+            if not region or affected_layer is None:
+                return
+            region.translate_stitches(dx, dy)
+
+        self.project.modified = True
+        self._refresh_layer_stitches(affected_layer)
+        self.canvas.select_object(uid)
+        self.layer_panel.refresh()
+        self.layer_panel.select_uid(uid)
+        self._update_stats()
+        self.status_info.setText(f"Moved selected object: {dx:.1f}, {dy:.1f}")
+
+    def _resize_stitch_object(self, uid: str, scene_bounds):
+        """Resize a region/layer to the mouse-provided scene bounds and regenerate."""
+        layer = self.project.get_layer(uid)
+        if layer:
+            self._resize_layer_regions(layer, scene_bounds)
+            affected_layer = layer
+            affected_region = None
+        else:
+            found = self._find_region_with_layer(uid)
+            if not found:
+                return
+            layer, region = found
+            self._resize_region_polygon(region, scene_bounds)
+            self._regenerate_region(layer, region)
+            affected_layer = layer
+            affected_region = region
+
+        self.project.modified = True
+        if affected_region is None:
+            self._refresh_layer_region_masks(affected_layer)
+        else:
+            self._refresh_region_mask(affected_layer, affected_region)
+        self._refresh_layer_stitches(affected_layer)
+        self.canvas.select_object(uid)
+        self.layer_panel.refresh()
+        self.layer_panel.select_uid(uid)
+        self._update_stats()
+        self.status_info.setText("Resized selected object and regenerated stitches")
+
+    def _resize_layer_regions(self, layer: Layer, scene_bounds):
+        old_bounds = layer.stitch_bounds()
+        if old_bounds is None:
+            return
+        sx, sy, dx, dy = self._scene_bounds_transform(old_bounds, scene_bounds)
+        for region in layer.regions:
+            if getattr(region, "polygon", None) is not None and not region.polygon.is_empty:
+                mask_scale = self._current_mask_scale()
+                origin = (old_bounds[0] / mask_scale, old_bounds[1] / mask_scale)
+                region.polygon = shapely_scale(region.polygon, xfact=sx, yfact=sy, origin=origin)
+                region.polygon = shapely_translate(region.polygon, xoff=dx / mask_scale, yoff=dy / mask_scale)
+                self._regenerate_region(layer, region)
+            else:
+                region.scale_stitches(sx, origin=(old_bounds[0], old_bounds[1]))
+
+    def _resize_region_polygon(self, region: Region, scene_bounds):
+        polygon = getattr(region, "polygon", None)
+        if polygon is None or polygon.is_empty:
+            region_bounds = region.stitch_bounds()
+            if region_bounds is None:
+                return
+            sx, sy, dx, dy = self._scene_bounds_transform(region_bounds, scene_bounds)
+            region.scale_stitches(sx, origin=(region_bounds[0], region_bounds[1]))
+            region.translate_stitches(dx, dy)
+            return
+
+        mask_scale = self._current_mask_scale()
+        old_minx, old_miny, old_maxx, old_maxy = polygon.bounds
+        new_left, new_top, new_right, new_bottom = scene_bounds
+        new_bounds = (
+            new_left / mask_scale,
+            new_top / mask_scale,
+            new_right / mask_scale,
+            new_bottom / mask_scale,
+        )
+        old_w = max(old_maxx - old_minx, 1e-6)
+        old_h = max(old_maxy - old_miny, 1e-6)
+        new_w = max(new_bounds[2] - new_bounds[0], 1e-6)
+        new_h = max(new_bounds[3] - new_bounds[1], 1e-6)
+        resized = shapely_scale(
+            polygon,
+            xfact=new_w / old_w,
+            yfact=new_h / old_h,
+            origin=(old_minx, old_miny),
+        )
+        resized = shapely_translate(
+            resized,
+            xoff=new_bounds[0] - old_minx,
+            yoff=new_bounds[1] - old_miny,
+        )
+        if not resized.is_valid:
+            resized = resized.buffer(0)
+        if not resized.is_empty:
+            region.polygon = resized
+
+    @staticmethod
+    def _scene_bounds_transform(old_bounds, new_bounds):
+        old_left, old_top, old_right, old_bottom = old_bounds
+        new_left, new_top, new_right, new_bottom = new_bounds
+        old_w = max(old_right - old_left, 1e-6)
+        old_h = max(old_bottom - old_top, 1e-6)
+        sx = max(new_right - new_left, 1e-6) / old_w
+        sy = max(new_bottom - new_top, 1e-6) / old_h
+        return sx, sy, new_left - old_left, new_top - old_top
+
+    def _regenerate_region(self, layer: Layer, region: Region):
+        paths = self.stitch_engine.generate_region_paths(
+            region,
+            self.project.processed_image,
+            self._flow_field,
+        )
+        region.stitch_paths = paths
+        region.stitch_points = [pt for path in paths for pt in path]
+
+    def _refresh_region_masks(self):
+        for layer in self.project.layers:
+            for region in layer.regions:
+                self._refresh_region_mask(layer, region)
+
+    def _refresh_layer_region_masks(self, layer: Layer):
+        for region in layer.regions:
+            self._refresh_region_mask(layer, region)
+
+    def _refresh_region_mask(self, layer: Layer, region: Region):
+        if region.mask is not None:
+            self.canvas.set_region_mask(
+                region.uid,
+                region.mask,
+                layer.thread_color_rgb,
+                self._current_mask_scale(),
+                getattr(region, "polygon", None),
+            )
+
+    def _start_boundary_edit(self, uid: str):
+        """Start interactive Bezier boundary editing for a single region."""
+        found = self._find_region_with_layer(uid)
+        if not found:
+            self.status_info.setText("Boundary edit works on a single region.")
+            return
+        layer, region = found
+        polygon = getattr(region, "polygon", None)
+        if polygon is None or polygon.is_empty:
+            self.status_info.setText("Selected region has no editable vector boundary.")
+            return
+
+        self.canvas.start_boundary_edit(uid, polygon, self._current_mask_scale())
+        self.canvas.select_object(uid)
+        self.status_info.setText("Editing boundary: drag anchors/handles, Enter to apply, Esc to cancel")
+
+    def _apply_boundary_edit(self, uid: str, source_points):
+        """Store an edited polygon and regenerate only the affected region."""
+        found = self._find_region_with_layer(uid)
+        if not found or len(source_points) < 3:
+            return
+        layer, region = found
+
+        polygon = Polygon(source_points)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty:
+            self.status_info.setText("Boundary edit produced an empty polygon.")
+            return
+
+        region.polygon = polygon
+        self._regenerate_region(layer, region)
+
+        self._refresh_region_mask(layer, region)
+
+        self.project.modified = True
+        self._refresh_layer_stitches(layer)
+        self.canvas.select_object(uid)
+        self.layer_panel.refresh()
+        self.layer_panel.select_uid(uid)
+        self._update_stats()
+        self.status_info.setText("Boundary updated and region stitches regenerated")
+
+    def _find_region_with_layer(self, uid: str):
+        for layer in self.project.layers:
+            region = layer.get_region(uid)
+            if region:
+                return layer, region
+        return None
+
+    def _current_mask_scale(self) -> float:
+        if self.project.processed_image is None:
+            return 1.0
+        img_settings = self.image_panel.get_image_settings()
+        img_h, img_w = self.project.processed_image.shape[:2]
+        out_w = img_settings.output_width_mm * 10
+        out_h = img_settings.output_height_mm * 10
+        return min(out_w / img_w, out_h / img_h)
 
     def _on_visibility_changed(self, uid, visible):
         if uid in self.canvas._layer_groups:
@@ -662,21 +944,33 @@ class MainWindow(QMainWindow):
     def _refresh_canvas(self):
         """Redraw all stitch paths on the canvas."""
         for layer in self.project.layers:
-            if not layer.visible:
-                continue
+            self._refresh_layer_stitches(layer)
 
-            regions_data = []
-            for region in layer.regions:
-                if region.stitch_points and region.visible:
-                    regions_data.append({
-                        'uid': region.uid,
-                        'points': region.stitch_points,
-                        'paths': getattr(region, 'stitch_paths', None),
-                        'color': layer.thread_color_rgb,
-                    })
+    def _refresh_layer_stitches(self, layer: Layer):
+        """Redraw one layer's stitch graphics from project data."""
+        if not layer.visible:
+            if hasattr(self.canvas, "clear_layer_stitches"):
+                self.canvas.clear_layer_stitches(layer.uid)
+            return
 
-            if regions_data:
-                self.canvas.set_layer_stitches(layer.uid, regions_data)
+        regions_data = self._layer_regions_data(layer)
+        if regions_data:
+            self.canvas.set_layer_stitches(layer.uid, regions_data)
+        elif hasattr(self.canvas, "clear_layer_stitches"):
+            self.canvas.clear_layer_stitches(layer.uid)
+
+    @staticmethod
+    def _layer_regions_data(layer: Layer):
+        regions_data = []
+        for region in layer.regions:
+            if region.stitch_points and region.visible:
+                regions_data.append({
+                    'uid': region.uid,
+                    'points': region.stitch_points,
+                    'paths': getattr(region, 'stitch_paths', None),
+                    'color': layer.thread_color_rgb,
+                })
+        return regions_data
 
     def _update_stats(self):
         """Update pattern statistics display."""

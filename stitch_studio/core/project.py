@@ -86,6 +86,69 @@ class Region:
         if not self.uid:
             self.uid = str(uuid.uuid4())[:8]
 
+    def stitch_bounds(self) -> Optional[Tuple[float, float, float, float]]:
+        points = self._all_stitch_points()
+        if not points:
+            return None
+        xs = [pt[0] for pt in points]
+        ys = [pt[1] for pt in points]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def scale_stitches(
+        self,
+        factor: float,
+        origin: Optional[Tuple[float, float]] = None,
+    ):
+        """Scale generated stitches around their center or an explicit origin."""
+        if factor <= 0:
+            raise ValueError("Scale factor must be positive")
+        if not self.stitch_paths and not self.stitch_points:
+            return
+
+        if origin is None:
+            bounds = self.stitch_bounds()
+            if bounds is None:
+                return
+            origin = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
+
+        ox, oy = origin
+
+        def scale_point(pt: Tuple[float, float]) -> Tuple[float, float]:
+            x, y = pt
+            return (ox + (x - ox) * factor, oy + (y - oy) * factor)
+
+        if self.stitch_paths:
+            self.stitch_paths = [
+                [scale_point(pt) for pt in path]
+                for path in self.stitch_paths
+            ]
+            self.stitch_points = [pt for path in self.stitch_paths for pt in path]
+        elif self.stitch_points:
+            self.stitch_points = [scale_point(pt) for pt in self.stitch_points]
+
+    def translate_stitches(self, dx: float, dy: float):
+        """Move generated stitches by a scene-unit delta."""
+        if not self.stitch_paths and not self.stitch_points:
+            return
+
+        def move_point(pt: Tuple[float, float]) -> Tuple[float, float]:
+            x, y = pt
+            return (x + dx, y + dy)
+
+        if self.stitch_paths:
+            self.stitch_paths = [
+                [move_point(pt) for pt in path]
+                for path in self.stitch_paths
+            ]
+            self.stitch_points = [pt for path in self.stitch_paths for pt in path]
+        elif self.stitch_points:
+            self.stitch_points = [move_point(pt) for pt in self.stitch_points]
+
+    def _all_stitch_points(self) -> List[Tuple[float, float]]:
+        if self.stitch_paths:
+            return [pt for path in self.stitch_paths for pt in path]
+        return self.stitch_points or []
+
     def to_dict(self) -> dict:
         d = {
             'uid': self.uid,
@@ -159,6 +222,41 @@ class Layer:
         for m in masks:
             combined = np.maximum(combined, m)
         return combined
+
+    def stitch_bounds(self) -> Optional[Tuple[float, float, float, float]]:
+        bounds = [r.stitch_bounds() for r in self.regions if r.visible]
+        bounds = [b for b in bounds if b is not None]
+        if not bounds:
+            return None
+        return (
+            min(b[0] for b in bounds),
+            min(b[1] for b in bounds),
+            max(b[2] for b in bounds),
+            max(b[3] for b in bounds),
+        )
+
+    def scale_stitches(
+        self,
+        factor: float,
+        origin: Optional[Tuple[float, float]] = None,
+    ):
+        """Scale generated stitches for every visible region in this layer."""
+        if factor <= 0:
+            raise ValueError("Scale factor must be positive")
+        if origin is None:
+            bounds = self.stitch_bounds()
+            if bounds is None:
+                return
+            origin = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
+        for region in self.regions:
+            if region.visible:
+                region.scale_stitches(factor, origin)
+
+    def translate_stitches(self, dx: float, dy: float):
+        """Move generated stitches for every visible region in this layer."""
+        for region in self.regions:
+            if region.visible:
+                region.translate_stitches(dx, dy)
 
     def to_dict(self) -> dict:
         return {

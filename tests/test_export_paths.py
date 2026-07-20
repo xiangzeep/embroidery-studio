@@ -91,6 +91,62 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(region.stitch_paths, [[(0.0, 0.0), (1.0, 0.0)]])
 
+    def test_region_scale_stitches_updates_paths_and_points(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)], [(10.0, 10.0), (0.0, 10.0)]]
+        region.stitch_points = [pt for path in region.stitch_paths for pt in path]
+
+        region.scale_stitches(2.0)
+
+        self.assertEqual(region.stitch_paths[0], [(-5.0, -5.0), (15.0, -5.0)])
+        self.assertEqual(region.stitch_paths[1], [(15.0, 15.0), (-5.0, 15.0)])
+        self.assertEqual(region.stitch_points, [pt for path in region.stitch_paths for pt in path])
+
+    def test_layer_scale_stitches_updates_all_regions_around_layer_center(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        layer = project_mod.Layer()
+        left = project_mod.Region()
+        right = project_mod.Region()
+        left.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        right.stitch_paths = [[(20.0, 0.0), (30.0, 0.0)]]
+        layer.regions = [left, right]
+
+        layer.scale_stitches(0.5)
+
+        self.assertEqual(left.stitch_paths, [[(7.5, 0.0), (12.5, 0.0)]])
+        self.assertEqual(right.stitch_paths, [[(17.5, 0.0), (22.5, 0.0)]])
+
+    def test_region_translate_stitches_updates_paths_and_points(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)], [(10.0, 10.0), (0.0, 10.0)]]
+        region.stitch_points = [pt for path in region.stitch_paths for pt in path]
+
+        region.translate_stitches(3.0, -2.0)
+
+        self.assertEqual(region.stitch_paths[0], [(3.0, -2.0), (13.0, -2.0)])
+        self.assertEqual(region.stitch_paths[1], [(13.0, 8.0), (3.0, 8.0)])
+        self.assertEqual(region.stitch_points, [pt for path in region.stitch_paths for pt in path])
+
+    def test_layer_translate_stitches_updates_all_visible_regions(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        layer = project_mod.Layer()
+        visible = project_mod.Region()
+        hidden = project_mod.Region(visible=False)
+        visible.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        hidden.stitch_paths = [[(20.0, 0.0), (30.0, 0.0)]]
+        layer.regions = [visible, hidden]
+
+        layer.translate_stitches(-4.0, 6.0)
+
+        self.assertEqual(visible.stitch_paths, [[(-4.0, 6.0), (6.0, 6.0)]])
+        self.assertEqual(hidden.stitch_paths, [[(20.0, 0.0), (30.0, 0.0)]])
+
     def test_run_components_heal_nearby_line_art_gaps(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         engine = stitch_mod.StitchEngine(px_per_mm=4.0)
@@ -589,6 +645,284 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreaterEqual(item.boundingRect().left(), 79.0)
         self.assertLessEqual(item.boundingRect().right(), 141.0)
 
+    def test_canvas_region_preview_keeps_large_base_masks_behind_small_details(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        small = np.zeros((100, 100), dtype=np.uint8)
+        small[20:40, 20:40] = 255
+        large = np.zeros((100, 100), dtype=np.uint8)
+        large[5:95, 5:95] = 255
+
+        canvas.set_region_mask("small-green", small, (80, 200, 80), scale=1.0)
+        canvas.set_region_mask("large-black", large, (0, 0, 0), scale=1.0)
+        app.processEvents()
+
+        self.assertLess(
+            canvas._mask_items["large-black"].zValue(),
+            canvas._mask_items["small-green"].zValue(),
+        )
+
+    def test_canvas_stitch_region_item_is_selectable_and_emits_uid(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        selected = []
+        canvas.object_selected.connect(selected.append)
+
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (10.0, 0.0)],
+                "paths": [[(0.0, 0.0), (10.0, 0.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+
+        item = canvas._object_items["region-1"]
+        item.setSelected(True)
+        app.processEvents()
+
+        self.assertTrue(item.flags() & canvas_mod.QGraphicsItem.ItemIsSelectable)
+        self.assertEqual(selected[-1], "region-1")
+
+    def test_canvas_stitch_items_use_device_cache_for_large_design_interaction(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)],
+                "paths": [[(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+        app.processEvents()
+
+        object_item = canvas._object_items["region-1"]
+        path_item = next(
+            child for child in object_item.childItems()
+            if child.__class__.__name__ == "StitchPathItem"
+        )
+
+        self.assertEqual(
+            object_item.cacheMode(),
+            canvas_mod.QGraphicsItem.DeviceCoordinateCache,
+        )
+        self.assertEqual(
+            path_item.cacheMode(),
+            canvas_mod.QGraphicsItem.DeviceCoordinateCache,
+        )
+
+    def test_canvas_arrow_key_moves_selected_stitch_object(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        qt_core = importlib.import_module("PySide6.QtCore")
+        qt_gui = importlib.import_module("PySide6.QtGui")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        moves = []
+        canvas.object_move_requested.connect(lambda uid, dx, dy: moves.append((uid, dx, dy)))
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (10.0, 0.0)],
+                "paths": [[(0.0, 0.0), (10.0, 0.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+        canvas.select_object("region-1")
+
+        event = qt_gui.QKeyEvent(
+            qt_core.QEvent.KeyPress,
+            qt_core.Qt.Key_Right,
+            qt_core.Qt.NoModifier,
+        )
+        canvas.keyPressEvent(event)
+        app.processEvents()
+
+        self.assertEqual(moves[-1], ("region-1", 10.0, 0.0))
+
+    def test_canvas_selection_shows_mouse_resize_handles(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)],
+                "paths": [[(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+
+        canvas.select_object("region-1")
+        app.processEvents()
+
+        self.assertIsNotNone(canvas._selection_box_item)
+        self.assertEqual(len(canvas._resize_handle_items), 8)
+
+    def test_canvas_resize_handle_emits_new_bounds_for_selected_region(self):
+        qt_core = importlib.import_module("PySide6.QtCore")
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        resized = []
+        canvas.object_resize_requested.connect(
+            lambda uid, rect: resized.append((uid, rect))
+        )
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)],
+                "paths": [[(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+        canvas.select_object("region-1")
+        start_rect = canvas._selection_box_item.rect()
+
+        handle = next(item for item in canvas._resize_handle_items if item.role == "se")
+        handle.setPos(qt_core.QPointF(30.0, 18.0))
+        handle.mouseReleaseEvent(None)
+        app.processEvents()
+
+        self.assertEqual(resized[0][0], "region-1")
+        self.assertEqual(resized[0][1], (start_rect.left(), start_rect.top(), 30.0, 18.0))
+
+    def test_canvas_selection_box_drag_emits_move_for_selected_region(self):
+        qt_core = importlib.import_module("PySide6.QtCore")
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        moves = []
+        canvas.object_move_requested.connect(lambda uid, dx, dy: moves.append((uid, dx, dy)))
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)],
+                "paths": [[(0.0, 0.0), (20.0, 0.0), (20.0, 10.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+        canvas.select_object("region-1")
+
+        canvas._selection_box_item.setPos(qt_core.QPointF(12.0, -4.0))
+        canvas._finish_selection_box_drag()
+        app.processEvents()
+
+        self.assertEqual(moves[-1], ("region-1", 12.0, -4.0))
+
+    def test_main_window_move_region_refreshes_only_affected_layer(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        project = project_mod.Project()
+        layer_1 = project_mod.Layer(thread_color_rgb=(10, 20, 30), order=0)
+        layer_2 = project_mod.Layer(thread_color_rgb=(40, 50, 60), order=1)
+        region_1 = project_mod.Region()
+        region_2 = project_mod.Region()
+        region_1.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        region_1.stitch_points = [pt for path in region_1.stitch_paths for pt in path]
+        region_2.stitch_paths = [[(20.0, 0.0), (30.0, 0.0)]]
+        region_2.stitch_points = [pt for path in region_2.stitch_paths for pt in path]
+        layer_1.regions = [region_1]
+        layer_2.regions = [region_2]
+        project.layers = [layer_1, layer_2]
+
+        refreshed = []
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.canvas = types.SimpleNamespace(
+            set_layer_stitches=lambda layer_uid, data: refreshed.append(layer_uid),
+            select_object=lambda uid: None,
+        )
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window._update_stats = lambda: None
+
+        window._move_stitch_object(region_1.uid, 5.0, 0.0)
+
+        self.assertEqual(refreshed, [layer_1.uid])
+
+    def test_stitch_worker_sizes_generation_pool_to_available_cpu(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        original_cpu_count = main_mod.os.cpu_count
+        try:
+            main_mod.os.cpu_count = lambda: 8
+            self.assertEqual(main_mod.StitchWorker._generation_worker_count(3), 3)
+            self.assertEqual(main_mod.StitchWorker._generation_worker_count(20), 8)
+            self.assertEqual(main_mod.StitchWorker._generation_worker_count(1), 1)
+        finally:
+            main_mod.os.cpu_count = original_cpu_count
+
+    def test_canvas_boundary_editor_builds_bezier_controls_from_polygon(self):
+        from shapely.geometry import Polygon
+
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        polygon = Polygon([(2.0, 4.0), (12.0, 4.0), (8.0, 10.0)])
+
+        canvas.start_boundary_edit("region-1", polygon, scale=3.0)
+        app.processEvents()
+
+        self.assertEqual(canvas._boundary_edit_uid, "region-1")
+        self.assertEqual(len(canvas._boundary_anchor_items), 3)
+        self.assertEqual(len(canvas._boundary_control_items), 6)
+        self.assertGreater(canvas._boundary_edit_item.path().elementCount(), 3)
+
+    def test_canvas_boundary_editor_applies_dragged_anchor_in_source_coordinates(self):
+        from shapely.geometry import Polygon
+
+        qt_core = importlib.import_module("PySide6.QtCore")
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        applied = []
+        canvas.boundary_edit_applied.connect(
+            lambda uid, points: applied.append((uid, points))
+        )
+        polygon = Polygon([(2.0, 4.0), (12.0, 4.0), (12.0, 10.0), (2.0, 10.0)])
+        canvas.start_boundary_edit("region-1", polygon, scale=2.0)
+
+        canvas._boundary_anchor_items[0].setPos(qt_core.QPointF(8.0, 12.0))
+        canvas.apply_boundary_edit()
+        app.processEvents()
+
+        self.assertEqual(applied[0][0], "region-1")
+        self.assertAlmostEqual(applied[0][1][0][0], 4.0)
+        self.assertAlmostEqual(applied[0][1][0][1], 6.0)
+        self.assertIsNone(canvas._boundary_edit_uid)
+
     def test_layers_use_source_region_color_for_quantized_preview(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -1072,6 +1406,28 @@ class ExportPathTests(unittest.TestCase):
         commands = [cmd for _, _, cmd in pattern.stitches]
 
         self.assertEqual(commands.count(pyembroidery.JUMP), 1)
+
+    def test_export_uses_scaled_region_stitch_paths(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        region.scale_stitches(2.0, origin=(0.0, 0.0))
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        stitch_points = [
+            (x, y)
+            for x, y, cmd in pattern.stitches
+            if cmd == pyembroidery.STITCH
+        ]
+
+        self.assertIn((20.0, 0.0), stitch_points)
 
     def test_export_omits_empty_layers_from_threadlist(self):
         install_fake_pyembroidery()

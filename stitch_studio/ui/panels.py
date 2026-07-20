@@ -384,6 +384,19 @@ class LayerPanel(QWidget):
 
         self.layer_tree.expandAll()
 
+    def select_uid(self, uid: str):
+        """Select a layer or region row without changing project state."""
+        for i in range(self.layer_tree.topLevelItemCount()):
+            item = self.layer_tree.topLevelItem(i)
+            if item.data(0, Qt.UserRole) == uid:
+                self.layer_tree.setCurrentItem(item)
+                return
+            for j in range(item.childCount()):
+                child = item.child(j)
+                if child.data(0, Qt.UserRole) == uid:
+                    self.layer_tree.setCurrentItem(child)
+                    return
+
     def _on_item_clicked(self, item, column):
         uid = item.data(0, Qt.UserRole)
         item_type = item.data(0, Qt.UserRole + 1)
