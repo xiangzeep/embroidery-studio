@@ -379,9 +379,20 @@ class ImageEngine:
             return []
 
         image_area = regions[0][1].shape[0] * regions[0][1].shape[1]
-        min_layer_area = max(3, int(0.0005 * image_area))
+        default_min_layer_area = max(3, int(0.0005 * image_area))
 
         for tid, mask in regions:
+            if ImageEngine._is_tiny_neutral_antialias_region(
+                mask,
+                source_image,
+                image_area,
+            ):
+                continue
+            min_layer_area = ImageEngine._layer_min_area_for_region(
+                mask,
+                source_image,
+                default_min_layer_area,
+            )
             if int(np.count_nonzero(mask)) < min_layer_area:
                 continue
             if tid not in layer_map:
@@ -416,6 +427,50 @@ class ImageEngine:
             layer.order = i
 
         return layers
+
+    @staticmethod
+    def _layer_min_area_for_region(
+        mask: np.ndarray,
+        source_image: Optional[np.ndarray],
+        default_min_area: int,
+    ) -> int:
+        if source_image is None or mask.shape != source_image.shape[:2]:
+            return default_min_area
+
+        pixels = source_image[mask > 0, :3]
+        if pixels.size == 0:
+            return default_min_area
+
+        rgb = pixels.astype(np.float64)
+        median = np.median(rgb, axis=0)
+        luminance = 0.299 * median[0] + 0.587 * median[1] + 0.114 * median[2]
+        chroma = float(median.max() - median.min())
+        is_foreground_detail = luminance < 245 and chroma >= 45
+        if is_foreground_detail:
+            return min(default_min_area, 3)
+        return default_min_area
+
+    @staticmethod
+    def _is_tiny_neutral_antialias_region(
+        mask: np.ndarray,
+        source_image: Optional[np.ndarray],
+        image_area: int,
+    ) -> bool:
+        if source_image is None or mask.shape != source_image.shape[:2]:
+            return False
+
+        area = int(np.count_nonzero(mask))
+        if area <= 0 or area > max(96, int(0.002 * image_area)):
+            return False
+
+        pixels = source_image[mask > 0, :3]
+        if pixels.size == 0:
+            return False
+
+        median = np.median(pixels.astype(np.float64), axis=0)
+        luminance = 0.299 * median[0] + 0.587 * median[1] + 0.114 * median[2]
+        chroma = float(median.max() - median.min())
+        return bool(luminance >= 135 and chroma <= 42)
 
     @staticmethod
     def _apply_source_region_colors(
@@ -488,7 +543,14 @@ class ImageEngine:
                         other_mask = other_region.mask > 0
                         other_area += int(np.count_nonzero(other_mask))
                         contact += int(np.count_nonzero(dilated & other_mask))
-                    if contact > 0 and other_area > area:
+                    if (
+                        contact > 0 and
+                        other_area > area and
+                        ImageEngine._colors_are_antialias_related(
+                            layer.thread_color_rgb,
+                            other.thread_color_rgb,
+                        )
+                    ):
                         candidates.append((contact, other_area, other_tid, other))
 
                 if not candidates:
@@ -502,6 +564,26 @@ class ImageEngine:
             layer.regions = kept_regions
             if not layer.regions:
                 del layer_map[tid]
+
+    @staticmethod
+    def _colors_are_antialias_related(
+        rgb_a: Tuple[int, int, int],
+        rgb_b: Tuple[int, int, int],
+    ) -> bool:
+        hsv = cv2.cvtColor(
+            np.array([[rgb_a, rgb_b]], dtype=np.uint8),
+            cv2.COLOR_RGB2HSV,
+        )[0].astype(np.float64)
+        hue_a, sat_a, _ = hsv[0]
+        hue_b, sat_b, _ = hsv[1]
+        if min(sat_a, sat_b) <= 48:
+            if max(sat_a, sat_b) >= 48:
+                return True
+            return float(np.linalg.norm(np.array(rgb_a, dtype=np.float64) - np.array(rgb_b, dtype=np.float64))) <= 72.0
+
+        hue_delta = abs(hue_a - hue_b)
+        hue_delta = min(hue_delta, 180.0 - hue_delta)
+        return hue_delta <= 28.0
 
     @staticmethod
     def _default_stitch_settings_for_mask(

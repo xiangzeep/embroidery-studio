@@ -451,6 +451,118 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual([layer.thread_name for layer in layers], ["Light Green"])
 
+    def test_tiny_contrasting_source_color_becomes_own_layer(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Navy", color_rgb=(32, 38, 93)),
+            thread_mod.ThreadColor(name="Orange", color_rgb=(255, 140, 0)),
+        ]
+        source = np.full((256, 256, 3), 255, dtype=np.uint8)
+        navy = np.zeros((256, 256), dtype=np.uint8)
+        orange = np.zeros((256, 256), dtype=np.uint8)
+        navy[170:220, 180:230] = 255
+        orange[185:189, 229:233] = 255
+        source[navy > 0] = (32, 38, 93)
+        source[orange > 0] = (255, 140, 0)
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, navy), (1, orange)],
+            palette,
+            source,
+        )
+
+        self.assertEqual({layer.thread_name for layer in layers}, {"Navy", "Orange"})
+
+    def test_tiny_neutral_antialias_region_merges_into_colored_neighbor(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Navy", color_rgb=(32, 38, 93)),
+            thread_mod.ThreadColor(name="Light Gray", color_rgb=(167, 169, 191)),
+        ]
+        source = np.full((256, 256, 3), 255, dtype=np.uint8)
+        navy = np.zeros((256, 256), dtype=np.uint8)
+        gray = np.zeros((256, 256), dtype=np.uint8)
+        navy[170:220, 180:230] = 255
+        gray[166:170, 190:206] = 255
+        source[navy > 0] = (32, 38, 93)
+        source[gray > 0] = (167, 169, 191)
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, navy), (1, gray)],
+            palette,
+            source,
+        )
+
+        self.assertEqual([layer.thread_name for layer in layers], ["Navy"])
+        self.assertEqual(
+            sum(int(np.count_nonzero(region.mask)) for region in layers[0].regions),
+            int(np.count_nonzero(navy)),
+        )
+
+    def test_region_mask_preview_renders_zoomed_diagonal_as_straight_antialias(self):
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        mask = np.zeros((256, 256), dtype=np.uint8)
+        for y in range(130, 225):
+            x0 = 255 - int((y - 130) * 0.55)
+            mask[y, x0:256] = 255
+
+        rgba, item_scale = canvas_mod._render_region_mask_rgba(
+            mask,
+            (32, 38, 93),
+            opacity=1.0,
+            scale=5.0,
+        )
+        alpha = rgba[:, :, 3]
+        rows = []
+        edges = []
+        for y in range(130 * 5, 225 * 5):
+            xs = np.flatnonzero(alpha[y] > 127)
+            if xs.size:
+                rows.append(y)
+                edges.append(xs.min())
+
+        slope, intercept = np.polyfit(np.asarray(rows), np.asarray(edges), 1)
+        residuals = np.abs(np.asarray(edges) - (slope * np.asarray(rows) + intercept))
+
+        self.assertEqual(rgba.shape, (1280, 1280, 4))
+        self.assertAlmostEqual(item_scale, 1.0)
+        self.assertLess(float(residuals.max()), 2.0)
+        self.assertTrue(np.any((alpha > 0) & (alpha < 255)))
+
+    def test_canvas_plain_left_drag_starts_panning(self):
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+        qt_core = importlib.import_module("PySide6.QtCore")
+
+        self.assertTrue(
+            canvas_mod.EmbroideryCanvas._is_pan_gesture(
+                qt_core.Qt.LeftButton,
+                qt_core.Qt.NoModifier,
+            )
+        )
+
+    def test_canvas_scene_rect_includes_pan_margin(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        canvas.resize(400, 300)
+        canvas.set_background_image(np.full((64, 64, 3), 255, dtype=np.uint8), (64, 64))
+        app.processEvents()
+
+        content = canvas.scene.itemsBoundingRect()
+        scene_rect = canvas.scene.sceneRect()
+
+        self.assertLess(scene_rect.left(), content.left())
+        self.assertGreater(scene_rect.right(), content.right())
+        self.assertLess(scene_rect.top(), content.top())
+        self.assertGreater(scene_rect.bottom(), content.bottom())
+
     def test_layers_use_source_region_color_for_quantized_preview(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -704,6 +816,32 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(poly.is_valid)
         self.assertGreater(poly.area, float(np.count_nonzero(mask)) * 0.90)
         self.assertLess(len(poly.exterior.coords), 140)
+
+    def test_mask_polygon_straightens_long_pixel_stair_diagonal(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((256, 256), dtype=np.uint8)
+        for y in range(130, 225):
+            x0 = 255 - int((y - 130) * 0.55)
+            mask[y, x0:256] = 255
+
+        poly = engine._mask_to_polygon(mask, compensation_mm=0.0)
+        coords = np.asarray(poly.exterior.coords[:-1])
+        edges = []
+        for idx, start in enumerate(coords):
+            end = coords[(idx + 1) % len(coords)]
+            dx = abs(float(end[0] - start[0]))
+            dy = abs(float(end[1] - start[1]))
+            length = float(np.hypot(dx, dy))
+            if dx > 20.0 and dy > 20.0:
+                edges.append((length, start, end))
+
+        self.assertEqual(len(edges), 1)
+        _, start, end = edges[0]
+        self.assertLess(float(min(start[0], end[0])), 206.0)
+        self.assertGreater(float(max(start[0], end[0])), 253.0)
+        self.assertLess(float(min(start[1], end[1])), 132.0)
+        self.assertGreater(float(max(start[1], end[1])), 222.0)
 
     def test_mask_polygon_smooths_large_curved_surface(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

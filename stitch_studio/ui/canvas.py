@@ -15,8 +15,74 @@ from PySide6.QtGui import (
     QPainter, QPen, QColor, QBrush, QPainterPath, QPixmap,
     QImage, QWheelEvent, QMouseEvent, QKeyEvent, QTransform
 )
+import cv2
 import numpy as np
 from typing import Optional, List, Dict, Tuple
+
+
+def _render_region_mask_rgba(
+    mask: np.ndarray,
+    rgb: Tuple[int, int, int],
+    opacity: float = 0.3,
+    scale: float = 1.0,
+) -> Tuple[np.ndarray, float]:
+    """
+    Render a region mask for preview without magnifying source-pixel stair steps.
+
+    The segmentation mask is intentionally low resolution. When the canvas
+    scales it directly, long diagonal boundaries look bent/jagged. For zoomed
+    previews we redraw contours into a higher-resolution alpha mask and leave
+    only the fractional remainder as the item scale.
+    """
+    h, w = mask.shape
+    render_scale = 1
+    if scale > 1.25:
+        render_scale = min(8, max(2, int(np.ceil(scale))))
+
+    out_h = h * render_scale
+    out_w = w * render_scale
+    rgba = np.zeros((out_h, out_w, 4), dtype=np.uint8)
+    rgba[:, :, 0] = rgb[0]
+    rgba[:, :, 1] = rgb[1]
+    rgba[:, :, 2] = rgb[2]
+
+    alpha_value = int(np.clip(255 * opacity, 0, 255))
+    if render_scale == 1:
+        alpha = (mask > 0).astype(np.uint8) * alpha_value
+    else:
+        alpha = _render_mask_alpha_from_contours(mask, alpha_value, render_scale)
+
+    rgba[:, :, 3] = alpha
+    return rgba, float(scale) / float(render_scale)
+
+
+def _render_mask_alpha_from_contours(
+    mask: np.ndarray,
+    alpha_value: int,
+    render_scale: int,
+) -> np.ndarray:
+    source = ((mask > 0).astype(np.uint8)) * 255
+    h, w = source.shape
+    alpha = np.zeros((h * render_scale, w * render_scale), dtype=np.uint8)
+    contours, hierarchy = cv2.findContours(source, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if hierarchy is None:
+        return alpha
+
+    hierarchy = hierarchy[0]
+    for idx, contour in enumerate(contours):
+        if cv2.contourArea(contour) < 1.0:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        epsilon = max(0.75, 0.004 * perimeter)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        if len(approx) < 3:
+            continue
+        points = np.rint(approx[:, 0, :] * render_scale).astype(np.int32)
+        points = points.reshape(-1, 1, 2)
+        fill_value = 0 if hierarchy[idx][3] >= 0 else alpha_value
+        cv2.fillPoly(alpha, [points], fill_value, lineType=cv2.LINE_AA)
+
+    return alpha
 
 
 class StitchPathItem(QGraphicsPathItem):
@@ -63,22 +129,21 @@ class RegionMaskItem(QGraphicsPixmapItem):
     def __init__(self, mask: np.ndarray, color: QColor, opacity: float = 0.3,
                  scale: float = 1.0, parent=None):
         super().__init__(parent)
-        h, w = mask.shape
-        # Create RGBA image
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        rgba[:, :, 0] = color.red()
-        rgba[:, :, 1] = color.green()
-        rgba[:, :, 2] = color.blue()
-        rgba[:, :, 3] = (mask > 0).astype(np.uint8) * int(255 * opacity)
-
+        rgba, item_scale = _render_region_mask_rgba(
+            mask,
+            (color.red(), color.green(), color.blue()),
+            opacity,
+            scale,
+        )
+        h, w = rgba.shape[:2]
         img = QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888)
         # Keep ref to prevent gc
         self._img_data = rgba
         pixmap = QPixmap.fromImage(img)
         self.setPixmap(pixmap)
         self.setTransformationMode(Qt.SmoothTransformation)
-        if scale != 1.0:
-            self.setScale(scale)
+        if item_scale != 1.0:
+            self.setScale(item_scale)
 
 
 class EmbroideryCanvas(QGraphicsView):
@@ -107,6 +172,7 @@ class EmbroideryCanvas(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMinimumSize(400, 300)
+        self.setMouseTracking(True)
 
         # State
         self._zoom = 1.0
@@ -118,6 +184,7 @@ class EmbroideryCanvas(QGraphicsView):
         self._show_image = True
         self._show_grid = False
         self._grid_size_mm = 10.0  # grid spacing in mm
+        self._base_pan_margin = 200.0
 
         # Scene items
         self._bg_item: Optional[QGraphicsPixmapItem] = None
@@ -163,7 +230,8 @@ class EmbroideryCanvas(QGraphicsView):
         self._bg_item.setOpacity(0.5 if self._show_image else 0.0)
 
         self.scene.addItem(self._bg_item)
-        self.fitInView(self.scene.sceneRect(), Qt.KeepAspectRatio)
+        self._update_scene_rect_for_panning()
+        self.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
 
     def set_layer_stitches(self, layer_uid: str, regions_data: List[dict]):
         """
@@ -198,6 +266,7 @@ class EmbroideryCanvas(QGraphicsView):
                         group.addToGroup(dot)
 
         self._layer_groups[layer_uid] = group
+        self._update_scene_rect_for_panning()
 
     def set_region_mask(self, region_uid: str, mask: np.ndarray,
                         color: Tuple[int, int, int], scale: float = 1.0):
@@ -211,6 +280,7 @@ class EmbroideryCanvas(QGraphicsView):
             item.setZValue(-50)
             self.scene.addItem(item)
             self._mask_items[region_uid] = item
+            self._update_scene_rect_for_panning()
 
     def clear_all(self):
         """Clear all items from the scene."""
@@ -253,6 +323,7 @@ class EmbroideryCanvas(QGraphicsView):
         if rect.isNull():
             return
         rect.adjust(-50, -50, 50, 50)
+        self._update_scene_rect_for_panning()
         self.fitInView(rect, Qt.KeepAspectRatio)
         self._zoom = self.transform().m11()
         self.zoom_changed.emit(self._zoom)
@@ -260,11 +331,13 @@ class EmbroideryCanvas(QGraphicsView):
     def zoom_in(self):
         self.scale(1.2, 1.2)
         self._zoom *= 1.2
+        self._update_scene_rect_for_panning()
         self.zoom_changed.emit(self._zoom)
 
     def zoom_out(self):
         self.scale(1 / 1.2, 1 / 1.2)
         self._zoom /= 1.2
+        self._update_scene_rect_for_panning()
         self.zoom_changed.emit(self._zoom)
 
     def reset_zoom(self):
@@ -282,13 +355,11 @@ class EmbroideryCanvas(QGraphicsView):
         else:
             self.scale(1 / factor, 1 / factor)
             self._zoom /= factor
+        self._update_scene_rect_for_panning()
         self.zoom_changed.emit(self._zoom)
 
     def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.MiddleButton or (
-            event.button() == Qt.LeftButton and
-            event.modifiers() & Qt.AltModifier
-        ):
+        if self._is_pan_gesture(event.button(), event.modifiers()):
             self._panning = True
             self._pan_start = event.position()
             self.setCursor(Qt.ClosedHandCursor)
@@ -322,6 +393,30 @@ class EmbroideryCanvas(QGraphicsView):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _is_pan_gesture(button, modifiers) -> bool:
+        return button == Qt.MiddleButton or button == Qt.LeftButton
+
+    def _update_scene_rect_for_panning(self):
+        rect = self.scene.itemsBoundingRect()
+        if rect.isNull():
+            return
+
+        viewport_scene = self.mapToScene(self.viewport().rect()).boundingRect()
+        margin_x = max(
+            self._base_pan_margin,
+            rect.width() * 0.25,
+            viewport_scene.width() * 0.5,
+        )
+        margin_y = max(
+            self._base_pan_margin,
+            rect.height() * 0.25,
+            viewport_scene.height() * 0.5,
+        )
+        self.scene.setSceneRect(
+            rect.adjusted(-margin_x, -margin_y, margin_x, margin_y)
+        )
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key_F:
