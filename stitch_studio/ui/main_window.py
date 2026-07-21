@@ -34,8 +34,6 @@ from .panels import ThreadPanel, LayerPanel, PropertiesPanel, ImagePanel, StatsP
 class StitchWorker(QThread):
     """Background thread for stitch generation."""
     progress = Signal(int, int)  # current, total
-    finished = Signal()
-    error = Signal(str)
 
     def __init__(self, project, stitch_engine, image=None, flow_field=None):
         super().__init__()
@@ -43,6 +41,7 @@ class StitchWorker(QThread):
         self.engine = stitch_engine
         self.image = image
         self.flow_field = flow_field
+        self.failure_message = None
 
     def run(self):
         try:
@@ -89,9 +88,8 @@ class StitchWorker(QThread):
                         self._store_region_paths(region, paths)
                         done += 1
                         self.progress.emit(done, total_regions)
-            self.finished.emit()
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
+            self.failure_message = f"{e}\n{traceback.format_exc()}"
 
     @staticmethod
     def _generation_worker_count(job_count: int) -> int:
@@ -792,6 +790,9 @@ class MainWindow(QMainWindow):
 
     def _generate_stitches(self):
         """Generate stitches for all layers (background thread)."""
+        if self._worker is not None and self._worker.isRunning():
+            self.status_info.setText(tr("status.generating"))
+            return
         if not self.project.layers:
             QMessageBox.warning(
                 self, tr("dialog.no_layers"), tr("dialog.no_layers_body")
@@ -812,8 +813,7 @@ class MainWindow(QMainWindow):
             self.project.processed_image, self._flow_field
         )
         self._worker.progress.connect(self._on_stitch_progress)
-        self._worker.finished.connect(self._on_stitch_done)
-        self._worker.error.connect(self._on_stitch_error)
+        self._worker.finished.connect(self._on_stitch_worker_finished)
         self._worker.start()
 
     def _on_stitch_progress(self, current, total):
@@ -828,18 +828,28 @@ class MainWindow(QMainWindow):
         self._update_stats()
         self.layer_panel.refresh()
         self.status_info.setText(tr("status.generated"))
-        self._worker = None
         if self._pending_export_path:
             path = self._pending_export_path
             self._pending_export_path = None
             self._write_export_pattern(path)
+
+    def _on_stitch_worker_finished(self):
+        """Handle results only after QThread has completely stopped."""
+        worker = self._worker
+        if worker is None:
+            return
+        failure_message = worker.failure_message
+        self._worker = None
+        if failure_message:
+            self._on_stitch_error(failure_message)
+        else:
+            self._on_stitch_done()
 
     def _on_stitch_error(self, msg):
         QMessageBox.critical(
             self, tr("dialog.error"),
             tr("dialog.stitch_failed").format(error=msg)
         )
-        self._worker = None
         self._pending_export_path = None
 
     def _export_pattern(self):

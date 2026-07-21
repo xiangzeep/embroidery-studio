@@ -1338,6 +1338,50 @@ class ExportPathTests(unittest.TestCase):
         finally:
             main_mod.os.cpu_count = original_cpu_count
 
+    def test_stitch_worker_uses_qthread_finished_after_run_returns(self):
+        import inspect
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        worker_source = inspect.getsource(main_mod.StitchWorker)
+        generate_source = inspect.getsource(main_mod.MainWindow._generate_stitches)
+
+        self.assertNotIn("finished = Signal()", worker_source)
+        self.assertNotIn("self.finished.emit()", worker_source)
+        self.assertIn("self.failure_message", worker_source)
+        self.assertIn(
+            "self._worker.finished.connect(self._on_stitch_worker_finished)",
+            generate_source,
+        )
+
+    def test_generate_stitches_ignores_repeat_request_while_worker_runs(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        statuses = []
+        running_worker = types.SimpleNamespace(isRunning=lambda: True)
+        window = types.SimpleNamespace(
+            _worker=running_worker,
+            status_info=types.SimpleNamespace(setText=statuses.append),
+        )
+
+        main_mod.MainWindow._generate_stitches(window)
+
+        self.assertIs(window._worker, running_worker)
+        self.assertEqual(statuses, [main_mod.tr("status.generating")])
+
+    def test_stitch_completion_releases_worker_only_after_qthread_finished(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        events = []
+        worker = types.SimpleNamespace(failure_message=None)
+        window = types.SimpleNamespace(
+            _worker=worker,
+            _on_stitch_done=lambda: events.append("done"),
+            _on_stitch_error=lambda message: events.append(message),
+        )
+
+        main_mod.MainWindow._on_stitch_worker_finished(window)
+
+        self.assertIsNone(window._worker)
+        self.assertEqual(events, ["done"])
+
     def test_layer_panel_select_uid_expands_parent_and_scrolls_to_region(self):
         qt_core = importlib.import_module("PySide6.QtCore")
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
