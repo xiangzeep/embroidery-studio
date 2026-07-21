@@ -534,6 +534,86 @@ class ImageEngine:
         return layers
 
     @staticmethod
+    def build_layers_from_recognition(
+        recognition,
+        physical_threads: List[ThreadColor],
+        source_image: Optional[np.ndarray] = None,
+        generation_mode: str = "photo_stitch",
+        quant_settings: Optional[QuantizationSettings] = None,
+    ) -> List[Layer]:
+        """Build editable layers by design color, not physical thread index."""
+        settings = quant_settings or QuantizationSettings()
+        design_map = np.asarray(recognition.design_map)
+        foreground = np.ones(design_map.shape, dtype=bool)
+        if source_image is not None and not settings.include_background:
+            foreground = ~ImageEngine._detect_background_mask(source_image)
+
+        layers = []
+        detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
+        for design_color in recognition.design_colors:
+            binary = (
+                (design_map == design_color.design_id) & foreground
+            ).astype(np.uint8)
+            if not np.any(binary):
+                continue
+
+            matched_thread = None
+            match_index = design_color.nearest_thread_index
+            if match_index is not None and 0 <= match_index < len(physical_threads):
+                matched_thread = physical_threads[match_index]
+            exact_rgb = tuple(design_color.color_rgb)
+            detail_ratio = float(
+                np.count_nonzero((binary > 0) & detail_mask)
+                / max(1, np.count_nonzero(binary))
+            )
+            is_detail_layer = detail_ratio >= 0.5
+            layer = Layer(
+                name=f"Design color {design_color.design_id + 1}",
+                thread_uid=matched_thread.uid if matched_thread else "",
+                thread_color_rgb=exact_rgb,
+                thread_name=matched_thread.name if matched_thread else "Design color",
+                design_color_id=design_color.design_id,
+                design_color_rgb=exact_rgb,
+                matched_thread_rgb=(
+                    tuple(matched_thread.color_rgb) if matched_thread else None
+                ),
+                thread_match_delta_e=design_color.nearest_thread_delta_e,
+                is_detail_layer=is_detail_layer,
+            )
+
+            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+                binary,
+                connectivity=8,
+            )
+            for label in range(1, n_labels):
+                if int(stats[label, cv2.CC_STAT_AREA]) < 1:
+                    continue
+                mask = (labels == label).astype(np.uint8) * 255
+                region = Region(
+                    name=f"{layer.name} region {len(layer.regions) + 1}",
+                    mask=mask,
+                )
+                region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
+                if generation_mode == "cross_stitch":
+                    region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
+                        mask,
+                        source_image,
+                    )
+                else:
+                    region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                        mask,
+                        exact_rgb,
+                    )
+                layer.add_region(region)
+            if layer.regions:
+                layers.append(layer)
+
+        layers.sort(key=lambda layer: (1 if layer.is_detail_layer else 0, layer.design_color_id))
+        for order, layer in enumerate(layers):
+            layer.order = order
+        return layers
+
+    @staticmethod
     def _layer_min_area_for_region(
         mask: np.ndarray,
         source_image: Optional[np.ndarray],

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from stitch_studio.core.recognition_engine import RecognitionEngine
+from stitch_studio.core.image_engine import ImageEngine
 from stitch_studio.core.project import QuantizationSettings
 from stitch_studio.core.thread_db import ThreadColor
 
@@ -111,6 +112,63 @@ class DetailRecognitionTests(unittest.TestCase):
         detail = RecognitionEngine.detect_fine_details(image, sensitivity=0.65)
 
         self.assertLessEqual(int(np.count_nonzero(detail)), 12)
+
+
+class ThreadSuggestionTests(unittest.TestCase):
+    def test_close_design_colors_remain_distinct_when_thread_match_is_shared(self):
+        image = np.zeros((20, 20, 3), dtype=np.uint8)
+        image[:, :10] = (30, 140, 205)
+        image[:, 10:] = (38, 149, 212)
+        threads = [ThreadColor(name="Shared blue", color_rgb=(34, 145, 208))]
+        settings = QuantizationSettings(
+            design_color_budget=2,
+            auto_design_colors=False,
+            preserve_details=False,
+            include_background=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+
+        self.assertEqual(len(result.design_colors), 2)
+        self.assertEqual(len(layers), 2)
+        self.assertEqual({layer.thread_uid for layer in layers}, {threads[0].uid})
+        self.assertEqual(
+            len({layer.design_color_rgb for layer in layers}),
+            2,
+        )
+
+    def test_layer_recognition_metadata_survives_serialization(self):
+        image = np.full((8, 8, 3), (80, 120, 160), dtype=np.uint8)
+        threads = [ThreadColor(name="Blue", color_rgb=(70, 110, 150))]
+        settings = QuantizationSettings(
+            design_color_budget=2,
+            auto_design_colors=False,
+            preserve_details=False,
+            include_background=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+        layer = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )[0]
+
+        from stitch_studio.core.project import Layer
+        restored = Layer.from_dict(layer.to_dict())
+
+        self.assertEqual(restored.design_color_id, layer.design_color_id)
+        self.assertEqual(restored.design_color_rgb, layer.design_color_rgb)
+        self.assertEqual(restored.matched_thread_rgb, layer.matched_thread_rgb)
+        self.assertEqual(restored.thread_match_delta_e, layer.thread_match_delta_e)
 
 
 if __name__ == "__main__":

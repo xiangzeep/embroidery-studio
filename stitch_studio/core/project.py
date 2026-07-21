@@ -201,6 +201,11 @@ class Layer:
     locked: bool = False
     opacity: float = 1.0
     order: int = 0  # stitch order (0 = first/bottom)
+    design_color_id: Optional[int] = None
+    design_color_rgb: Optional[Tuple[int, int, int]] = None
+    matched_thread_rgb: Optional[Tuple[int, int, int]] = None
+    thread_match_delta_e: Optional[float] = None
+    is_detail_layer: bool = False
     # Layer-level stitch settings (defaults for new regions)
     default_stitch_settings: StitchSettings = field(default_factory=StitchSettings)
 
@@ -277,6 +282,17 @@ class Layer:
             'locked': self.locked,
             'opacity': self.opacity,
             'order': self.order,
+            'design_color_id': self.design_color_id,
+            'design_color_rgb': (
+                list(self.design_color_rgb)
+                if self.design_color_rgb is not None else None
+            ),
+            'matched_thread_rgb': (
+                list(self.matched_thread_rgb)
+                if self.matched_thread_rgb is not None else None
+            ),
+            'thread_match_delta_e': self.thread_match_delta_e,
+            'is_detail_layer': self.is_detail_layer,
             'default_stitch_settings': self.default_stitch_settings.to_dict(),
         }
 
@@ -286,6 +302,8 @@ class Layer:
         regions = [Region.from_dict(rd) for rd in d.pop('regions', [])]
         dss = StitchSettings.from_dict(d.pop('default_stitch_settings', {}))
         d['thread_color_rgb'] = tuple(d.get('thread_color_rgb', (0, 0, 0)))
+        design_color_rgb = d.get('design_color_rgb')
+        matched_thread_rgb = d.get('matched_thread_rgb')
         layer = cls(
             uid=d.get('uid', ''),
             name=d.get('name', 'Layer'),
@@ -296,6 +314,15 @@ class Layer:
             locked=d.get('locked', False),
             opacity=d.get('opacity', 1.0),
             order=d.get('order', 0),
+            design_color_id=d.get('design_color_id'),
+            design_color_rgb=(
+                tuple(design_color_rgb) if design_color_rgb is not None else None
+            ),
+            matched_thread_rgb=(
+                tuple(matched_thread_rgb) if matched_thread_rgb is not None else None
+            ),
+            thread_match_delta_e=d.get('thread_match_delta_e'),
+            is_detail_layer=d.get('is_detail_layer', False),
             default_stitch_settings=dss,
         )
         layer.regions = regions
