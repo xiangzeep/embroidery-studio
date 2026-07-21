@@ -548,7 +548,7 @@ class ImageEngine:
         if source_image is not None and not settings.include_background:
             foreground = ~ImageEngine._detect_background_mask(source_image)
 
-        layers = []
+        layer_map = {}
         detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
         for design_color in recognition.design_colors:
             binary = (
@@ -570,25 +570,54 @@ class ImageEngine:
                 design_color.design_id in recognition.detail_design_ids
                 or detail_ratio >= 0.5
             )
-            layer = Layer(
-                name=f"Design color {design_color.design_id + 1}",
-                thread_uid=matched_thread.uid if matched_thread else "",
-                thread_color_rgb=exact_rgb,
-                thread_name=matched_thread.name if matched_thread else "Design color",
-                design_color_id=design_color.design_id,
-                design_color_rgb=exact_rgb,
-                matched_thread_rgb=(
-                    tuple(matched_thread.color_rgb) if matched_thread else None
-                ),
-                thread_match_delta_e=design_color.nearest_thread_delta_e,
-                is_detail_layer=is_detail_layer,
+            key = (
+                ("thread", matched_thread.uid)
+                if matched_thread else ("design", exact_rgb)
             )
+            layer = layer_map.get(key)
+            if layer is None:
+                physical_rgb = (
+                    tuple(matched_thread.color_rgb) if matched_thread else exact_rgb
+                )
+                layer = Layer(
+                    name=(
+                        matched_thread.name
+                        if matched_thread else f"Design color {design_color.design_id + 1}"
+                    ),
+                    thread_uid=matched_thread.uid if matched_thread else "",
+                    thread_color_rgb=physical_rgb,
+                    thread_name=matched_thread.name if matched_thread else "Design color",
+                    design_color_id=design_color.design_id,
+                    design_color_rgb=exact_rgb,
+                    matched_thread_rgb=(physical_rgb if matched_thread else None),
+                    thread_match_delta_e=design_color.nearest_thread_delta_e,
+                    is_detail_layer=is_detail_layer,
+                )
+                layer_map[key] = layer
+            else:
+                layer.is_detail_layer = layer.is_detail_layer or is_detail_layer
+                if design_color.nearest_thread_delta_e is not None:
+                    layer.thread_match_delta_e = max(
+                        layer.thread_match_delta_e or 0.0,
+                        design_color.nearest_thread_delta_e,
+                    )
 
             # A design color can contain thousands of disconnected antialias
             # islands. Keep one multi-island mask so the layer tree and stitch
             # worker scale with colors instead of connected-component count.
             mask = binary * 255
-            region = Region(name=f"{layer.name} region 1", mask=mask)
+            region_index = len(layer.regions) + 1
+            region = Region(
+                name=(
+                    f"{layer.name} detail {region_index}"
+                    if is_detail_layer else f"{layer.name} region {region_index}"
+                ),
+                mask=mask,
+                design_color_id=design_color.design_id,
+                design_color_rgb=exact_rgb,
+                thread_match_delta_e=design_color.nearest_thread_delta_e,
+                is_detail_region=is_detail_layer,
+            )
             region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
             if generation_mode == "cross_stitch":
                 region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
@@ -601,9 +630,8 @@ class ImageEngine:
                     exact_rgb,
                 )
             layer.add_region(region)
-            if layer.regions:
-                layers.append(layer)
 
+        layers = list(layer_map.values())
         layers.sort(key=lambda layer: (1 if layer.is_detail_layer else 0, layer.design_color_id))
         for order, layer in enumerate(layers):
             layer.order = order

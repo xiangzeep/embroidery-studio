@@ -406,7 +406,8 @@ class LayerPanel(QWidget):
             for region in layer.regions:
                 child = QTreeWidgetItem(item)
                 child.setCheckState(0, Qt.Checked if region.visible else Qt.Unchecked)
-                child.setIcon(1, _color_icon(r, g, b, 12))
+                child_color = region.design_color_rgb or layer.thread_color_rgb
+                child.setIcon(1, _color_icon(*child_color, 12))
                 child.setText(2, region.name)
                 child.setText(3, region.stitch_settings.fill_mode)
                 child.setText(4, str(len(region.stitch_points)) if region.stitch_points else "0")

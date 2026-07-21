@@ -85,6 +85,10 @@ class Region:
     stitch_settings: StitchSettings = field(default_factory=StitchSettings)
     visible: bool = True
     locked: bool = False
+    design_color_id: Optional[int] = None
+    design_color_rgb: Optional[Tuple[int, int, int]] = None
+    thread_match_delta_e: Optional[float] = None
+    is_detail_region: bool = False
     # Generated stitch data (populated by engine)
     stitch_points: Optional[List[Tuple[float, float]]] = None
     stitch_paths: Optional[List[List[Tuple[float, float]]]] = None
@@ -163,6 +167,13 @@ class Region:
             'stitch_settings': self.stitch_settings.to_dict(),
             'visible': self.visible,
             'locked': self.locked,
+            'design_color_id': self.design_color_id,
+            'design_color_rgb': (
+                list(self.design_color_rgb)
+                if self.design_color_rgb is not None else None
+            ),
+            'thread_match_delta_e': self.thread_match_delta_e,
+            'is_detail_region': self.is_detail_region,
         }
         if self.mask is not None:
             # Store mask as RLE-encoded base64
@@ -176,12 +187,19 @@ class Region:
         ss = StitchSettings.from_dict(d.pop('stitch_settings', {}))
         mask_rle = d.pop('mask_rle', None)
         mask_shape = d.pop('mask_shape', None)
+        design_color_rgb = d.get('design_color_rgb')
         r = cls(
             uid=d.get('uid', ''),
             name=d.get('name', 'Region'),
             stitch_settings=ss,
             visible=d.get('visible', True),
             locked=d.get('locked', False),
+            design_color_id=d.get('design_color_id'),
+            design_color_rgb=(
+                tuple(design_color_rgb) if design_color_rgb is not None else None
+            ),
+            thread_match_delta_e=d.get('thread_match_delta_e'),
+            is_detail_region=d.get('is_detail_region', False),
         )
         if mask_rle and mask_shape:
             r.mask = _rle_decode(mask_rle, tuple(mask_shape))

@@ -156,7 +156,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         darkest = min(result.design_colors, key=lambda color: sum(color.color_rgb))
         self.assertEqual(darkest.nearest_thread_index, 0)
 
-    def test_close_design_colors_remain_distinct_when_thread_match_is_shared(self):
+    def test_close_design_colors_share_one_thread_layer_but_keep_editable_regions(self):
         image = np.zeros((20, 20, 3), dtype=np.uint8)
         image[:, :10] = (30, 140, 205)
         image[:, 10:] = (38, 149, 212)
@@ -178,10 +178,11 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(result.design_colors), 2)
-        self.assertEqual(len(layers), 2)
-        self.assertEqual({layer.thread_uid for layer in layers}, {threads[0].uid})
+        self.assertEqual(len(layers), 1)
+        self.assertEqual(layers[0].thread_uid, threads[0].uid)
+        self.assertEqual(len(layers[0].regions), 2)
         self.assertEqual(
-            len({layer.design_color_rgb for layer in layers}),
+            len({region.design_color_rgb for region in layers[0].regions}),
             2,
         )
 
@@ -210,6 +211,18 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(restored.design_color_rgb, layer.design_color_rgb)
         self.assertEqual(restored.matched_thread_rgb, layer.matched_thread_rgb)
         self.assertEqual(restored.thread_match_delta_e, layer.thread_match_delta_e)
+        self.assertEqual(
+            restored.regions[0].design_color_id,
+            layer.regions[0].design_color_id,
+        )
+        self.assertEqual(
+            restored.regions[0].design_color_rgb,
+            layer.regions[0].design_color_rgb,
+        )
+        self.assertEqual(
+            restored.regions[0].is_detail_region,
+            layer.regions[0].is_detail_region,
+        )
 
     def test_disconnected_pixels_of_one_design_color_share_one_region(self):
         image = np.full((16, 16, 3), (240, 120, 80), dtype=np.uint8)

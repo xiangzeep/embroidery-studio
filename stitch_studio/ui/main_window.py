@@ -61,7 +61,7 @@ class StitchWorker(QThread):
                 for _, region in jobs
             ):
                 ownership_masks = self.engine.build_cross_stitch_ownership_masks([
-                    (region, self._cross_stitch_priority(layer))
+                    (region, self._cross_stitch_priority(layer, region))
                     for layer, region in jobs
                 ])
 
@@ -107,10 +107,16 @@ class StitchWorker(QThread):
         self._store_region_paths(region, paths)
 
     @staticmethod
-    def _cross_stitch_priority(layer) -> float:
-        if getattr(layer, "is_detail_layer", False):
+    def _cross_stitch_priority(layer, region=None) -> float:
+        if getattr(region, "is_detail_region", False):
             return 5.0
-        color = getattr(layer, "design_color_rgb", None) or layer.thread_color_rgb
+        if region is None and getattr(layer, "is_detail_layer", False):
+            return 5.0
+        color = (
+            getattr(region, "design_color_rgb", None)
+            or getattr(layer, "design_color_rgb", None)
+            or layer.thread_color_rgb
+        )
         luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
         return 3.0 if luminance < 72.0 else 1.0
 
@@ -165,7 +171,7 @@ class QuantizeWorker(QThread):
                 self.quant_settings,
             )
             regions = [
-                (layer.design_color_id, region.mask)
+                (region.design_color_id, region.mask)
                 for layer in layers
                 for region in layer.regions
                 if region.mask is not None

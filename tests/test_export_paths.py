@@ -1576,6 +1576,26 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(sum(np.count_nonzero(mask) for mask in assigned.values()), 16)
         self.assertEqual(sum(bool(np.any(mask)) for mask in assigned.values()), 1)
 
+    def test_cross_stitch_priority_uses_region_detail_metadata_after_layer_merge(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        layer = project_mod.Layer(
+            thread_color_rgb=(30, 120, 210),
+            design_color_rgb=(30, 120, 210),
+        )
+        base = project_mod.Region(
+            design_color_rgb=(30, 120, 210),
+            is_detail_region=False,
+        )
+        detail = project_mod.Region(
+            design_color_rgb=(15, 15, 15),
+            is_detail_region=True,
+        )
+
+        self.assertEqual(main_mod.StitchWorker._cross_stitch_priority(layer, base), 1.0)
+        self.assertEqual(main_mod.StitchWorker._cross_stitch_priority(layer, detail), 5.0)
+
     def test_cross_stitch_global_grid_masks_do_not_overlap_at_fractional_boundaries(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
