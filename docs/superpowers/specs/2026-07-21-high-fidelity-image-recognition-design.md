@@ -63,8 +63,9 @@ they occupy a small percentage of the image. Cluster centers remain distinct
 unless their perceptual distance and spatial role are both equivalent.
 
 The default beginner preset selects a practical color budget automatically
-from image complexity. Professional controls may override it up to 64 design
-colors. The UI displays the number of design colors and the number of unique
+from image complexity. Professional controls may override it up to 128 design
+colors. Design colors are analysis classes, not mandatory physical thread
+changes: the UI displays the number of design colors and the number of unique
 physical threads separately.
 
 ### Region Layer
