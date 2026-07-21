@@ -343,6 +343,9 @@ class QuantizationSettings:
     dither: bool = False
     include_background: bool = False
     preserve_details: bool = True
+    design_color_budget: int = 0
+    auto_design_colors: bool = True
+    detail_sensitivity: float = 0.65
     min_region_area_px: int = 40
     morphology_kernel_size: int = 5
     smooth_regions: bool = True
