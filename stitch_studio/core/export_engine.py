@@ -72,8 +72,8 @@ class ExportEngine:
                 pattern.add_stitch_absolute(pyembroidery.COLOR_CHANGE, 0, 0)
 
             last_x, last_y = None, None
-            for _, paths in region_paths:
-                for path in self._order_paths_from(paths, last_x, last_y):
+            for region, paths in region_paths:
+                for path in self._order_region_paths(region, paths, last_x, last_y):
                     last_x, last_y = self._write_path(pattern, path, last_x, last_y)
 
         # End pattern
@@ -113,7 +113,8 @@ class ExportEngine:
             if not region.visible:
                 continue
             last_x, last_y = None, None
-            for path in self._region_paths(region):
+            paths = self._region_paths(region)
+            for path in self._order_region_paths(region, paths, last_x, last_y):
                 last_x, last_y = self._write_path(pattern, path, last_x, last_y)
 
         pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
@@ -259,6 +260,40 @@ class ExportEngine:
             ordered.append(path)
             current = path[-1]
 
+        return ordered
+
+    def _order_region_paths(
+        self,
+        region: Region,
+        paths: List[List[Tuple[float, float]]],
+        last_x: Optional[int],
+        last_y: Optional[int],
+    ) -> List[List[Tuple[float, float]]]:
+        """Choose a path order without making cross-stitch export quadratic."""
+        if getattr(region.stitch_settings, "fill_mode", "") == "cross_stitch":
+            return self._order_cross_stitch_paths_linear(paths, last_x, last_y)
+        return self._order_paths_from(paths, last_x, last_y)
+
+    def _order_cross_stitch_paths_linear(
+        self,
+        paths: List[List[Tuple[float, float]]],
+        last_x: Optional[int],
+        last_y: Optional[int],
+    ) -> List[List[Tuple[float, float]]]:
+        """Keep generator row order and only flip each next segment locally."""
+        ordered: List[List[Tuple[float, float]]] = []
+        current = None if last_x is None or last_y is None else (float(last_x), float(last_y))
+        for path in paths:
+            if len(path) < 2:
+                continue
+            candidate = path
+            if current is not None:
+                d_start = (path[0][0] - current[0]) ** 2 + (path[0][1] - current[1]) ** 2
+                d_end = (path[-1][0] - current[0]) ** 2 + (path[-1][1] - current[1]) ** 2
+                if d_end < d_start:
+                    candidate = path[::-1]
+            ordered.append(candidate)
+            current = candidate[-1]
         return ordered
 
     def _write_path(

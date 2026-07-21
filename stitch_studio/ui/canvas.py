@@ -126,6 +126,121 @@ class StitchPathItem(QGraphicsPathItem):
         self.setBrush(Qt.NoBrush)
 
 
+class StitchPreviewItem(QGraphicsItem):
+    """Aggregated LOD stitch preview with thread-like 2.5D rendering."""
+
+    def __init__(self, paths: List[List[Tuple[float, float]]], color: QColor, parent=None):
+        super().__init__(parent)
+        self.paths = [path for path in paths if len(path) >= 2]
+        self.color = QColor(color)
+        self._bounds = self._compute_bounds()
+        self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+
+    def boundingRect(self) -> QRectF:
+        return self._bounds
+
+    def paint(self, painter: QPainter, option, widget=None):
+        if not self.paths:
+            return
+
+        lod = option.levelOfDetailFromTransform(painter.worldTransform())
+        stride = self._visible_path_stride(len(self.paths), lod)
+        visible_paths = self.paths[::stride]
+
+        painter.setRenderHint(QPainter.Antialiasing, lod >= 0.28)
+        if lod < 0.18:
+            self._paint_fast_overview(painter, visible_paths)
+            return
+
+        width = self._thread_width_for_lod(lod)
+
+        shadow = QColor(0, 0, 0, 85)
+        shadow_pen = QPen(shadow)
+        shadow_pen.setWidthF(width * 1.45)
+        shadow_pen.setCapStyle(Qt.RoundCap)
+        shadow_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(shadow_pen)
+        painter.translate(width * 0.22, width * 0.28)
+        self._draw_paths(painter, visible_paths)
+        painter.translate(-width * 0.22, -width * 0.28)
+
+        body_pen = QPen(self.color)
+        body_pen.setWidthF(width)
+        body_pen.setCapStyle(Qt.RoundCap)
+        body_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(body_pen)
+        self._draw_paths(painter, visible_paths)
+
+        # thread highlight: thin upper-left pass gives stitches a raised look.
+        highlight = QColor(
+            min(255, int(self.color.red() * 1.25 + 28)),
+            min(255, int(self.color.green() * 1.25 + 28)),
+            min(255, int(self.color.blue() * 1.25 + 28)),
+            145,
+        )
+        highlight_pen = QPen(highlight)
+        highlight_pen.setWidthF(max(0.18, width * 0.28))
+        highlight_pen.setCapStyle(Qt.RoundCap)
+        highlight_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(highlight_pen)
+        painter.translate(-width * 0.16, -width * 0.18)
+        self._draw_paths(painter, visible_paths)
+        painter.translate(width * 0.16, width * 0.18)
+
+    def _paint_fast_overview(self, painter: QPainter, paths: List[List[Tuple[float, float]]]):
+        color = QColor(self.color)
+        color.setAlpha(210)
+        pen = QPen(color)
+        pen.setWidthF(0.9)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        self._draw_paths(painter, paths)
+
+    @staticmethod
+    def _visible_path_stride(path_count: int, lod: float) -> int:
+        if lod >= 0.72 or path_count <= 1200:
+            return 1
+        if lod >= 0.35:
+            return max(1, int(np.ceil(path_count / 3500)))
+        if lod >= 0.18:
+            return max(1, int(np.ceil(path_count / 1800)))
+        return max(1, int(np.ceil(path_count / 900)))
+
+    @staticmethod
+    def _thread_width_for_lod(lod: float) -> float:
+        if lod >= 1.8:
+            return 1.45
+        if lod >= 0.7:
+            return 1.15
+        return 0.85
+
+    @staticmethod
+    def _draw_paths(painter: QPainter, paths: List[List[Tuple[float, float]]]):
+        for points in paths:
+            path = QPainterPath()
+            path.moveTo(points[0][0], points[0][1])
+            for x, y in points[1:]:
+                path.lineTo(x, y)
+            painter.drawPath(path)
+
+    def _compute_bounds(self) -> QRectF:
+        if not self.paths:
+            return QRectF()
+        xs = []
+        ys = []
+        for path in self.paths:
+            for x, y in path:
+                xs.append(float(x))
+                ys.append(float(y))
+        pad = 6.0
+        return QRectF(
+            min(xs) - pad,
+            min(ys) - pad,
+            max(xs) - min(xs) + pad * 2,
+            max(ys) - min(ys) + pad * 2,
+        )
+
+
 class StitchDotItem(QGraphicsEllipseItem):
     """Small dot marking a stitch point."""
 
@@ -495,10 +610,8 @@ class EmbroideryCanvas(QGraphicsView):
             self._object_layers[rd['uid']] = layer_uid
 
             if self._show_stitches:
-                for path in paths:
-                    if len(path) >= 2:
-                        path_item = StitchPathItem(path, color, stitch_width=0.8)
-                        object_item.addToGroup(path_item)
+                preview_item = StitchPreviewItem(paths, color)
+                object_item.addToGroup(preview_item)
 
             if self._show_stitch_points:
                 for path in paths:
@@ -572,6 +685,29 @@ class EmbroideryCanvas(QGraphicsView):
     def set_image_opacity(self, opacity: float):
         if self._bg_item:
             self._bg_item.setOpacity(opacity)
+
+    def drawBackground(self, painter: QPainter, rect: QRectF):
+        painter.fillRect(rect, QColor(48, 48, 48))
+        lod = self.transform().m11()
+        if lod < 0.08:
+            return
+        spacing = 36.0
+        start_x = np.floor(rect.left() / spacing) * spacing
+        start_y = np.floor(rect.top() / spacing) * spacing
+        pen_a = QPen(QColor(68, 68, 68, 55))
+        pen_b = QPen(QColor(32, 32, 32, 45))
+        pen_a.setWidthF(0.8)
+        pen_b.setWidthF(0.8)
+        x = start_x
+        painter.setPen(pen_a)
+        while x <= rect.right():
+            painter.drawLine(QLineF(x, rect.top(), x + rect.height(), rect.bottom()))
+            x += spacing
+        y = start_y
+        painter.setPen(pen_b)
+        while y <= rect.bottom():
+            painter.drawLine(QLineF(rect.left(), y, rect.right(), y + rect.width()))
+            y += spacing
 
     def toggle_grid(self, show: bool):
         self._show_grid = show

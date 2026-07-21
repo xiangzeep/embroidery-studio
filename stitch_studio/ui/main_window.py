@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QSizePolicy, QWidget, QVBoxLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QIcon
 from shapely.geometry import Polygon
 from shapely.affinity import scale as shapely_scale, translate as shapely_translate
 
@@ -135,6 +135,7 @@ class MainWindow(QMainWindow):
 
         # Restore layout
         self._apply_default_layout()
+        self._set_generation_mode(self.project.generation_mode)
 
     # ========== UI CONSTRUCTION ==========
 
@@ -169,6 +170,26 @@ class MainWindow(QMainWindow):
         self.act_quantize = QAction("&Quantize && Segment", self)
         self.act_quantize.setShortcut(QKeySequence("Ctrl+Q"))
         self.act_quantize.triggered.connect(self._quantize_and_segment)
+
+        self.generation_mode_actions = QActionGroup(self)
+        self.generation_mode_actions.setExclusive(True)
+
+        self.act_photo_stitch_mode = QAction("Photo Stitch", self, checkable=True)
+        self.act_photo_stitch_mode.setToolTip(
+            "Continuous fills for smoother photo-like embroidery"
+        )
+        self.act_photo_stitch_mode.triggered.connect(
+            lambda checked: self._set_generation_mode("photo_stitch") if checked else None
+        )
+
+        self.act_cross_stitch_mode = QAction("Cross Stitch", self, checkable=True)
+        self.act_cross_stitch_mode.setToolTip("Grid-based cross stitch generation")
+        self.act_cross_stitch_mode.triggered.connect(
+            lambda checked: self._set_generation_mode("cross_stitch") if checked else None
+        )
+
+        self.generation_mode_actions.addAction(self.act_photo_stitch_mode)
+        self.generation_mode_actions.addAction(self.act_cross_stitch_mode)
 
         self.act_gen_stitches = QAction("&Generate Stitches", self)
         self.act_gen_stitches.setShortcut(QKeySequence("Ctrl+G"))
@@ -341,6 +362,12 @@ class MainWindow(QMainWindow):
         # Image panel
         self.image_panel.image_changed.connect(self._on_image_settings_changed)
         self.image_panel.quantize_requested.connect(self._quantize_and_segment)
+        self.image_panel.btn_photo_stitch.toggled.connect(
+            lambda checked: self._set_generation_mode("photo_stitch") if checked else None
+        )
+        self.image_panel.btn_cross_stitch.toggled.connect(
+            lambda checked: self._set_generation_mode("cross_stitch") if checked else None
+        )
 
         # Thread panel
         self.thread_panel.threads_changed.connect(self._on_threads_changed)
@@ -348,10 +375,40 @@ class MainWindow(QMainWindow):
     def _apply_default_layout(self):
         # Stack panels nicely
         self.tabifyDockWidget(self.dock_threads, self.dock_image)
-        self.dock_threads.raise_()
+        self.dock_image.raise_()
         self.tabifyDockWidget(self.dock_layers, self.dock_props)
         self.tabifyDockWidget(self.dock_props, self.dock_stats)
         self.dock_layers.raise_()
+
+    def _set_generation_mode(self, mode: str):
+        """Synchronize the prominent mode controls with the project state."""
+        mode = "cross_stitch" if mode == "cross_stitch" else "photo_stitch"
+        self.project.generation_mode = mode
+
+        self.act_photo_stitch_mode.blockSignals(True)
+        self.act_cross_stitch_mode.blockSignals(True)
+        try:
+            self.act_photo_stitch_mode.setChecked(mode == "photo_stitch")
+            self.act_cross_stitch_mode.setChecked(mode == "cross_stitch")
+        finally:
+            self.act_photo_stitch_mode.blockSignals(False)
+            self.act_cross_stitch_mode.blockSignals(False)
+
+        if hasattr(self, "image_panel"):
+            self.image_panel.btn_photo_stitch.blockSignals(True)
+            self.image_panel.btn_cross_stitch.blockSignals(True)
+            try:
+                self.image_panel.set_generation_mode(mode)
+            finally:
+                self.image_panel.btn_photo_stitch.blockSignals(False)
+                self.image_panel.btn_cross_stitch.blockSignals(False)
+
+        if mode == "cross_stitch":
+            self.act_quantize.setText("Quantize for Cross Stitch")
+            self.status_info.setText("Generation mode: Cross Stitch")
+        else:
+            self.act_quantize.setText("Quantize for Photo Stitch")
+            self.status_info.setText("Generation mode: Photo Stitch")
 
     # ========== ACTIONS ==========
 
@@ -390,7 +447,8 @@ class MainWindow(QMainWindow):
                 self.canvas.set_background_image(self.project.source_image, size)
                 self.image_panel.set_image_settings(self.project.image_settings)
                 self.image_panel.set_quant_settings(self.project.quant_settings)
-                self.image_panel.set_generation_mode(self.project.generation_mode)
+                self._set_generation_mode(self.project.generation_mode)
+                self.dock_image.raise_()
 
             self._refresh_canvas()
             self.status_info.setText(f"Opened: {path}")
@@ -447,6 +505,7 @@ class MainWindow(QMainWindow):
                 self.project.image_settings.output_width_mm = max_dim * w / h
 
             self.image_panel.set_image_settings(self.project.image_settings)
+            self.dock_image.raise_()
 
             # Apply adjustments and show
             self._apply_image_and_show()
@@ -485,7 +544,7 @@ class MainWindow(QMainWindow):
             # Get settings
             img_settings = self.image_panel.get_image_settings()
             quant_settings = self.image_panel.get_quant_settings()
-            self.project.generation_mode = self.image_panel.get_generation_mode()
+            self._set_generation_mode(self.image_panel.get_generation_mode())
 
             # Process image
             processed = self.image_engine.apply_adjustments(

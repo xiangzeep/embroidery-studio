@@ -501,6 +501,8 @@ class ImageEngine:
             for region in layer.regions:
                 if region.mask is None:
                     continue
+                if region.stitch_settings.fill_mode == "cross_stitch":
+                    continue
                 region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
                     region.mask,
                     layer.thread_color_rgb,

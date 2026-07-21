@@ -117,6 +117,41 @@ class ExportPathTests(unittest.TestCase):
             ],
         )
 
+    def test_cross_stitch_export_skips_global_nearest_neighbor_reordering(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(255, 100, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_settings = project_mod.StitchSettings(fill_mode="cross_stitch")
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 10.0)],
+            [(10.0, 0.0), (0.0, 10.0)],
+            [(20.0, 0.0), (30.0, 10.0)],
+        ]
+        region.stitch_points = [pt for path in region.stitch_paths for pt in path]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        engine = export_mod.ExportEngine()
+        original = engine._order_paths_from
+        try:
+            engine._order_paths_from = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("cross stitch should use the linear export path")
+            )
+            pattern = engine.build_pattern(project)
+        finally:
+            engine._order_paths_from = original
+
+        stitched_points = [
+            (x, y)
+            for x, y, cmd in pattern.stitches
+            if cmd == install_fake_pyembroidery().STITCH
+        ]
+        self.assertIn((10, 10), stitched_points)
+
 
     def test_region_can_store_path_boundaries_for_preview_and_export(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -478,6 +513,57 @@ class ExportPathTests(unittest.TestCase):
         self.assertFalse(settings.underlay)
         self.assertEqual(settings.cross_method, "auto")
 
+    def test_cross_stitch_generation_mode_survives_source_color_application(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [thread_mod.ThreadColor(name="Orange", color_rgb=(255, 110, 0))]
+        source = np.full((30, 30, 3), (250, 118, 12), dtype=np.uint8)
+        mask = np.zeros((30, 30), dtype=np.uint8)
+        mask[4:26, 4:26] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, mask)],
+            palette,
+            source,
+            generation_mode="cross_stitch",
+        )
+
+        settings = layers[0].regions[0].stitch_settings
+        self.assertEqual(settings.fill_mode, "cross_stitch")
+        self.assertEqual(settings.cross_method, "auto")
+
+    def test_cross_stitch_generation_mode_with_source_image_emits_cross_paths(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [thread_mod.ThreadColor(name="Orange", color_rgb=(255, 110, 0))]
+        source = np.full((20, 20, 3), (250, 118, 12), dtype=np.uint8)
+        mask = np.ones((20, 20), dtype=np.uint8) * 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, mask)],
+            palette,
+            source,
+            generation_mode="cross_stitch",
+        )
+        region = layers[0].regions[0]
+        region.stitch_settings.cross_method = "cross"
+        region.stitch_settings.cross_pattern_size_mm = 1.0
+        region.stitch_settings.cross_coverage = 0.5
+
+        paths = stitch_mod.StitchEngine(px_per_mm=10.0).generate_region_paths(region, source)
+
+        self.assertGreaterEqual(len(paths), 8)
+        self.assertTrue(all(len(path) == 2 for path in paths[:8]))
+        diagonal_slopes = {
+            round((path[-1][1] - path[0][1]) / (path[-1][0] - path[0][0]), 2)
+            for path in paths[:8]
+            if path[-1][0] != path[0][0]
+        }
+        self.assertEqual(diagonal_slopes, {-1.0, 1.0})
+
     def test_photo_stitch_generation_mode_keeps_existing_region_defaults(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -779,9 +865,9 @@ class ExportPathTests(unittest.TestCase):
         app.processEvents()
 
         object_item = canvas._object_items["region-1"]
-        path_item = next(
+        preview_item = next(
             child for child in object_item.childItems()
-            if child.__class__.__name__ == "StitchPathItem"
+            if child.__class__.__name__ == "StitchPreviewItem"
         )
 
         self.assertEqual(
@@ -789,7 +875,7 @@ class ExportPathTests(unittest.TestCase):
             canvas_mod.QGraphicsItem.DeviceCoordinateCache,
         )
         self.assertEqual(
-            path_item.cacheMode(),
+            preview_item.cacheMode(),
             canvas_mod.QGraphicsItem.DeviceCoordinateCache,
         )
 
@@ -1028,6 +1114,38 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(panel.get_generation_mode(), "cross_stitch")
         self.assertTrue(panel.btn_cross_stitch.isChecked())
         self.assertIn("Cross Stitch", panel.btn_quantize.text())
+        self.assertEqual(panel.lbl_step_type.text(), "2. Choose Stitch Type")
+        self.assertTrue(panel.btn_advanced_color.isCheckable())
+        self.assertFalse(panel.grp_quant.isVisible())
+        self.assertTrue(hasattr(panel, "combo_method"))
+
+    def test_canvas_uses_aggregated_lod_stitch_preview_item(self):
+        import inspect
+
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        source = inspect.getsource(canvas_mod)
+
+        self.assertIn("class StitchPreviewItem", source)
+        self.assertIn("levelOfDetailFromTransform", source)
+        self.assertIn("_visible_path_stride", source)
+        self.assertIn("thread highlight", source)
+
+    def test_main_window_keeps_generation_mode_in_left_panel_not_toolbar(self):
+        import inspect
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        source = inspect.getsource(main_mod.MainWindow)
+
+        self.assertIn("act_photo_stitch_mode", source)
+        self.assertIn("act_cross_stitch_mode", source)
+        self.assertIn("_set_generation_mode", source)
+        toolbar_source = source[
+            source.index("    def _create_toolbar(self):"):
+            source.index("    def _create_canvas(self):")
+        ]
+        self.assertNotIn("Generate As:", toolbar_source)
 
     def test_properties_panel_round_trips_cross_stitch_settings(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
@@ -1241,6 +1359,21 @@ class ExportPathTests(unittest.TestCase):
         flipped = engine._cross_stitch_cell_paths(cell, "half_flipped", 20.0)
 
         self.assertNotEqual(normal, flipped)
+
+    def test_short_cross_stitch_segments_do_not_call_shapely_segmentize(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        original = stitch_mod.LineString
+        try:
+            stitch_mod.LineString = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("short two-point cross stitches should use math fast path")
+            )
+            path = engine._segmentized_path([(0.0, 0.0), (10.0, 10.0)], 20.0)
+        finally:
+            stitch_mod.LineString = original
+
+        self.assertEqual(path, [(0.0, 0.0), (10.0, 10.0)])
 
     def test_cross_stitch_fill_generates_coverage_based_paths_in_scene_units(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

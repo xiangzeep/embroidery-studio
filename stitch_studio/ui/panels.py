@@ -844,6 +844,10 @@ class ImagePanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         # --- Image Adjustments ---
+        self.lbl_step_image = QLabel("1. Import Image & Adjust")
+        self.lbl_step_image.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_step_image)
+
         grp_adj = QGroupBox("Image Adjustments")
         al = QGridLayout(grp_adj)
 
@@ -898,6 +902,10 @@ class ImagePanel(QWidget):
         layout.addWidget(grp_size)
 
         # --- Generation Target ---
+        self.lbl_step_type = QLabel("2. Choose Stitch Type")
+        self.lbl_step_type.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_step_type)
+
         grp_target = QGroupBox("Generate As")
         tl = QVBoxLayout(grp_target)
         mode_row = QHBoxLayout()
@@ -927,8 +935,19 @@ class ImagePanel(QWidget):
         layout.addWidget(grp_target)
 
         # --- Quantization ---
-        grp_quant = QGroupBox("Color Quantization")
-        ql = QGridLayout(grp_quant)
+        self.lbl_step_prepare = QLabel("3. Prepare Colors")
+        self.lbl_step_prepare.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_step_prepare)
+
+        self.btn_advanced_color = QPushButton("Advanced Color Settings")
+        self.btn_advanced_color.setCheckable(True)
+        self.btn_advanced_color.setChecked(False)
+        layout.addWidget(self.btn_advanced_color)
+
+        self.grp_quant = QGroupBox("Advanced Color Settings")
+        self.grp_quant.setVisible(False)
+        self.btn_advanced_color.toggled.connect(self.grp_quant.setVisible)
+        ql = QGridLayout(self.grp_quant)
 
         ql.addWidget(QLabel("Colors:"), 0, 0)
         self.spin_colors = QSpinBox()
@@ -968,15 +987,20 @@ class ImagePanel(QWidget):
         self.chk_dither = QCheckBox("Dithering")
         ql.addWidget(self.chk_dither, 6, 0, 1, 2)
 
+        layout.addWidget(self.grp_quant)
+
+        self.lbl_step_generate = QLabel("4. Generate")
+        self.lbl_step_generate.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_step_generate)
+
         self.btn_quantize = QPushButton()
         self.btn_quantize.setStyleSheet("font-weight: bold; padding: 8px;")
         self.btn_quantize.clicked.connect(self.quantize_requested.emit)
-        ql.addWidget(self.btn_quantize, 7, 0, 1, 2)
+        layout.addWidget(self.btn_quantize)
         self.btn_photo_stitch.toggled.connect(self._on_generation_mode_changed)
         self.btn_cross_stitch.toggled.connect(self._on_generation_mode_changed)
         self._on_generation_mode_changed()
 
-        layout.addWidget(grp_quant)
         layout.addStretch()
 
         scroll.setWidget(container)

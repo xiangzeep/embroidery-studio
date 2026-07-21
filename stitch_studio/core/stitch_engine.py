@@ -996,6 +996,22 @@ class StitchEngine:
     ) -> List[Tuple[float, float]]:
         if len(coords) < 2:
             return coords
+        if len(coords) == 2:
+            start, end = coords
+            dx = float(end[0] - start[0])
+            dy = float(end[1] - start[1])
+            dist = float(np.hypot(dx, dy))
+            limit = max(float(max_len), 1e-6)
+            if dist <= limit:
+                return [(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))]
+            steps = int(np.ceil(dist / limit))
+            return [
+                (
+                    float(start[0] + dx * (i / steps)),
+                    float(start[1] + dy * (i / steps)),
+                )
+                for i in range(steps + 1)
+            ]
         line = LineString(coords).segmentize(max(max_len, 1e-6))
         return [(float(x), float(y)) for x, y in line.coords]
 
