@@ -1,5 +1,6 @@
 import unittest
 
+import cv2
 import numpy as np
 
 from stitch_studio.core.recognition_engine import RecognitionEngine
@@ -80,6 +81,36 @@ class DesignPaletteTests(unittest.TestCase):
             sorted(np.unique(first.design_map).tolist()),
             list(range(len(first.design_colors))),
         )
+
+
+class DetailRecognitionTests(unittest.TestCase):
+    def test_detects_dark_colored_and_curved_fine_lines(self):
+        image = np.full((72, 72, 3), 245, dtype=np.uint8)
+        expected = np.zeros((72, 72), dtype=np.uint8)
+        cv2.line(image, (6, 12), (60, 12), (20, 20, 20), 1)
+        cv2.line(expected, (6, 12), (60, 12), 255, 1)
+        curve = np.array([[8, 55], [20, 42], [35, 40], [50, 48], [62, 60]])
+        cv2.polylines(image, [curve], False, (220, 45, 92), 2)
+        cv2.polylines(expected, [curve], False, 255, 2)
+
+        detail = RecognitionEngine.detect_fine_details(image, sensitivity=0.65)
+
+        nearby = cv2.dilate(
+            detail.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        expected_mask = expected > 0
+        recall = np.count_nonzero(expected_mask & nearby) / np.count_nonzero(expected_mask)
+        self.assertGreaterEqual(recall, 0.95)
+
+    def test_does_not_promote_large_closed_shape_boundary_as_detail(self):
+        image = np.full((72, 72, 3), 245, dtype=np.uint8)
+        cv2.rectangle(image, (12, 12), (60, 60), (25, 80, 180), -1)
+
+        detail = RecognitionEngine.detect_fine_details(image, sensitivity=0.65)
+
+        self.assertLessEqual(int(np.count_nonzero(detail)), 12)
 
 
 if __name__ == "__main__":

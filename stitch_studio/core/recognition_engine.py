@@ -115,7 +115,10 @@ class RecognitionEngine:
             ))
 
         detail_mask = (
-            cls._initial_detail_mask(rgb)
+            cls.detect_fine_details(
+                rgb,
+                sensitivity=float(getattr(settings, "detail_sensitivity", 0.65)),
+            )
             if settings.preserve_details
             else np.zeros((height, width), dtype=bool)
         )
@@ -212,11 +215,84 @@ class RecognitionEngine:
         return index, float(distances[index])
 
     @staticmethod
-    def _initial_detail_mask(image: np.ndarray) -> np.ndarray:
+    def detect_fine_details(
+        image: np.ndarray,
+        sensitivity: float = 0.65,
+    ) -> np.ndarray:
+        """Detect open fine marks without promoting closed object boundaries."""
+        if image.ndim != 3 or image.shape[2] < 3:
+            return np.zeros(image.shape[:2], dtype=bool)
+
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
         rgb = image.astype(np.float32)
-        local = cv2.GaussianBlur(rgb, (0, 0), 1.0)
-        contrast = np.linalg.norm(rgb - local, axis=2)
-        return contrast >= 28.0
+        contrast = np.zeros(image.shape[:2], dtype=np.float32)
+        for sigma in (0.8, 1.6, 2.8):
+            local = cv2.GaussianBlur(rgb, (0, 0), sigma)
+            contrast = np.maximum(contrast, np.linalg.norm(rgb - local, axis=2))
+
+        gray = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+        ridge = np.zeros(gray.shape, dtype=np.uint8)
+        for size in (3, 5, 7):
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+            ridge = np.maximum(ridge, cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel))
+            ridge = np.maximum(ridge, cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel))
+
+        threshold = 36.0 - sensitivity * 22.0
+        candidate = (contrast >= threshold) | (ridge >= max(8, int(threshold * 0.55)))
+        candidate |= cv2.Canny(
+            gray,
+            max(18, int(70 - sensitivity * 40)),
+            max(55, int(150 - sensitivity * 55)),
+        ) > 0
+
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            candidate.astype(np.uint8),
+            connectivity=8,
+        )
+        detail = np.zeros(candidate.shape, dtype=bool)
+        image_area = candidate.size
+        for label in range(1, n_labels):
+            component = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            if area < 3:
+                continue
+
+            short_axis = min(width, height)
+            long_axis = max(width, height)
+            aspect = long_axis / max(1, short_axis)
+            occupancy = area / max(1, width * height)
+            distance = cv2.distanceTransform(
+                component.astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            median_width = float(np.median(distance[component]) * 2.0)
+            contours, _ = cv2.findContours(
+                component.astype(np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            enclosed_area = max(
+                (float(cv2.contourArea(contour)) for contour in contours),
+                default=0.0,
+            )
+            is_large_closed_boundary = (
+                enclosed_area >= image_area * 0.02
+                and enclosed_area >= area * 1.7
+                and aspect < 3.0
+            )
+            is_fine_geometry = (
+                short_axis <= 8
+                or aspect >= 2.5
+                or occupancy <= 0.38
+                or median_width <= 6.0
+            )
+            if is_fine_geometry and not is_large_closed_boundary:
+                detail[component] = True
+
+        return detail
 
     @staticmethod
     def measure_fidelity(
