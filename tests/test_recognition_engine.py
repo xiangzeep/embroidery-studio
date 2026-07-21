@@ -1,7 +1,10 @@
 import unittest
+import hashlib
+import os
 
 import cv2
 import numpy as np
+from PIL import Image
 
 from stitch_studio.core.recognition_engine import RecognitionEngine
 from stitch_studio.core.image_engine import ImageEngine
@@ -169,6 +172,101 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(restored.design_color_rgb, layer.design_color_rgb)
         self.assertEqual(restored.matched_thread_rgb, layer.matched_thread_rgb)
         self.assertEqual(restored.thread_match_delta_e, layer.thread_match_delta_e)
+
+    def test_disconnected_pixels_of_one_design_color_share_one_region(self):
+        image = np.full((16, 16, 3), (240, 120, 80), dtype=np.uint8)
+        image[1:3, 1:3] = (20, 90, 180)
+        image[1:3, 12:14] = (20, 90, 180)
+        image[12:14, 1:3] = (20, 90, 180)
+        image[12:14, 12:14] = (20, 90, 180)
+        threads = [
+            ThreadColor(name="Blue", color_rgb=(20, 90, 180)),
+            ThreadColor(name="Coral", color_rgb=(240, 120, 80)),
+        ]
+        settings = QuantizationSettings(
+            design_color_budget=2,
+            auto_design_colors=False,
+            preserve_details=False,
+            include_background=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "cross_stitch",
+            settings,
+        )
+
+        self.assertEqual(len(layers), 2)
+        self.assertTrue(all(len(layer.regions) == 1 for layer in layers))
+        covered = np.zeros(image.shape[:2], dtype=bool)
+        for layer in layers:
+            covered |= layer.regions[0].mask > 0
+        self.assertTrue(np.all(covered))
+
+
+class PatrickRegressionTests(unittest.TestCase):
+    SOURCE_PATH = (
+        "/var/folders/dr/g_jjd1vj4356dmv095y1l4jc0000gn/T/"
+        "codex-clipboard-70fefa60-8745-4e77-8642-e7e85c45be8d.png"
+    )
+
+    def test_supplied_image_meets_high_fidelity_gates(self):
+        if not os.path.exists(self.SOURCE_PATH):
+            self.skipTest("Supplied Patrick regression image is not available")
+        with open(self.SOURCE_PATH, "rb") as source_file:
+            digest = hashlib.sha256(source_file.read()).hexdigest()
+        self.assertEqual(
+            digest,
+            "3402b4593d6871802a79b903fba75c5145747c8017f53cb73ff98dc57086bff0",
+        )
+
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 120, 210)),
+            ThreadColor(name="Coral", color_rgb=(255, 125, 100)),
+            ThreadColor(name="Red", color_rgb=(210, 35, 25)),
+            ThreadColor(name="Green", color_rgb=(130, 160, 110)),
+        ]
+        settings = QuantizationSettings(
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        self.assertGreaterEqual(result.metrics.perceptual_similarity, 0.95)
+        self.assertGreaterEqual(result.metrics.boundary_recall, 0.95)
+        self.assertGreaterEqual(result.metrics.pixel_coverage, 0.995)
+        self.assertGreaterEqual(result.metrics.detail_recall, 0.95)
+        self.assertTrue(result.detail_design_ids)
+        detail_ids = np.array(result.detail_design_ids, dtype=np.int32)
+        self.assertTrue(np.all(np.isin(result.design_map[result.detail_mask], detail_ids)))
+        self.assertFalse(np.any(np.isin(result.design_map[~result.detail_mask], detail_ids)))
+        blue_design_colors = [
+            color for color in result.design_colors
+            if color.color_rgb[2] > color.color_rgb[0] * 1.25
+            and color.color_rgb[2] > color.color_rgb[1] * 1.08
+        ]
+        self.assertGreaterEqual(len(blue_design_colors), 2)
+
+        source_luminance = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        output_luminance = cv2.cvtColor(result.reconstructed_rgb, cv2.COLOR_RGB2GRAY)
+        black_art = source_luminance <= 35
+        retained_black = black_art & (output_luminance <= 60)
+        self.assertGreaterEqual(
+            np.count_nonzero(retained_black) / max(1, np.count_nonzero(black_art)),
+            0.95,
+        )
+
+        repeated = RecognitionEngine.recognize(image, threads, settings)
+        np.testing.assert_array_equal(result.design_map, repeated.design_map)
 
 
 if __name__ == "__main__":

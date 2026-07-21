@@ -15,7 +15,10 @@ A professional desktop application for converting images into embroidery machine
 
 ### Image Processing
 - **Image Adjustments** — brightness, contrast, saturation, sharpness, blur with real-time sliders
-- **Color Quantization** — K-means clustering in CIELAB color space with automatic palette matching to your thread collection
+- **High-Fidelity Recognition** — edge- and rarity-aware CIELAB analysis keeps close colors before thread substitution
+- **Independent Detail Colors** — thin facial marks, outlines, bubbles, and colored lines receive dedicated top-layer design colors
+- **Design vs. Thread Colors** — exact image-derived colors stay editable while CIEDE2000 suggests the nearest owned physical thread and reports its color difference
+- **Automatic Color Budget** — beginner mode selects up to 128 analysis colors from image complexity; professional controls can override it
 - **Auto-Segmentation** — connected component analysis with morphological cleanup
 - **Output Size Control** — set physical dimensions (mm) with aspect ratio lock
 - **Configurable Parameters** — number of colors, minimum region size, smoothing kernel size, dithering
@@ -108,12 +111,13 @@ stitch-studio  # run from anywhere
 3. **Load an image**: `Ctrl+I` or File → Load Image
 4. **Adjust image**: Use the Image & Quantization panel sliders
 5. **Set output size**: Enter physical dimensions in mm
-6. **Quantize**: Click "Quantize & Segment" — maps image colors to your thread palette and segments into regions
-7. **Fine-tune**: Select layers/regions in the Layers panel and adjust stitch settings in the Properties panel
-8. **Compute flow field** (optional): Process → Compute Flow Field — enables flow-guided fill mode
-9. **Generate stitches**: `Ctrl+G`
-10. **Preview**: Zoom/pan on the canvas to inspect stitch paths
-11. **Export**: `Ctrl+E` — choose your machine's format (DST, PES, JEF, etc.)
+6. **Prepare**: Keep automatic high-fidelity colors enabled and click the photo-stitch or cross-stitch preparation button
+7. **Check fidelity**: The status bar reports color, edge, and fine-detail percentages separately from physical-thread matching
+8. **Fine-tune**: Select layers/regions in the Layers panel and adjust stitch settings in the Properties panel
+9. **Compute flow field** (optional): Process → Compute Flow Field — enables flow-guided fill mode
+10. **Generate stitches**: `Ctrl+G`
+11. **Preview**: Zoom/pan on the canvas to inspect stitch paths
+12. **Export**: `Ctrl+E` — choose your machine's format (DST, PES, JEF, etc.)
 
 ---
 

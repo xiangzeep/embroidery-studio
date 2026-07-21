@@ -566,7 +566,10 @@ class ImageEngine:
                 np.count_nonzero((binary > 0) & detail_mask)
                 / max(1, np.count_nonzero(binary))
             )
-            is_detail_layer = detail_ratio >= 0.5
+            is_detail_layer = (
+                design_color.design_id in recognition.detail_design_ids
+                or detail_ratio >= 0.5
+            )
             layer = Layer(
                 name=f"Design color {design_color.design_id + 1}",
                 thread_uid=matched_thread.uid if matched_thread else "",
@@ -581,30 +584,23 @@ class ImageEngine:
                 is_detail_layer=is_detail_layer,
             )
 
-            n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-                binary,
-                connectivity=8,
-            )
-            for label in range(1, n_labels):
-                if int(stats[label, cv2.CC_STAT_AREA]) < 1:
-                    continue
-                mask = (labels == label).astype(np.uint8) * 255
-                region = Region(
-                    name=f"{layer.name} region {len(layer.regions) + 1}",
-                    mask=mask,
+            # A design color can contain thousands of disconnected antialias
+            # islands. Keep one multi-island mask so the layer tree and stitch
+            # worker scale with colors instead of connected-component count.
+            mask = binary * 255
+            region = Region(name=f"{layer.name} region 1", mask=mask)
+            region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
+            if generation_mode == "cross_stitch":
+                region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
+                    mask,
+                    source_image,
                 )
-                region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
-                if generation_mode == "cross_stitch":
-                    region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
-                        mask,
-                        source_image,
-                    )
-                else:
-                    region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
-                        mask,
-                        exact_rgb,
-                    )
-                layer.add_region(region)
+            else:
+                region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                    mask,
+                    exact_rgb,
+                )
+            layer.add_region(region)
             if layer.regions:
                 layers.append(layer)
 

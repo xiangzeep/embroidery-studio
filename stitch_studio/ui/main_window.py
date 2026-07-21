@@ -715,6 +715,10 @@ class MainWindow(QMainWindow):
                     recognition.metrics.boundary_recall * 100.0
                     if recognition is not None else 0.0
                 ),
+                detail_fidelity=(
+                    recognition.metrics.detail_recall * 100.0
+                    if recognition is not None else 0.0
+                ),
             )
         )
 

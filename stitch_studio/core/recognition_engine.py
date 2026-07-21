@@ -32,6 +32,7 @@ class RecognitionResult:
     design_colors: List[DesignColor]
     reconstructed_rgb: np.ndarray
     detail_mask: np.ndarray
+    detail_design_ids: Tuple[int, ...]
     metrics: RecognitionMetrics
 
 
@@ -39,6 +40,7 @@ class RecognitionEngine:
     """Extract design colors without collapsing them into the thread library."""
 
     _AUTO_BUDGETS = (24, 32, 48, 64, 96, 128)
+    _EDGE_SAMPLE_WEIGHT = 4.0
 
     @classmethod
     def recognize(cls, image, physical_threads, settings) -> RecognitionResult:
@@ -50,46 +52,63 @@ class RecognitionEngine:
         pixels_rgb = rgb.reshape(-1, 3)
         pixels_lab = rgb2lab(rgb.astype(np.float64) / 255.0).reshape(-1, 3)
 
+        sensitivity = float(getattr(settings, "detail_sensitivity", 0.65))
+        detail_mask = (
+            cls.detect_fine_details(rgb, sensitivity=sensitivity)
+            if settings.preserve_details
+            else np.zeros((height, width), dtype=bool)
+        )
+        flat_detail = detail_mask.reshape(-1)
         budget = cls._design_color_budget(rgb, settings)
         packed = (
             (pixels_rgb[:, 0].astype(np.uint32) << 16)
             | (pixels_rgb[:, 1].astype(np.uint32) << 8)
             | pixels_rgb[:, 2].astype(np.uint32)
         )
-        cluster_count = max(1, min(budget, int(np.unique(packed).size)))
         weights = cls._sampling_weights(rgb)
-        if pixels_lab.shape[0] > 250_000:
-            clusterer = MiniBatchKMeans(
-                n_clusters=cluster_count,
-                n_init=3,
-                random_state=42,
-                max_iter=80,
-                batch_size=8192,
-            )
-        else:
-            clusterer = KMeans(
-                n_clusters=cluster_count,
-                n_init=5,
-                random_state=42,
-                max_iter=100,
-            )
-        clusterer.fit(pixels_lab, sample_weight=weights.reshape(-1))
-        labels = cls._nearest_design_indices(pixels_lab, clusterer.cluster_centers_)
+        detail_count = 0
+        if budget >= 8 and np.any(flat_detail) and np.any(~flat_detail):
+            detail_unique = int(np.unique(packed[flat_detail]).size)
+            detail_count = min(max(4, budget // 4), detail_unique, budget - 2)
+        base_count = max(1, budget - detail_count)
+        base_unique_source = packed[~flat_detail] if detail_count > 0 else packed
+        base_unique = int(np.unique(base_unique_source).size)
+        base_count = min(base_count, max(1, base_unique))
 
-        centers_rgb = np.clip(
-            lab2rgb(clusterer.cluster_centers_.reshape(1, -1, 3))[0] * 255.0,
-            0,
-            255,
-        ).round().astype(np.uint8)
-        for design_id in range(cluster_count):
-            members = pixels_rgb[labels == design_id]
-            if members.size:
-                centers_rgb[design_id] = np.median(members, axis=0).round().astype(np.uint8)
+        base_selector = (
+            ~flat_detail
+            if detail_count > 0 and np.any(~flat_detail)
+            else np.ones(flat_detail.shape, dtype=bool)
+        )
+        base_centers = cls._fit_design_centers(
+            pixels_lab[base_selector],
+            pixels_rgb[base_selector],
+            weights.reshape(-1)[base_selector],
+            base_count,
+        )
+        centers = [base_centers]
+        labels = cls._nearest_design_indices(
+            pixels_lab,
+            rgb2lab(base_centers.reshape(1, -1, 3).astype(np.float64) / 255.0)[0],
+        )
+        if detail_count > 0:
+            detail_centers = cls._fit_design_centers(
+                pixels_lab[flat_detail],
+                pixels_rgb[flat_detail],
+                weights.reshape(-1)[flat_detail],
+                detail_count,
+            )
+            detail_labs = rgb2lab(
+                detail_centers.reshape(1, -1, 3).astype(np.float64) / 255.0
+            )[0]
+            labels[flat_detail] = (
+                cls._nearest_design_indices(pixels_lab[flat_detail], detail_labs)
+                + base_centers.shape[0]
+            )
+            centers.append(detail_centers)
 
-        center_labs = rgb2lab(
-            centers_rgb.reshape(1, -1, 3).astype(np.float64) / 255.0
-        )[0]
-        labels = cls._nearest_design_indices(pixels_lab, center_labs)
+        centers_rgb = np.concatenate(centers, axis=0)
+        cluster_count = centers_rgb.shape[0]
         order = sorted(
             range(cluster_count),
             key=lambda idx: tuple(int(channel) for channel in centers_rgb[idx]),
@@ -97,6 +116,10 @@ class RecognitionEngine:
         remap = np.empty(cluster_count, dtype=np.int32)
         for new_id, old_id in enumerate(order):
             remap[old_id] = new_id
+        detail_design_ids = (
+            tuple(sorted(int(remap[index]) for index in range(base_centers.shape[0], cluster_count)))
+            if detail_count > 0 else ()
+        )
         labels = remap[labels]
         centers_rgb = centers_rgb[order]
         design_map = labels.reshape(height, width).astype(np.int32)
@@ -114,22 +137,57 @@ class RecognitionEngine:
                 nearest_thread_delta_e=nearest_delta,
             ))
 
-        detail_mask = (
-            cls.detect_fine_details(
-                rgb,
-                sensitivity=float(getattr(settings, "detail_sensitivity", 0.65)),
-            )
-            if settings.preserve_details
-            else np.zeros((height, width), dtype=bool)
+        metrics = cls.measure_fidelity(
+            rgb,
+            reconstructed,
+            source_detail_mask=detail_mask,
+            recognized_detail_mask=detail_mask,
         )
-        metrics = cls.measure_fidelity(rgb, reconstructed)
         return RecognitionResult(
             design_map=design_map,
             design_colors=design_colors,
             reconstructed_rgb=reconstructed,
             detail_mask=detail_mask,
+            detail_design_ids=detail_design_ids,
             metrics=metrics,
         )
+
+    @classmethod
+    def _fit_design_centers(
+        cls,
+        pixels_lab: np.ndarray,
+        pixels_rgb: np.ndarray,
+        weights: np.ndarray,
+        cluster_count: int,
+    ) -> np.ndarray:
+        cluster_count = max(1, min(cluster_count, pixels_lab.shape[0]))
+        if pixels_lab.shape[0] > 250_000:
+            clusterer = MiniBatchKMeans(
+                n_clusters=cluster_count,
+                n_init=3,
+                random_state=42,
+                max_iter=80,
+                batch_size=8192,
+            )
+        else:
+            clusterer = KMeans(
+                n_clusters=cluster_count,
+                n_init=5,
+                random_state=42,
+                max_iter=100,
+            )
+        clusterer.fit(pixels_lab, sample_weight=weights)
+        labels = cls._nearest_design_indices(pixels_lab, clusterer.cluster_centers_)
+        centers_rgb = np.clip(
+            lab2rgb(clusterer.cluster_centers_.reshape(1, -1, 3))[0] * 255.0,
+            0,
+            255,
+        ).round().astype(np.uint8)
+        for design_id in range(cluster_count):
+            members = pixels_rgb[labels == design_id]
+            if members.size:
+                centers_rgb[design_id] = np.median(members, axis=0).round().astype(np.uint8)
+        return centers_rgb
 
     @classmethod
     def _design_color_budget(cls, image: np.ndarray, settings) -> int:
@@ -150,7 +208,7 @@ class RecognitionEngine:
             return 48
         if score < 36:
             return 64
-        if score < 44:
+        if score < 37:
             return 96
         return 128
 
@@ -175,7 +233,7 @@ class RecognitionEngine:
         _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
         rarity = 1.0 / np.sqrt(counts[inverse].reshape(keys.shape).astype(np.float64))
         rarity /= max(float(rarity.mean()), 1e-8)
-        weights = 1.0 + edges.astype(np.float64) * 3.0
+        weights = 1.0 + edges.astype(np.float64) * RecognitionEngine._EDGE_SAMPLE_WEIGHT
         weights += np.clip(contrast / 18.0, 0.0, 4.0)
         weights += np.clip(rarity, 0.0, 5.0)
         return weights
