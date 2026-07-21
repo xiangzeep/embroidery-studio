@@ -48,18 +48,27 @@ class StitchWorker(QThread):
         try:
             total_regions = sum(len(l.regions) for l in self.project.layers)
             jobs = [
-                region
+                (layer, region)
                 for layer in self.project.layers
                 if layer.visible
                 for region in layer.regions
                 if region.visible
             ]
             done = total_regions - len(jobs)
+            ownership_masks = {}
+            if jobs and all(
+                region.stitch_settings.fill_mode == "cross_stitch"
+                for _, region in jobs
+            ):
+                ownership_masks = self.engine.build_cross_stitch_ownership_masks([
+                    (region, self._cross_stitch_priority(layer))
+                    for layer, region in jobs
+                ])
 
             worker_count = self._generation_worker_count(len(jobs))
             if worker_count <= 1:
-                for region in jobs:
-                    self._generate_region(region)
+                for _, region in jobs:
+                    self._generate_region(region, ownership_masks.get(region.uid))
                     done += 1
                     self.progress.emit(done, total_regions)
             else:
@@ -70,8 +79,9 @@ class StitchWorker(QThread):
                             region,
                             self.image,
                             self.flow_field,
+                            ownership_masks.get(region.uid),
                         ): region
-                        for region in jobs
+                        for _, region in jobs
                     }
                     for future in as_completed(future_to_region):
                         region = future_to_region[future]
@@ -90,11 +100,19 @@ class StitchWorker(QThread):
         cpu_count = os.cpu_count() or 1
         return max(1, min(job_count, cpu_count))
 
-    def _generate_region(self, region):
+    def _generate_region(self, region, mask_override=None):
         paths = self.engine.generate_region_paths(
-            region, self.image, self.flow_field
+            region, self.image, self.flow_field, mask_override
         )
         self._store_region_paths(region, paths)
+
+    @staticmethod
+    def _cross_stitch_priority(layer) -> float:
+        if getattr(layer, "is_detail_layer", False):
+            return 5.0
+        color = getattr(layer, "design_color_rgb", None) or layer.thread_color_rgb
+        luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+        return 3.0 if luminance < 72.0 else 1.0
 
     @staticmethod
     def _store_region_paths(region, paths):
@@ -800,6 +818,7 @@ class MainWindow(QMainWindow):
 
     def _on_stitch_done(self):
         self._refresh_canvas()
+        self.act_show_regions.setChecked(False)
         self._update_stats()
         self.layer_panel.refresh()
         self.status_info.setText(tr("status.generated"))
@@ -1185,7 +1204,7 @@ class MainWindow(QMainWindow):
                     'uid': region.uid,
                     'points': region.stitch_points,
                     'paths': getattr(region, 'stitch_paths', None),
-                    'color': layer.thread_color_rgb,
+                    'color': layer.matched_thread_rgb or layer.thread_color_rgb,
                 })
         return regions_data
 

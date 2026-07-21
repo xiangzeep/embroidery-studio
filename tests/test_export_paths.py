@@ -93,6 +93,7 @@ class ExportPathTests(unittest.TestCase):
         self.assertIn("_generate_stitches", export_source)
         self.assertIn("_pending_export_path", done_source)
         self.assertIn("_write_export_pattern", done_source)
+        self.assertIn("act_show_regions.setChecked(False)", done_source)
 
     def test_i18n_defaults_to_chinese_with_english_fallback(self):
         i18n_mod = importlib.import_module("stitch_studio.i18n")
@@ -1541,6 +1542,63 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(cells), 2)
 
+    def test_cross_stitch_global_grid_assigns_split_cell_to_one_color(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=2.0)
+        regions = []
+        for coordinates in (
+            [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+            [(2, 0), (3, 0), (2, 1), (3, 1), (2, 2)],
+            [(3, 2), (0, 3), (1, 3), (2, 3), (3, 3)],
+        ):
+            mask = np.zeros((4, 4), dtype=np.uint8)
+            for x, y in coordinates:
+                mask[y, x] = 255
+            region = project_mod.Region(mask=mask)
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+            )
+            regions.append(region)
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(region, 1.0) for region in regions]
+        )
+
+        self.assertEqual(sum(np.count_nonzero(mask) for mask in assigned.values()), 16)
+        self.assertEqual(sum(bool(np.any(mask)) for mask in assigned.values()), 1)
+
+    def test_cross_stitch_global_grid_masks_do_not_overlap_at_fractional_boundaries(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.75)
+        masks = []
+        for column_slice in (slice(0, 4), slice(4, 7)):
+            mask = np.zeros((7, 7), dtype=np.uint8)
+            mask[:, column_slice] = 255
+            region = project_mod.Region(mask=mask)
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+            )
+            masks.append(region)
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(region, 1.0) for region in masks]
+        )
+        assignment_count = np.sum(
+            [mask > 0 for mask in assigned.values()],
+            axis=0,
+        )
+
+        self.assertLessEqual(int(assignment_count.max()), 1)
+        self.assertEqual(int(np.count_nonzero(assignment_count)), 49)
+
     def test_higher_cross_stitch_coverage_removes_partial_cells(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -2179,6 +2237,46 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertIn(pyembroidery.COLOR_CHANGE, commands)
         self.assertNotIn(pyembroidery.COLOR_BREAK, commands)
+
+    def test_export_merges_design_layers_matched_to_same_physical_thread(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        for index, design_color in enumerate(((15, 100, 205), (25, 110, 215))):
+            layer = project_mod.Layer(
+                thread_uid="physical-blue",
+                thread_color_rgb=design_color,
+                matched_thread_rgb=(20, 105, 210),
+                order=index,
+            )
+            region = project_mod.Region()
+            region.stitch_paths = [[(0.0, float(index)), (10.0, float(index))]]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(len(pattern.threadlist), 1)
+        self.assertEqual(pattern.threadlist[0].color, 0x1469D2)
+        self.assertNotIn(
+            pyembroidery.COLOR_CHANGE,
+            [command for _, _, command in pattern.stitches],
+        )
+
+    def test_compact_dst_thread_metadata_stays_inside_fixed_header(self):
+        install_fake_pyembroidery()
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        header = b"LA:test\rST:    10\rCO: 19\rPD:******\r".ljust(511, b" ") + b"\x1a"
+        colors = [(index * 123457) & 0xFFFFFF for index in range(20)]
+
+        updated = export_mod.ExportEngine._compact_dst_header(header, colors)
+
+        self.assertEqual(len(updated), 512)
+        self.assertEqual(updated[-1], 0x1A)
+        self.assertEqual(updated.count(b"TC:#"), 20)
 
     def test_export_writes_larger_visual_layers_before_small_details(self):
         install_fake_pyembroidery()

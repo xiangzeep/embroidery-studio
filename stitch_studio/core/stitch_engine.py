@@ -43,13 +43,15 @@ class StitchEngine:
         region: Region,
         image: Optional[np.ndarray] = None,
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        mask_override: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate separated stitch paths for preview and export."""
-        if region.mask is None:
+        source_mask = mask_override if mask_override is not None else region.mask
+        if source_mask is None:
             return []
 
         settings = region.stitch_settings
-        mask = self._prepare_mask(region.mask, settings)
+        mask = self._prepare_mask(source_mask, settings)
         if mask is None or np.count_nonzero(mask) == 0:
             return []
 
@@ -935,6 +937,84 @@ class StitchEngine:
         return ordered
 
     # ========== CROSS-STITCH FILL ==========
+
+    def build_cross_stitch_ownership_masks(
+        self,
+        region_priorities: List[Tuple[Region, float]],
+    ) -> dict:
+        """Assign every shared grid cell to one dominant design color."""
+        entries = [
+            (region, max(0.1, float(priority)))
+            for region, priority in region_priorities
+            if region.mask is not None
+            and region.stitch_settings.fill_mode == "cross_stitch"
+        ]
+        if not entries:
+            return {}
+
+        shape = entries[0][0].mask.shape
+        if any(region.mask.shape != shape for region, _ in entries):
+            return {}
+        reference = entries[0][0].stitch_settings
+        signature = self._cross_grid_signature(reference)
+        if any(
+            self._cross_grid_signature(region.stitch_settings) != signature
+            for region, _ in entries[1:]
+        ):
+            return {}
+
+        height, width = shape
+        cell_size = max(1.0, reference.cross_pattern_size_mm * self.px_per_mm)
+        offset_x = reference.cross_grid_offset_x_mm * self.px_per_mm
+        offset_y = reference.cross_grid_offset_y_mm * self.px_per_mm
+        start_x = offset_x + np.floor((0.0 - offset_x) / cell_size) * cell_size
+        start_y = offset_y + np.floor((0.0 - offset_y) / cell_size) * cell_size
+        assigned = {
+            region.uid: np.zeros(shape, dtype=np.uint8)
+            for region, _ in entries
+        }
+        minimum_coverage = max(0.05, min(0.25, reference.cross_coverage * 0.5))
+
+        y = start_y
+        while y < height:
+            x = start_x
+            while x < width:
+                # Use the same rounded boundary for adjacent cells. Independent
+                # floor/ceil slices overlap by one pixel on fractional grids.
+                x0 = max(0, int(np.floor(x + 1e-9)))
+                y0 = max(0, int(np.floor(y + 1e-9)))
+                x1 = min(width, int(np.floor(x + cell_size + 1e-9)))
+                y1 = min(height, int(np.floor(y + cell_size + 1e-9)))
+                if x1 <= x0 and x0 < width:
+                    x1 = x0 + 1
+                if y1 <= y0 and y0 < height:
+                    y1 = y0 + 1
+                if x1 > x0 and y1 > y0:
+                    counts = [
+                        int(np.count_nonzero(region.mask[y0:y1, x0:x1]))
+                        for region, _ in entries
+                    ]
+                    occupied = min((x1 - x0) * (y1 - y0), sum(counts))
+                    cell_area = max(1, (x1 - x0) * (y1 - y0))
+                    if occupied / cell_area + 1e-9 >= minimum_coverage:
+                        winner = max(
+                            range(len(entries)),
+                            key=lambda index: counts[index] * entries[index][1],
+                        )
+                        if counts[winner] > 0:
+                            assigned[entries[winner][0].uid][y0:y1, x0:x1] = 255
+                x += cell_size
+            y += cell_size
+        return assigned
+
+    @staticmethod
+    def _cross_grid_signature(settings: StitchSettings) -> tuple:
+        return (
+            round(float(settings.cross_pattern_size_mm), 6),
+            bool(settings.cross_align_grid),
+            round(float(settings.cross_grid_offset_x_mm), 6),
+            round(float(settings.cross_grid_offset_y_mm), 6),
+        )
 
     def _cross_stitch_cells(
         self,

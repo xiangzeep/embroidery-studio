@@ -61,6 +61,7 @@ class ExportEngine:
         # first color first, so write the stack in reverse: bottom first,
         # top/detail layers last.
         drawable_layers.reverse()
+        drawable_layers = self._group_drawable_layers(drawable_layers)
 
         last_x, last_y = None, None
         for layer_idx, (layer, region_paths) in enumerate(drawable_layers):
@@ -100,6 +101,7 @@ class ExportEngine:
         pyembroidery.write(pattern, filepath, write_settings)
         written_files = [filepath]
         if filepath.lower().endswith(".dst"):
+            self._embed_compact_dst_metadata(filepath, pattern)
             self._validate_dst_roundtrip(pattern, filepath)
             edr_path = os.path.splitext(filepath)[0] + ".edr"
             pyembroidery.write(pattern, edr_path, {})
@@ -198,7 +200,7 @@ class ExportEngine:
     def _thread_for_layer(self, layer: Layer, index: int) -> pyembroidery.EmbThread:
         """Create a thread with fields used by embroidery writers."""
         thread = pyembroidery.EmbThread()
-        r, g, b = layer.thread_color_rgb
+        r, g, b = layer.matched_thread_rgb or layer.thread_color_rgb
         thread.color = (r << 16) | (g << 8) | b
 
         label = self._safe_thread_text(
@@ -219,6 +221,68 @@ class ExportEngine:
         thread.chart = "Stitch Studio"
         thread.catalog_number = catalog
         return thread
+
+    def _group_drawable_layers(self, drawable_layers):
+        """Combine design shades that use the same physical embroidery thread."""
+        grouped = []
+        indexes = {}
+        for layer, region_paths in drawable_layers:
+            color = tuple(layer.matched_thread_rgb or layer.thread_color_rgb)
+            if layer.thread_uid and layer.matched_thread_rgb:
+                key = ("thread", layer.thread_uid)
+            else:
+                key = ("color", color)
+
+            index = indexes.get(key)
+            if index is None:
+                indexes[key] = len(grouped)
+                grouped.append((layer, list(region_paths)))
+            else:
+                grouped[index][1].extend(region_paths)
+        return grouped
+
+    def _embed_compact_dst_metadata(
+        self,
+        filepath: str,
+        pattern: pyembroidery.EmbPattern,
+    ):
+        """Add thread colors without allowing metadata to overflow the DST header."""
+        if not os.path.isfile(filepath):
+            return
+        colors = [int(thread.color) & 0xFFFFFF for thread in pattern.threadlist]
+        with open(filepath, "r+b") as dst_file:
+            header = dst_file.read(512)
+            updated = self._compact_dst_header(header, colors)
+            if updated == header:
+                return
+            dst_file.seek(0)
+            dst_file.write(updated)
+
+    @staticmethod
+    def _compact_dst_header(header: bytes, colors) -> bytes:
+        """Return a fixed-size Tajima header containing compact TC records."""
+        if len(header) != 512:
+            return header
+
+        pd_start = header.find(b"PD:")
+        pd_end = header.find(b"\r", pd_start)
+        if pd_start < 0 or pd_end < 0:
+            return header
+
+        prefix = header[:pd_end + 1]
+        records = []
+        for color in colors:
+            if isinstance(color, (tuple, list)):
+                r, g, b = color
+                value = (int(r) << 16) | (int(g) << 8) | int(b)
+            else:
+                value = int(color)
+            records.append(f"TC:#{value & 0xFFFFFF:06X},C,\r".encode("ascii"))
+
+        payload = prefix + b"".join(records)
+        if len(payload) > 511:
+            return header
+        return payload.ljust(511, b" ") + b"\x1a"
 
     def _safe_thread_text(self, *candidates: str, max_len: int) -> str:
         """Return a printable ASCII value for conservative embroidery headers."""
