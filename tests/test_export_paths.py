@@ -567,6 +567,17 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(int(np.count_nonzero(thread_map[22, 8:36] == 1)), 28)
         self.assertIn(1, used_indices)
 
+    def test_detail_detection_does_not_promote_large_shape_boundaries(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        image = np.full((80, 80, 3), (0, 150, 210), dtype=np.uint8)
+        image[:, 40:] = (252, 156, 132)
+        image[:, 39] = (126, 90, 80)
+
+        detail_mask = image_mod.ImageEngine._detect_detail_pixels(image)
+
+        self.assertEqual(int(np.count_nonzero(detail_mask[:, 38:42])), 0)
+
     def test_default_segmentation_keeps_small_dark_detail_regions(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")

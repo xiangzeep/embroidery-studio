@@ -187,21 +187,24 @@ class ImageEngine:
         image_area = candidate.size
         for lbl in range(1, n_labels):
             area = int(stats[lbl, cv2.CC_STAT_AREA])
+            left = int(stats[lbl, cv2.CC_STAT_LEFT])
+            top = int(stats[lbl, cv2.CC_STAT_TOP])
             width = int(stats[lbl, cv2.CC_STAT_WIDTH])
             height = int(stats[lbl, cv2.CC_STAT_HEIGHT])
             short_axis = min(width, height)
             long_axis = max(width, height)
+            spans_image = (
+                (top == 0 and top + height >= candidate.shape[0]) or
+                (left == 0 and left + width >= candidate.shape[1])
+            )
             if (
-                area <= max(256, int(image_area * 0.015)) and
+                not spans_image and
+                area <= max(128, int(image_area * 0.004)) and
                 (short_axis <= 5 or long_axis >= short_axis * 3)
             ):
                 detail[labels == lbl] = True
 
-        if not np.any(detail):
-            return detail
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        return cv2.dilate(detail.astype(np.uint8), kernel, iterations=1).astype(bool)
+        return detail
 
     @staticmethod
     def _nearest_palette_indices_for_pixels(
