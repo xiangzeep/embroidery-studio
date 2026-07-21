@@ -1062,6 +1062,25 @@ class ExportPathTests(unittest.TestCase):
             canvas_mod.QGraphicsItem.DeviceCoordinateCache,
         )
 
+    def test_canvas_stitch_preview_reuses_prebuilt_painter_path(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        item = canvas_mod.StitchPreviewItem(
+            [
+                [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)],
+                [(20.0, 0.0), (20.0, 10.0)],
+            ],
+            canvas_mod.QColor(10, 20, 30),
+        )
+
+        first = item._path_for_stride(1)
+        second = item._path_for_stride(1)
+
+        self.assertIs(first, second)
+        self.assertEqual(first.elementCount(), 5)
+
     def test_canvas_arrow_key_moves_selected_stitch_object(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
         qt_core = importlib.import_module("PySide6.QtCore")
@@ -1092,6 +1111,7 @@ class ExportPathTests(unittest.TestCase):
         app.processEvents()
 
         self.assertEqual(moves[-1], ("region-1", 10.0, 0.0))
+        self.assertEqual(canvas._object_items["region-1"].pos().x(), 10.0)
 
     def test_canvas_selection_shows_mouse_resize_handles(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
@@ -1172,6 +1192,32 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(moves[-1], ("region-1", 12.0, -4.0))
 
+    def test_canvas_repeated_drag_keeps_previous_preview_offset(self):
+        qt_core = importlib.import_module("PySide6.QtCore")
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "points": [(0.0, 0.0), (20.0, 0.0)],
+                "paths": [[(0.0, 0.0), (20.0, 0.0)]],
+                "color": (10, 20, 30),
+            }],
+        )
+        canvas.select_object("region-1")
+
+        canvas._begin_selection_box_drag()
+        canvas._selection_box_item.setPos(qt_core.QPointF(10.0, 0.0))
+        canvas._finish_selection_box_drag()
+        canvas._begin_selection_box_drag()
+        canvas._selection_box_item.setPos(qt_core.QPointF(15.0, 0.0))
+
+        self.assertEqual(canvas._object_items["region-1"].pos().x(), 15.0)
+
     def test_canvas_double_click_region_requests_boundary_edit(self):
         qt_core = importlib.import_module("PySide6.QtCore")
         qt_gui = importlib.import_module("PySide6.QtGui")
@@ -1208,7 +1254,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(requested, ["region-1"])
 
-    def test_main_window_move_region_refreshes_only_affected_layer(self):
+    def test_main_window_move_region_does_not_rebuild_canvas_or_stats(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
 
@@ -1225,23 +1271,24 @@ class ExportPathTests(unittest.TestCase):
         layer_2.regions = [region_2]
         project.layers = [layer_1, layer_2]
 
-        refreshed = []
+        expensive_calls = []
         window = main_mod.MainWindow.__new__(main_mod.MainWindow)
         window.project = project
         window.canvas = types.SimpleNamespace(
-            set_layer_stitches=lambda layer_uid, data: refreshed.append(layer_uid),
+            set_layer_stitches=lambda *args: expensive_calls.append("redraw"),
             select_object=lambda uid: None,
         )
         window.layer_panel = types.SimpleNamespace(
-            refresh=lambda: None,
+            refresh=lambda: expensive_calls.append("layers"),
             select_uid=lambda uid: None,
         )
         window.status_info = types.SimpleNamespace(setText=lambda text: None)
-        window._update_stats = lambda: None
+        window._update_stats = lambda: expensive_calls.append("stats")
 
         window._move_stitch_object(region_1.uid, 5.0, 0.0)
 
-        self.assertEqual(refreshed, [layer_1.uid])
+        self.assertEqual(expensive_calls, [])
+        self.assertEqual(region_1.stitch_points, [(5.0, 0.0), (15.0, 0.0)])
 
     def test_stitch_worker_sizes_generation_pool_to_available_cpu(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
@@ -2222,11 +2269,34 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                (filepath, {"version": "extended"}),
+                (filepath, {}),
                 (edr_path, {}),
             ],
         )
         self.assertEqual(written_files, [filepath, edr_path])
+
+    def test_export_splits_long_jump_moves_into_dst_safe_deltas(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(10, 120, 30), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(1500.0, 900.0), (1510.0, 900.0)],
+        ]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        previous = (0.0, 0.0)
+        for x, y, command in pattern.stitches:
+            if command in (pyembroidery.STITCH, pyembroidery.JUMP):
+                distance = float(np.hypot(x - previous[0], y - previous[1]))
+                self.assertLessEqual(distance, 120.0)
+                previous = (x, y)
 
     def test_export_rejects_pattern_without_stitches(self):
         install_fake_pyembroidery()

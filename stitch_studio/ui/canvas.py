@@ -134,6 +134,7 @@ class StitchPreviewItem(QGraphicsItem):
         self.paths = [path for path in paths if len(path) >= 2]
         self.color = QColor(color)
         self._bounds = self._compute_bounds()
+        self._path_cache: Dict[int, QPainterPath] = {}
         self.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
 
     def boundingRect(self) -> QRectF:
@@ -145,11 +146,11 @@ class StitchPreviewItem(QGraphicsItem):
 
         lod = option.levelOfDetailFromTransform(painter.worldTransform())
         stride = self._visible_path_stride(len(self.paths), lod)
-        visible_paths = self.paths[::stride]
+        visible_path = self._path_for_stride(stride)
 
         painter.setRenderHint(QPainter.Antialiasing, lod >= 0.28)
         if lod < 0.18:
-            self._paint_fast_overview(painter, visible_paths)
+            self._paint_fast_overview(painter, visible_path)
             return
 
         width = self._thread_width_for_lod(lod)
@@ -161,7 +162,7 @@ class StitchPreviewItem(QGraphicsItem):
         shadow_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(shadow_pen)
         painter.translate(width * 0.22, width * 0.28)
-        self._draw_paths(painter, visible_paths)
+        painter.drawPath(visible_path)
         painter.translate(-width * 0.22, -width * 0.28)
 
         body_pen = QPen(self.color)
@@ -169,7 +170,7 @@ class StitchPreviewItem(QGraphicsItem):
         body_pen.setCapStyle(Qt.RoundCap)
         body_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(body_pen)
-        self._draw_paths(painter, visible_paths)
+        painter.drawPath(visible_path)
 
         # thread highlight: thin upper-left pass gives stitches a raised look.
         highlight = QColor(
@@ -184,17 +185,31 @@ class StitchPreviewItem(QGraphicsItem):
         highlight_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(highlight_pen)
         painter.translate(-width * 0.16, -width * 0.18)
-        self._draw_paths(painter, visible_paths)
+        painter.drawPath(visible_path)
         painter.translate(width * 0.16, width * 0.18)
 
-    def _paint_fast_overview(self, painter: QPainter, paths: List[List[Tuple[float, float]]]):
+    def _paint_fast_overview(self, painter: QPainter, path: QPainterPath):
         color = QColor(self.color)
         color.setAlpha(210)
         pen = QPen(color)
         pen.setWidthF(0.9)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
-        self._draw_paths(painter, paths)
+        painter.drawPath(path)
+
+    def _path_for_stride(self, stride: int) -> QPainterPath:
+        stride = max(1, int(stride))
+        cached = self._path_cache.get(stride)
+        if cached is not None:
+            return cached
+
+        combined = QPainterPath()
+        for points in self.paths[::stride]:
+            combined.moveTo(points[0][0], points[0][1])
+            for x, y in points[1:]:
+                combined.lineTo(x, y)
+        self._path_cache[stride] = combined
+        return combined
 
     @staticmethod
     def _visible_path_stride(path_count: int, lod: float) -> int:
@@ -213,15 +228,6 @@ class StitchPreviewItem(QGraphicsItem):
         if lod >= 0.7:
             return 1.15
         return 0.85
-
-    @staticmethod
-    def _draw_paths(painter: QPainter, paths: List[List[Tuple[float, float]]]):
-        for points in paths:
-            path = QPainterPath()
-            path.moveTo(points[0][0], points[0][1])
-            for x, y in points[1:]:
-                path.lineTo(x, y)
-            painter.drawPath(path)
 
     def _compute_bounds(self) -> QRectF:
         if not self.paths:
@@ -526,6 +532,7 @@ class EmbroideryCanvas(QGraphicsView):
         self._resize_handle_items: List[ResizeHandleItem] = []
         self._resize_start_rect: Optional[QRectF] = None
         self._selection_drag_start_pos = QPointF()
+        self._selection_drag_item_positions: Dict[str, QPointF] = {}
         self._updating_resize_handles = False
         self._boundary_edit_uid: Optional[str] = None
         self._boundary_edit_scale = 1.0
@@ -812,6 +819,7 @@ class EmbroideryCanvas(QGraphicsView):
         self._selection_box_item = None
         self._resize_start_rect = None
         self._selection_drag_start_pos = QPointF()
+        self._selection_drag_item_positions = {}
 
     @staticmethod
     def _resize_handle_positions(rect: QRectF) -> Dict[str, QPointF]:
@@ -890,6 +898,10 @@ class EmbroideryCanvas(QGraphicsView):
     def _begin_selection_box_drag(self):
         if self._selection_box_item is not None:
             self._selection_drag_start_pos = QPointF(self._selection_box_item.pos())
+            self._selection_drag_item_positions = {
+                item.uid: QPointF(item.pos())
+                for item in self._selected_object_items()
+            }
 
     def _selection_box_moved(self, item: SelectionBoxItem):
         delta = item.pos() - self._selection_drag_start_pos
@@ -899,7 +911,8 @@ class EmbroideryCanvas(QGraphicsView):
 
     def _move_selected_items_preview(self, delta: QPointF):
         for item in self._selected_object_items():
-            item.setPos(delta)
+            start = self._selection_drag_item_positions.get(item.uid, QPointF())
+            item.setPos(start + delta)
 
     def _finish_selection_box_drag(self):
         if self._selection_box_item is None:
@@ -909,6 +922,13 @@ class EmbroideryCanvas(QGraphicsView):
         if uid and (abs(delta.x()) > 1e-6 or abs(delta.y()) > 1e-6):
             self.object_move_requested.emit(uid, delta.x(), delta.y())
         self._selection_drag_start_pos = QPointF(self._selection_box_item.pos())
+        self._selection_drag_item_positions = {}
+
+    def _request_object_move(self, uid: str, dx: float, dy: float):
+        item = self._object_items.get(uid)
+        if item is not None:
+            item.setPos(item.pos() + QPointF(dx, dy))
+        self.object_move_requested.emit(uid, dx, dy)
 
     def start_boundary_edit(self, uid: str, polygon: Any, scale: float = 1.0):
         """Start editing a region polygon with draggable Bezier handles."""
@@ -1256,7 +1276,7 @@ class EmbroideryCanvas(QGraphicsView):
                     dy = -step
                 elif event.key() == Qt.Key_Down:
                     dy = step
-                self.object_move_requested.emit(uid, dx, dy)
+                self._request_object_move(uid, dx, dy)
             else:
                 super().keyPressEvent(event)
         else:
@@ -1289,19 +1309,19 @@ class EmbroideryCanvas(QGraphicsView):
             )
             menu.addAction(
                 "Move Selected Left",
-                lambda: self.object_move_requested.emit(selected_uid, -10.0, 0.0),
+                lambda: self._request_object_move(selected_uid, -10.0, 0.0),
             )
             menu.addAction(
                 "Move Selected Right",
-                lambda: self.object_move_requested.emit(selected_uid, 10.0, 0.0),
+                lambda: self._request_object_move(selected_uid, 10.0, 0.0),
             )
             menu.addAction(
                 "Move Selected Up",
-                lambda: self.object_move_requested.emit(selected_uid, 0.0, -10.0),
+                lambda: self._request_object_move(selected_uid, 0.0, -10.0),
             )
             menu.addAction(
                 "Move Selected Down",
-                lambda: self.object_move_requested.emit(selected_uid, 0.0, 10.0),
+                lambda: self._request_object_move(selected_uid, 0.0, 10.0),
             )
             menu.addSeparator()
         menu.addAction("Fit to Content (F)", self.fit_to_content)

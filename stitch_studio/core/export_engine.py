@@ -62,6 +62,7 @@ class ExportEngine:
         # top/detail layers last.
         drawable_layers.reverse()
 
+        last_x, last_y = None, None
         for layer_idx, (layer, region_paths) in enumerate(drawable_layers):
             # Add thread for this layer
             thread = self._thread_for_layer(layer, layer_idx)
@@ -69,9 +70,12 @@ class ExportEngine:
 
             # Color change if not first layer
             if layer_idx > 0:
-                pattern.add_stitch_absolute(pyembroidery.COLOR_CHANGE, 0, 0)
+                pattern.add_stitch_absolute(
+                    pyembroidery.COLOR_CHANGE,
+                    last_x or 0,
+                    last_y or 0,
+                )
 
-            last_x, last_y = None, None
             for region, paths in region_paths:
                 for path in self._order_region_paths(region, paths, last_x, last_y):
                     last_x, last_y = self._write_path(pattern, path, last_x, last_y)
@@ -93,16 +97,61 @@ class ExportEngine:
         write_settings = {}
         if settings:
             write_settings.update(settings)
-        if filepath.lower().endswith(".dst"):
-            write_settings.setdefault("version", "extended")
-
         pyembroidery.write(pattern, filepath, write_settings)
         written_files = [filepath]
         if filepath.lower().endswith(".dst"):
+            self._validate_dst_roundtrip(pattern, filepath)
             edr_path = os.path.splitext(filepath)[0] + ".edr"
             pyembroidery.write(pattern, edr_path, {})
             written_files.append(edr_path)
         return written_files
+
+    def _validate_dst_roundtrip(
+        self,
+        source_pattern: pyembroidery.EmbPattern,
+        filepath: str,
+    ):
+        """Reject a DST whose encoded movement stream changes design size."""
+        # Test doubles may capture writes without creating a physical file.
+        if not os.path.isfile(filepath):
+            return
+        try:
+            decoded = pyembroidery.EmbPattern(filepath)
+            expected = source_pattern.bounds()
+            actual = decoded.bounds()
+            has_end = bool(
+                decoded.stitches
+                and (int(decoded.stitches[-1][2]) & 0xFF) == pyembroidery.END
+            )
+            if expected is None or actual is None or not has_end:
+                raise ValueError("missing stitches or END command")
+
+            expected_size = (
+                float(expected[2] - expected[0]),
+                float(expected[3] - expected[1]),
+            )
+            actual_size = (
+                float(actual[2] - actual[0]),
+                float(actual[3] - actual[1]),
+            )
+            tolerance = tuple(max(2.0, size * 0.01) for size in expected_size)
+            if any(
+                abs(actual_value - expected_value) > allowed
+                for actual_value, expected_value, allowed in zip(
+                    actual_size,
+                    expected_size,
+                    tolerance,
+                )
+            ):
+                raise ValueError(
+                    f"size changed from {expected_size} to {actual_size}"
+                )
+        except Exception as error:
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            raise ValueError(f"DST validation failed: {error}") from error
 
     def has_stitches(self, project: Project) -> bool:
         """Return whether the project contains at least one drawable path."""
@@ -127,10 +176,10 @@ class ExportEngine:
         thread = self._thread_for_layer(layer, 0)
         pattern.add_thread(thread)
 
+        last_x, last_y = None, None
         for region in layer.regions:
             if not region.visible:
                 continue
-            last_x, last_y = None, None
             paths = self._region_paths(region)
             for path in self._order_region_paths(region, paths, last_x, last_y):
                 last_x, last_y = self._write_path(pattern, path, last_x, last_y)
@@ -138,9 +187,6 @@ class ExportEngine:
         pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
 
         write_settings = settings or {}
-        if filepath.lower().endswith(".dst"):
-            write_settings = dict(write_settings)
-            write_settings.setdefault("version", "extended")
         pyembroidery.write(pattern, filepath, write_settings)
 
     def _safe_design_name(self, name: str) -> str:
@@ -338,7 +384,15 @@ class ExportEngine:
             elif gap > self.trim_threshold_units:
                 pattern.add_stitch_absolute(pyembroidery.TRIM, last_x, last_y)
         if not connected_to_previous:
-            pattern.add_stitch_absolute(pyembroidery.JUMP, first_x, first_y)
+            jump_x = 0 if last_x is None else last_x
+            jump_y = 0 if last_y is None else last_y
+            self._write_jump_segment(
+                pattern,
+                jump_x,
+                jump_y,
+                first_x,
+                first_y,
+            )
 
         prev_x, prev_y = first_x, first_y
         for x, y in path[1:]:
@@ -347,6 +401,26 @@ class ExportEngine:
             prev_x, prev_y = ix, iy
 
         return prev_x, prev_y
+
+    def _write_jump_segment(
+        self,
+        pattern: pyembroidery.EmbPattern,
+        prev_x: int,
+        prev_y: int,
+        ix: int,
+        iy: int,
+    ):
+        """Split a jump so every encoded DST delta stays machine-safe."""
+        distance = float(np.hypot(ix - prev_x, iy - prev_y))
+        if distance <= 1e-6:
+            pattern.add_stitch_absolute(pyembroidery.JUMP, ix, iy)
+            return
+        split_count = max(1, int(np.ceil(distance / self.max_stitch_units)))
+        for step in range(1, split_count + 1):
+            ratio = step / split_count
+            x = int(round(prev_x + ratio * (ix - prev_x)))
+            y = int(round(prev_y + ratio * (iy - prev_y)))
+            pattern.add_stitch_absolute(pyembroidery.JUMP, x, y)
 
     def _write_stitch_segment(
         self,

@@ -946,25 +946,19 @@ class MainWindow(QMainWindow):
         layer = self.project.get_layer(uid)
         if layer:
             layer.translate_stitches(dx, dy)
-            affected_layer = layer
         else:
             region = None
-            affected_layer = None
             for candidate_layer in self.project.layers:
                 region = candidate_layer.get_region(uid)
                 if region:
-                    affected_layer = candidate_layer
                     break
-            if not region or affected_layer is None:
+            if not region:
                 return
             region.translate_stitches(dx, dy)
 
         self.project.modified = True
-        self._refresh_layer_stitches(affected_layer)
         self.canvas.select_object(uid)
-        self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
-        self._update_stats()
         self.status_info.setText(tr("status.moved").format(dx=dx, dy=dy))
 
     def _resize_stitch_object(self, uid: str, scene_bounds):
