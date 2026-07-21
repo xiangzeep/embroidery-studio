@@ -1032,6 +1032,26 @@ class ImagePanel(QWidget):
         self.chk_dither = QCheckBox(tr("image.dithering"))
         ql.addWidget(self.chk_dither, 6, 0, 1, 2)
 
+        self.chk_auto_design_colors = QCheckBox(tr("image.auto_design_colors"))
+        self.chk_auto_design_colors.setChecked(True)
+        ql.addWidget(self.chk_auto_design_colors, 7, 0, 1, 2)
+
+        ql.addWidget(QLabel(tr("image.design_colors")), 8, 0)
+        self.spin_design_colors = QSpinBox()
+        self.spin_design_colors.setRange(2, 128)
+        self.spin_design_colors.setValue(64)
+        self.spin_design_colors.setEnabled(False)
+        self.chk_auto_design_colors.toggled.connect(
+            lambda checked: self.spin_design_colors.setEnabled(not checked)
+        )
+        ql.addWidget(self.spin_design_colors, 8, 1)
+
+        ql.addWidget(QLabel(tr("image.detail_sensitivity")), 9, 0)
+        self.slider_detail_sensitivity = QSlider(Qt.Horizontal)
+        self.slider_detail_sensitivity.setRange(0, 100)
+        self.slider_detail_sensitivity.setValue(65)
+        ql.addWidget(self.slider_detail_sensitivity, 9, 1)
+
         layout.addWidget(self.grp_quant)
 
         self.lbl_step_generate = QLabel(tr("image.step_generate"))
@@ -1070,6 +1090,11 @@ class ImagePanel(QWidget):
         q.method = self.combo_method.currentText()
         q.include_background = self.chk_include_background.isChecked()
         q.preserve_details = self.chk_preserve_details.isChecked()
+        q.auto_design_colors = self.chk_auto_design_colors.isChecked()
+        q.design_color_budget = (
+            0 if q.auto_design_colors else self.spin_design_colors.value()
+        )
+        q.detail_sensitivity = self.slider_detail_sensitivity.value() / 100.0
         q.min_region_area_px = self.spin_min_area.value()
         q.morphology_kernel_size = self.spin_kernel.value()
         q.smooth_regions = self.chk_smooth.isChecked()
@@ -1111,6 +1136,10 @@ class ImagePanel(QWidget):
         self.combo_method.setCurrentText(q.method)
         self.chk_include_background.setChecked(q.include_background)
         self.chk_preserve_details.setChecked(q.preserve_details)
+        self.chk_auto_design_colors.setChecked(q.auto_design_colors)
+        if q.design_color_budget > 0:
+            self.spin_design_colors.setValue(q.design_color_budget)
+        self.slider_detail_sensitivity.setValue(int(q.detail_sensitivity * 100))
         self.spin_min_area.setValue(q.min_region_area_px)
         self.spin_kernel.setValue(q.morphology_kernel_size)
         self.chk_smooth.setChecked(q.smooth_regions)

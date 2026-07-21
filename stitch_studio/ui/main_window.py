@@ -22,6 +22,7 @@ from shapely.affinity import scale as shapely_scale, translate as shapely_transl
 from ..core.thread_db import ThreadDatabase
 from ..core.project import Project, Layer, Region, StitchSettings
 from ..core.image_engine import ImageEngine, FlowFieldEngine
+from ..core.recognition_engine import RecognitionEngine
 from ..core.stitch_engine import StitchEngine
 from ..core.export_engine import ExportEngine, SUPPORTED_FORMATS
 from ..i18n import tr
@@ -131,33 +132,36 @@ class QuantizeWorker(QThread):
             )
 
             self.progress.emit(tr("status.matching"))
-            thread_map, used_indices = ImageEngine.quantize_to_palette(
+            recognition = RecognitionEngine.recognize(
                 processed,
                 self.palette_threads,
                 self.quant_settings,
-            )
-
-            self.progress.emit(tr("status.regions"))
-            regions = ImageEngine.segment_regions(
-                thread_map,
-                self.quant_settings,
-                processed,
             )
 
             self.progress.emit(tr("status.layers"))
-            layers = ImageEngine.build_layers_from_regions(
-                regions,
+            layers = ImageEngine.build_layers_from_recognition(
+                recognition,
                 self.palette_threads,
                 processed,
                 self.generation_mode,
+                self.quant_settings,
             )
+            regions = [
+                (layer.design_color_id, region.mask)
+                for layer in layers
+                for region in layer.regions
+                if region.mask is not None
+            ]
 
             self.result_ready.emit({
                 "processed": processed,
-                "thread_map": thread_map,
-                "used_indices": used_indices,
+                "thread_map": recognition.design_map,
+                "used_indices": [
+                    color.design_id for color in recognition.design_colors
+                ],
                 "regions": regions,
                 "layers": layers,
+                "recognition": recognition,
             })
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
@@ -666,6 +670,7 @@ class MainWindow(QMainWindow):
         used_indices = result["used_indices"]
         regions = result["regions"]
         layers = result["layers"]
+        recognition = result.get("recognition")
 
         self.project.processed_image = processed
         self.project.quantized_map = thread_map
@@ -702,6 +707,14 @@ class MainWindow(QMainWindow):
                 colors=len(used_indices),
                 regions=len(regions),
                 layers=len(layers),
+                color_fidelity=(
+                    recognition.metrics.perceptual_similarity * 100.0
+                    if recognition is not None else 0.0
+                ),
+                edge_fidelity=(
+                    recognition.metrics.boundary_recall * 100.0
+                    if recognition is not None else 0.0
+                ),
             )
         )
 

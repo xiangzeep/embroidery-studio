@@ -73,10 +73,13 @@ class ExportPathTests(unittest.TestCase):
 
         source = inspect.getsource(main_mod)
         quantize_source = inspect.getsource(main_mod.MainWindow._quantize_and_segment)
+        worker_source = inspect.getsource(main_mod.QuantizeWorker.run)
 
         self.assertIn("class QuantizeWorker", source)
         self.assertIn("self._quant_worker.start()", quantize_source)
         self.assertNotIn("quantize_to_palette(", quantize_source)
+        self.assertIn("RecognitionEngine.recognize(", worker_source)
+        self.assertNotIn("quantize_to_palette(", worker_source)
 
     def test_i18n_defaults_to_chinese_with_english_fallback(self):
         i18n_mod = importlib.import_module("stitch_studio.i18n")
@@ -109,6 +112,10 @@ class ExportPathTests(unittest.TestCase):
         self.assertFalse(panel.chk_include_background.isChecked())
         self.assertEqual(panel.chk_preserve_details.text(), "保留细线")
         self.assertTrue(panel.chk_preserve_details.isChecked())
+        self.assertEqual(panel.chk_auto_design_colors.text(), "自动高保真配色")
+        self.assertTrue(panel.chk_auto_design_colors.isChecked())
+        self.assertEqual(panel.spin_design_colors.maximum(), 128)
+        self.assertEqual(panel.slider_detail_sensitivity.value(), 65)
 
     def test_properties_panel_core_parameters_are_chinese(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
