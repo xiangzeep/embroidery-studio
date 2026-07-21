@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional, Dict
 from PIL import Image, ImageEnhance, ImageFilter
 from scipy.ndimage import gaussian_filter
 from skimage.color import rgb2lab, deltaE_ciede2000
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 
 from .project import ImageSettings, QuantizationSettings, Layer, Region, StitchSettings
 from .thread_db import ThreadColor
@@ -21,9 +21,16 @@ class ImageEngine:
     """Processes source images into embroidery-ready data."""
 
     @staticmethod
-    def load_image(filepath: str) -> np.ndarray:
+    def load_image(filepath: str, max_pixels: int = 2_250_000) -> np.ndarray:
         """Load image file as RGB numpy array."""
         img = Image.open(filepath).convert('RGB')
+        if max_pixels and img.width * img.height > max_pixels:
+            scale = (max_pixels / float(img.width * img.height)) ** 0.5
+            size = (
+                max(1, int(img.width * scale)),
+                max(1, int(img.height * scale)),
+            )
+            img = img.resize(size, Image.LANCZOS)
         return np.array(img)
 
     @staticmethod
@@ -87,7 +94,16 @@ class ImageEngine:
         pixels_lab = rgb2lab(image.astype(np.float64) / 255.0).reshape(-1, 3)
 
         n_clusters = min(settings.n_colors, len(palette_threads))
-        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42, max_iter=100)
+        if pixels_lab.shape[0] > 250_000:
+            kmeans = MiniBatchKMeans(
+                n_clusters=n_clusters,
+                n_init=3,
+                random_state=42,
+                max_iter=60,
+                batch_size=8192,
+            )
+        else:
+            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42, max_iter=100)
         labels = kmeans.fit_predict(pixels_lab)
         cluster_centers = kmeans.cluster_centers_  # in LAB
 

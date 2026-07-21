@@ -24,6 +24,7 @@ from ..core.project import Project, Layer, Region, StitchSettings
 from ..core.image_engine import ImageEngine, FlowFieldEngine
 from ..core.stitch_engine import StitchEngine
 from ..core.export_engine import ExportEngine, SUPPORTED_FORMATS
+from ..i18n import tr
 
 from .canvas import EmbroideryCanvas
 from .panels import ThreadPanel, LayerPanel, PropertiesPanel, ImagePanel, StatsPanel
@@ -100,12 +101,74 @@ class StitchWorker(QThread):
         region.stitch_points = [pt for path in paths for pt in path]
 
 
+class QuantizeWorker(QThread):
+    """Background image quantization and segmentation worker."""
+    progress = Signal(str)
+    result_ready = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        source_image,
+        image_settings,
+        quant_settings,
+        palette_threads,
+        generation_mode,
+    ):
+        super().__init__()
+        self.source_image = source_image
+        self.image_settings = image_settings
+        self.quant_settings = quant_settings
+        self.palette_threads = list(palette_threads)
+        self.generation_mode = generation_mode
+
+    def run(self):
+        try:
+            self.progress.emit(tr("status.adjusting"))
+            processed = ImageEngine.apply_adjustments(
+                self.source_image,
+                self.image_settings,
+            )
+
+            self.progress.emit(tr("status.matching"))
+            thread_map, used_indices = ImageEngine.quantize_to_palette(
+                processed,
+                self.palette_threads,
+                self.quant_settings,
+            )
+
+            self.progress.emit(tr("status.regions"))
+            regions = ImageEngine.segment_regions(
+                thread_map,
+                self.quant_settings,
+                processed,
+            )
+
+            self.progress.emit(tr("status.layers"))
+            layers = ImageEngine.build_layers_from_regions(
+                regions,
+                self.palette_threads,
+                processed,
+                self.generation_mode,
+            )
+
+            self.result_ready.emit({
+                "processed": processed,
+                "thread_map": thread_map,
+                "used_indices": used_indices,
+                "regions": regions,
+                "layers": layers,
+            })
+        except Exception as e:
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
+
+
 class MainWindow(QMainWindow):
     """Main application window for Stitch Studio."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Stitch Studio — Embroidery Pattern Designer")
+        self.setWindowTitle(tr("app.title"))
         self.setMinimumSize(1200, 800)
         self.resize(1600, 1000)
 
@@ -123,6 +186,7 @@ class MainWindow(QMainWindow):
         self._orientation_field = None
         self._coherence_field = None
         self._worker = None
+        self._quant_worker = None
 
         # Build UI
         self._create_actions()
@@ -140,50 +204,48 @@ class MainWindow(QMainWindow):
     # ========== UI CONSTRUCTION ==========
 
     def _create_actions(self):
-        self.act_new = QAction("&New Project", self)
+        self.act_new = QAction(tr("action.new_project"), self)
         self.act_new.setShortcut(QKeySequence.New)
         self.act_new.triggered.connect(self._new_project)
 
-        self.act_open = QAction("&Open Project...", self)
+        self.act_open = QAction(tr("action.open_project"), self)
         self.act_open.setShortcut(QKeySequence.Open)
         self.act_open.triggered.connect(self._open_project)
 
-        self.act_save = QAction("&Save Project", self)
+        self.act_save = QAction(tr("action.save_project"), self)
         self.act_save.setShortcut(QKeySequence.Save)
         self.act_save.triggered.connect(self._save_project)
 
-        self.act_save_as = QAction("Save &As...", self)
+        self.act_save_as = QAction(tr("action.save_as"), self)
         self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.act_save_as.triggered.connect(self._save_project_as)
 
-        self.act_load_image = QAction("&Load Image...", self)
+        self.act_load_image = QAction(tr("action.load_image"), self)
         self.act_load_image.setShortcut(QKeySequence("Ctrl+I"))
         self.act_load_image.triggered.connect(self._load_image)
 
-        self.act_export = QAction("&Export Embroidery...", self)
+        self.act_export = QAction(tr("action.export"), self)
         self.act_export.setShortcut(QKeySequence("Ctrl+E"))
         self.act_export.triggered.connect(self._export_pattern)
 
-        self.act_export_layer = QAction("Export Selected &Layer...", self)
+        self.act_export_layer = QAction(tr("action.export_layer"), self)
         self.act_export_layer.triggered.connect(self._export_selected_layer)
 
-        self.act_quantize = QAction("&Quantize && Segment", self)
+        self.act_quantize = QAction(tr("action.quantize"), self)
         self.act_quantize.setShortcut(QKeySequence("Ctrl+Q"))
         self.act_quantize.triggered.connect(self._quantize_and_segment)
 
         self.generation_mode_actions = QActionGroup(self)
         self.generation_mode_actions.setExclusive(True)
 
-        self.act_photo_stitch_mode = QAction("Photo Stitch", self, checkable=True)
-        self.act_photo_stitch_mode.setToolTip(
-            "Continuous fills for smoother photo-like embroidery"
-        )
+        self.act_photo_stitch_mode = QAction(tr("image.photo"), self, checkable=True)
+        self.act_photo_stitch_mode.setToolTip(tr("image.photo_tip"))
         self.act_photo_stitch_mode.triggered.connect(
             lambda checked: self._set_generation_mode("photo_stitch") if checked else None
         )
 
-        self.act_cross_stitch_mode = QAction("Cross Stitch", self, checkable=True)
-        self.act_cross_stitch_mode.setToolTip("Grid-based cross stitch generation")
+        self.act_cross_stitch_mode = QAction(tr("image.cross"), self, checkable=True)
+        self.act_cross_stitch_mode.setToolTip(tr("image.cross_tip"))
         self.act_cross_stitch_mode.triggered.connect(
             lambda checked: self._set_generation_mode("cross_stitch") if checked else None
         )
@@ -191,11 +253,11 @@ class MainWindow(QMainWindow):
         self.generation_mode_actions.addAction(self.act_photo_stitch_mode)
         self.generation_mode_actions.addAction(self.act_cross_stitch_mode)
 
-        self.act_gen_stitches = QAction("&Generate Stitches", self)
+        self.act_gen_stitches = QAction(tr("action.generate_stitches"), self)
         self.act_gen_stitches.setShortcut(QKeySequence("Ctrl+G"))
         self.act_gen_stitches.triggered.connect(self._generate_stitches)
 
-        self.act_fit_view = QAction("&Fit to Content", self)
+        self.act_fit_view = QAction(tr("action.fit"), self)
         self.act_fit_view.setShortcut(QKeySequence("F"))
         self.act_fit_view.triggered.connect(lambda: self.canvas.fit_to_content())
 
@@ -203,7 +265,7 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
 
         # File menu
-        file_menu = menu_bar.addMenu("&File")
+        file_menu = menu_bar.addMenu(tr("menu.file"))
         file_menu.addAction(self.act_new)
         file_menu.addAction(self.act_open)
         file_menu.addAction(self.act_save)
@@ -214,33 +276,33 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_export)
         file_menu.addAction(self.act_export_layer)
         file_menu.addSeparator()
-        file_menu.addAction("E&xit", self.close, QKeySequence("Ctrl+W"))
+        file_menu.addAction(tr("action.exit"), self.close, QKeySequence("Ctrl+W"))
 
         # Process menu
-        proc_menu = menu_bar.addMenu("&Process")
+        proc_menu = menu_bar.addMenu(tr("menu.process"))
         proc_menu.addAction(self.act_quantize)
         proc_menu.addAction(self.act_gen_stitches)
         proc_menu.addSeparator()
-        proc_menu.addAction("Compute &Flow Field", self._compute_flow_field)
+        proc_menu.addAction(tr("action.compute_flow"), self._compute_flow_field)
 
         # View menu
-        self.view_menu = menu_bar.addMenu("&View")
+        self.view_menu = menu_bar.addMenu(tr("menu.view"))
         self.view_menu.addAction(self.act_fit_view)
         self.view_menu.addSeparator()
 
-        self.act_show_image = QAction("Show &Image", self, checkable=True, checked=True)
+        self.act_show_image = QAction(tr("action.show_image"), self, checkable=True, checked=True)
         self.act_show_image.toggled.connect(self.canvas.set_show_image)
         self.view_menu.addAction(self.act_show_image)
 
-        self.act_show_stitches = QAction("Show &Stitches", self, checkable=True, checked=True)
+        self.act_show_stitches = QAction(tr("action.show_stitches"), self, checkable=True, checked=True)
         self.act_show_stitches.toggled.connect(self.canvas.set_show_stitches)
         self.view_menu.addAction(self.act_show_stitches)
 
-        self.act_show_points = QAction("Show Stitch &Points", self, checkable=True, checked=False)
+        self.act_show_points = QAction(tr("action.show_points"), self, checkable=True, checked=False)
         self.act_show_points.toggled.connect(self.canvas.set_show_stitch_points)
         self.view_menu.addAction(self.act_show_points)
 
-        self.act_show_regions = QAction("Show &Regions", self, checkable=True, checked=True)
+        self.act_show_regions = QAction(tr("action.show_regions"), self, checkable=True, checked=True)
         self.act_show_regions.toggled.connect(self.canvas.set_show_regions)
         self.view_menu.addAction(self.act_show_regions)
 
@@ -249,12 +311,12 @@ class MainWindow(QMainWindow):
         self._dock_actions = []  # populated after docks are created
 
         # Help menu
-        help_menu = menu_bar.addMenu("&Help")
-        help_menu.addAction("&About", self._show_about)
-        help_menu.addAction("&Keyboard Shortcuts", self._show_shortcuts)
+        help_menu = menu_bar.addMenu(tr("menu.help"))
+        help_menu.addAction(tr("action.about"), self._show_about)
+        help_menu.addAction(tr("action.shortcuts"), self._show_shortcuts)
 
     def _create_toolbar(self):
-        toolbar = QToolBar("Main Toolbar")
+        toolbar = QToolBar(tr("toolbar.main"))
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
@@ -269,13 +331,13 @@ class MainWindow(QMainWindow):
 
         # Image opacity slider
         toolbar.addSeparator()
-        toolbar.addWidget(QLabel(" Image: "))
+        toolbar.addWidget(QLabel(tr("toolbar.image")))
         from PySide6.QtWidgets import QSlider
         self.toolbar_opacity = QSlider(Qt.Horizontal)
         self.toolbar_opacity.setRange(0, 100)
         self.toolbar_opacity.setValue(50)
         self.toolbar_opacity.setMaximumWidth(120)
-        self.toolbar_opacity.setToolTip("Image opacity")
+        self.toolbar_opacity.setToolTip(tr("toolbar.image_opacity"))
         self.toolbar_opacity.valueChanged.connect(
             lambda v: self.canvas.set_image_opacity(v / 100.0)
         )
@@ -287,31 +349,31 @@ class MainWindow(QMainWindow):
 
     def _create_panels(self):
         # Thread Panel
-        self.dock_threads = QDockWidget("Thread Library", self)
+        self.dock_threads = QDockWidget(tr("dock.thread"), self)
         self.thread_panel = ThreadPanel(self.thread_db)
         self.dock_threads.setWidget(self.thread_panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_threads)
 
         # Layer Panel
-        self.dock_layers = QDockWidget("Layers", self)
+        self.dock_layers = QDockWidget(tr("dock.layers"), self)
         self.layer_panel = LayerPanel()
         self.dock_layers.setWidget(self.layer_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_layers)
 
         # Properties Panel
-        self.dock_props = QDockWidget("Stitch Properties", self)
+        self.dock_props = QDockWidget(tr("dock.properties"), self)
         self.props_panel = PropertiesPanel()
         self.dock_props.setWidget(self.props_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_props)
 
         # Image Panel
-        self.dock_image = QDockWidget("Image & Quantization", self)
+        self.dock_image = QDockWidget(tr("dock.image"), self)
         self.image_panel = ImagePanel()
         self.dock_image.setWidget(self.image_panel)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_image)
 
         # Stats Panel
-        self.dock_stats = QDockWidget("Pattern Stats", self)
+        self.dock_stats = QDockWidget(tr("dock.stats"), self)
         self.stats_panel = StatsPanel()
         self.dock_stats.setWidget(self.stats_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_stats)
@@ -327,9 +389,9 @@ class MainWindow(QMainWindow):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
 
-        self.status_pos = QLabel("Position: 0.0, 0.0 mm")
-        self.status_zoom = QLabel("Zoom: 100%")
-        self.status_info = QLabel("Ready")
+        self.status_pos = QLabel(tr("status.position").format(x=0.0, y=0.0))
+        self.status_zoom = QLabel(tr("status.zoom").format(zoom=100))
+        self.status_info = QLabel(tr("status.ready"))
 
         self.statusbar.addWidget(self.status_info, 1)
         self.statusbar.addPermanentWidget(self.status_pos)
@@ -338,10 +400,14 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         # Canvas signals
         self.canvas.position_changed.connect(
-            lambda x, y: self.status_pos.setText(f"Position: {x:.1f}, {y:.1f} mm")
+            lambda x, y: self.status_pos.setText(
+                tr("status.position").format(x=x, y=y)
+            )
         )
         self.canvas.zoom_changed.connect(
-            lambda z: self.status_zoom.setText(f"Zoom: {z * 100:.0f}%")
+            lambda z: self.status_zoom.setText(
+                tr("status.zoom").format(zoom=z * 100)
+            )
         )
         self.canvas.object_selected.connect(self._on_canvas_object_selected)
         self.canvas.object_scale_requested.connect(self._scale_stitch_object)
@@ -404,19 +470,19 @@ class MainWindow(QMainWindow):
                 self.image_panel.btn_cross_stitch.blockSignals(False)
 
         if mode == "cross_stitch":
-            self.act_quantize.setText("Quantize for Cross Stitch")
-            self.status_info.setText("Generation mode: Cross Stitch")
+            self.act_quantize.setText(tr("status.quantize_cross"))
+            self.status_info.setText(tr("status.mode_cross"))
         else:
-            self.act_quantize.setText("Quantize for Photo Stitch")
-            self.status_info.setText("Generation mode: Photo Stitch")
+            self.act_quantize.setText(tr("status.quantize_photo"))
+            self.status_info.setText(tr("status.mode_photo"))
 
     # ========== ACTIONS ==========
 
     def _new_project(self):
         if self.project.modified:
             reply = QMessageBox.question(
-                self, "New Project",
-                "Current project has unsaved changes. Continue?",
+                self, tr("dialog.new_project"),
+                tr("dialog.unsaved_continue"),
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.No:
@@ -426,11 +492,11 @@ class MainWindow(QMainWindow):
         self.canvas.clear_all()
         self.layer_panel.set_project(self.project)
         self._flow_field = None
-        self.status_info.setText("New project created")
+        self.status_info.setText(tr("status.new_project"))
 
     def _open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Project", "",
+            self, tr("dialog.open_project"), "",
             "Stitch Studio Project (*.ssp);;All Files (*)"
         )
         if not path:
@@ -451,9 +517,12 @@ class MainWindow(QMainWindow):
                 self.dock_image.raise_()
 
             self._refresh_canvas()
-            self.status_info.setText(f"Opened: {path}")
+            self.status_info.setText(tr("status.opened").format(path=path))
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load project:\n{e}")
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.load_failed").format(error=e)
+            )
 
     def _save_project(self):
         if not self.project.filepath:
@@ -464,13 +533,16 @@ class MainWindow(QMainWindow):
             self.project.quant_settings = self.image_panel.get_quant_settings()
             self.project.generation_mode = self.image_panel.get_generation_mode()
             self.project.save()
-            self.status_info.setText(f"Saved: {self.project.filepath}")
+            self.status_info.setText(tr("status.saved").format(path=self.project.filepath))
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save:\n{e}")
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.save_failed").format(error=e)
+            )
 
     def _save_project_as(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Project As", self.project.name + ".ssp",
+            self, tr("dialog.save_as"), self.project.name + ".ssp",
             "Stitch Studio Project (*.ssp)"
         )
         if path:
@@ -478,11 +550,11 @@ class MainWindow(QMainWindow):
             self.project.quant_settings = self.image_panel.get_quant_settings()
             self.project.generation_mode = self.image_panel.get_generation_mode()
             self.project.save(path)
-            self.status_info.setText(f"Saved: {path}")
+            self.status_info.setText(tr("status.saved").format(path=path))
 
     def _load_image(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Image", "",
+            self, tr("dialog.load_image"), "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.webp);;All Files (*)"
         )
         if not path:
@@ -511,10 +583,15 @@ class MainWindow(QMainWindow):
             self._apply_image_and_show()
 
             self.setWindowTitle(f"Stitch Studio — {self.project.name}")
-            self.status_info.setText(f"Loaded image: {path} ({w}×{h})")
+            self.status_info.setText(
+                tr("status.loaded_image").format(path=path, width=w, height=h)
+            )
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.image_load_failed").format(error=e)
+            )
 
     def _apply_image_and_show(self):
         """Apply image adjustments and display on canvas."""
@@ -534,11 +611,13 @@ class MainWindow(QMainWindow):
     def _quantize_and_segment(self):
         """Run color quantization and segmentation."""
         if self.project.source_image is None:
-            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            QMessageBox.warning(
+                self, tr("dialog.no_image"), tr("dialog.no_image_body")
+            )
             return
-
-        self.status_info.setText("Quantizing colors...")
-        QApplication.processEvents()
+        if self._quant_worker is not None:
+            self.status_info.setText(tr("status.processing_busy"))
+            return
 
         try:
             # Get settings
@@ -546,81 +625,106 @@ class MainWindow(QMainWindow):
             quant_settings = self.image_panel.get_quant_settings()
             self._set_generation_mode(self.image_panel.get_generation_mode())
 
-            # Process image
-            processed = self.image_engine.apply_adjustments(
-                self.project.source_image, img_settings
-            )
-            self.project.processed_image = processed
-
             # Get palette from thread DB
             all_threads = self.thread_db.get_all_threads()
             if not all_threads:
-                QMessageBox.warning(self, "No Threads",
-                                    "No threads in database. Please add thread packs.")
+                QMessageBox.warning(
+                    self, tr("dialog.no_threads"), tr("dialog.no_threads_body")
+                )
                 return
 
-            # Quantize
-            thread_map, used_indices = self.image_engine.quantize_to_palette(
-                processed, all_threads, quant_settings
-            )
-            self.project.quantized_map = thread_map
-
-            # Segment
-            regions = self.image_engine.segment_regions(
-                thread_map, quant_settings, processed
-            )
-
-            # Build layers
-            layers = self.image_engine.build_layers_from_regions(
-                regions,
+            self.status_info.setText(tr("status.processing_start"))
+            self.act_quantize.setEnabled(False)
+            self.image_panel.btn_quantize.setEnabled(False)
+            self._quant_worker = QuantizeWorker(
+                self.project.source_image.copy(),
+                img_settings,
+                quant_settings,
                 all_threads,
-                processed,
                 self.project.generation_mode,
             )
-            self.project.layers = layers
-            self.project.modified = True
-
-            # Update UI
-            self.layer_panel.set_project(self.project)
-
-            # Show region masks on canvas
-            img_h, img_w = processed.shape[:2]
-            out_w = img_settings.output_width_mm * 10  # to scene units
-            out_h = img_settings.output_height_mm * 10
-            mask_scale = min(out_w / img_w, out_h / img_h)
-
-            self.canvas.clear_all()
-            self.canvas.set_background_image(
-                processed,
-                (img_settings.output_width_mm, img_settings.output_height_mm)
+            self._quant_worker.progress.connect(self.status_info.setText)
+            self._quant_worker.result_ready.connect(
+                lambda result, settings=img_settings: self._on_quantize_done(result, settings)
             )
-
-            for layer in layers:
-                for region in layer.regions:
-                    if region.mask is not None:
-                        self.canvas.set_region_mask(
-                            region.uid, region.mask,
-                            layer.thread_color_rgb, mask_scale,
-                            getattr(region, "polygon", None)
-                        )
-
-            self.canvas.fit_to_content()
-
-            self.status_info.setText(
-                f"Quantized to {len(used_indices)} colors, "
-                f"{len(regions)} regions, {len(layers)} layers"
-            )
+            self._quant_worker.error.connect(self._on_quantize_error)
+            self._quant_worker.finished.connect(self._finish_quantize_worker)
+            self._quant_worker.start()
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Quantization failed:\n{e}\n{traceback.format_exc()}")
+            self._finish_quantize_worker()
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.quantize_failed").format(
+                    error=f"{e}\n{traceback.format_exc()}"
+                )
+            )
+
+    def _on_quantize_done(self, result, img_settings):
+        processed = result["processed"]
+        thread_map = result["thread_map"]
+        used_indices = result["used_indices"]
+        regions = result["regions"]
+        layers = result["layers"]
+
+        self.project.processed_image = processed
+        self.project.quantized_map = thread_map
+        self.project.layers = layers
+        self.project.modified = True
+
+        # Update UI
+        self.layer_panel.set_project(self.project)
+
+        img_h, img_w = processed.shape[:2]
+        out_w = img_settings.output_width_mm * 10
+        out_h = img_settings.output_height_mm * 10
+        mask_scale = min(out_w / img_w, out_h / img_h)
+
+        self.canvas.clear_all()
+        self.canvas.set_background_image(
+            processed,
+            (img_settings.output_width_mm, img_settings.output_height_mm)
+        )
+
+        for layer in layers:
+            for region in layer.regions:
+                if region.mask is not None:
+                    self.canvas.set_region_mask(
+                        region.uid, region.mask,
+                        layer.thread_color_rgb,
+                        mask_scale,
+                        getattr(region, "polygon", None)
+                    )
+
+        self.canvas.fit_to_content()
+        self.status_info.setText(
+            tr("status.quantized").format(
+                colors=len(used_indices),
+                regions=len(regions),
+                layers=len(layers),
+            )
+        )
+
+    def _on_quantize_error(self, msg):
+        QMessageBox.critical(
+            self, tr("dialog.error"),
+            tr("dialog.quantize_failed").format(error=msg)
+        )
+
+    def _finish_quantize_worker(self):
+        self.act_quantize.setEnabled(True)
+        self.image_panel.btn_quantize.setEnabled(True)
+        self._quant_worker = None
 
     def _compute_flow_field(self):
         """Compute orientation/flow field from the image."""
         if self.project.processed_image is None:
-            QMessageBox.warning(self, "No Image", "Please load and process an image first.")
+            QMessageBox.warning(
+                self, tr("dialog.no_image"), tr("dialog.no_processed_image_body")
+            )
             return
 
-        self.status_info.setText("Computing flow field...")
+        self.status_info.setText(tr("status.flow"))
         QApplication.processEvents()
 
         try:
@@ -636,18 +740,23 @@ class MainWindow(QMainWindow):
             self._orientation_field = orientation
             self._coherence_field = coherence
 
-            self.status_info.setText("Flow field computed successfully")
+            self.status_info.setText(tr("status.flow_done"))
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Flow field computation failed:\n{e}")
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.flow_failed").format(error=e)
+            )
 
     def _generate_stitches(self):
         """Generate stitches for all layers (background thread)."""
         if not self.project.layers:
-            QMessageBox.warning(self, "No Layers", "Please quantize the image first.")
+            QMessageBox.warning(
+                self, tr("dialog.no_layers"), tr("dialog.no_layers_body")
+            )
             return
 
-        self.status_info.setText("Generating stitches...")
+        self.status_info.setText(tr("status.generating"))
 
         # Set px_per_mm based on image and output size
         if self.project.processed_image is not None:
@@ -666,24 +775,31 @@ class MainWindow(QMainWindow):
         self._worker.start()
 
     def _on_stitch_progress(self, current, total):
-        self.status_info.setText(f"Generating stitches... {current}/{total} regions")
+        self.status_info.setText(
+            tr("status.generating_progress").format(current=current, total=total)
+        )
         QApplication.processEvents()
 
     def _on_stitch_done(self):
         self._refresh_canvas()
         self._update_stats()
         self.layer_panel.refresh()
-        self.status_info.setText("Stitch generation complete")
+        self.status_info.setText(tr("status.generated"))
         self._worker = None
 
     def _on_stitch_error(self, msg):
-        QMessageBox.critical(self, "Error", f"Stitch generation failed:\n{msg}")
+        QMessageBox.critical(
+            self, tr("dialog.error"),
+            tr("dialog.stitch_failed").format(error=msg)
+        )
         self._worker = None
 
     def _export_pattern(self):
         """Export to embroidery file format."""
         if not self.project.layers:
-            QMessageBox.warning(self, "No Pattern", "No layers to export.")
+            QMessageBox.warning(
+                self, tr("dialog.no_pattern"), tr("dialog.no_pattern_body")
+            )
             return
 
         # Build filter string
@@ -692,7 +808,7 @@ class MainWindow(QMainWindow):
         )
 
         path, sel_filter = QFileDialog.getSaveFileName(
-            self, "Export Embroidery Pattern",
+            self, tr("dialog.export_pattern"),
             self.project.name, filters
         )
         if not path:
@@ -700,18 +816,25 @@ class MainWindow(QMainWindow):
 
         try:
             written_files = self.export_engine.export(self.project, path)
-            self.status_info.setText(f"Exported: {path}")
+            self.status_info.setText(tr("status.exported").format(path=path))
             file_list = "\n".join(written_files)
-            QMessageBox.information(self, "Export Complete",
-                                    f"Pattern exported to:\n{file_list}")
+            QMessageBox.information(
+                self, tr("dialog.export_complete"),
+                tr("dialog.export_complete_body").format(files=file_list)
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
+            QMessageBox.critical(
+                self, tr("dialog.error"),
+                tr("dialog.export_failed").format(error=e)
+            )
 
     def _export_selected_layer(self):
         """Export only the selected layer."""
         item = self.layer_panel.layer_tree.currentItem()
         if not item:
-            QMessageBox.warning(self, "No Selection", "Select a layer first.")
+            QMessageBox.warning(
+                self, tr("dialog.no_selection"), tr("dialog.no_selection_body")
+            )
             return
 
         uid = item.data(0, Qt.UserRole)
@@ -723,15 +846,18 @@ class MainWindow(QMainWindow):
             f"{desc} (*.{ext})" for ext, desc in SUPPORTED_FORMATS.items()
         )
         path, _ = QFileDialog.getSaveFileName(
-            self, f"Export Layer: {layer.name}",
+            self, tr("dialog.export_layer").format(name=layer.name),
             f"{self.project.name}_{layer.name}", filters
         )
         if path:
             try:
                 self.export_engine.export_layer(layer, path)
-                self.status_info.setText(f"Exported layer: {path}")
+                self.status_info.setText(tr("status.exported_layer").format(path=path))
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
+                QMessageBox.critical(
+                    self, tr("dialog.error"),
+                    tr("dialog.export_failed").format(error=e)
+                )
 
     # ========== SIGNAL HANDLERS ==========
 
@@ -780,7 +906,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
         self._update_stats()
-        self.status_info.setText(f"Scaled selected object: {factor:.2f}x")
+        self.status_info.setText(tr("status.scaled").format(factor=factor))
 
     def _move_stitch_object(self, uid: str, dx: float, dy: float):
         """Move a generated layer or region and redraw from project data."""
@@ -806,7 +932,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
         self._update_stats()
-        self.status_info.setText(f"Moved selected object: {dx:.1f}, {dy:.1f}")
+        self.status_info.setText(tr("status.moved").format(dx=dx, dy=dy))
 
     def _resize_stitch_object(self, uid: str, scene_bounds):
         """Resize a region/layer to the mouse-provided scene bounds and regenerate."""
@@ -835,7 +961,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
         self._update_stats()
-        self.status_info.setText("Resized selected object and regenerated stitches")
+        self.status_info.setText(tr("status.resized"))
 
     def _resize_layer_regions(self, layer: Layer, scene_bounds):
         old_bounds = layer.stitch_bounds()
@@ -934,17 +1060,17 @@ class MainWindow(QMainWindow):
         """Start interactive Bezier boundary editing for a single region."""
         found = self._find_region_with_layer(uid)
         if not found:
-            self.status_info.setText("Boundary edit works on a single region.")
+            self.status_info.setText(tr("status.boundary_single"))
             return
         layer, region = found
         polygon = getattr(region, "polygon", None)
         if polygon is None or polygon.is_empty:
-            self.status_info.setText("Selected region has no editable vector boundary.")
+            self.status_info.setText(tr("status.boundary_missing"))
             return
 
         self.canvas.start_boundary_edit(uid, polygon, self._current_mask_scale())
         self.canvas.select_object(uid)
-        self.status_info.setText("Editing boundary: drag anchors/handles, Enter to apply, Esc to cancel")
+        self.status_info.setText(tr("status.boundary_editing"))
 
     def _apply_boundary_edit(self, uid: str, source_points):
         """Store an edited polygon and regenerate only the affected region."""
@@ -957,7 +1083,7 @@ class MainWindow(QMainWindow):
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
         if polygon.is_empty:
-            self.status_info.setText("Boundary edit produced an empty polygon.")
+            self.status_info.setText(tr("status.boundary_empty"))
             return
 
         region.polygon = polygon
@@ -971,7 +1097,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
         self._update_stats()
-        self.status_info.setText("Boundary updated and region stitches regenerated")
+        self.status_info.setText(tr("status.boundary_updated"))
 
     def _find_region_with_layer(self, uid: str):
         for layer in self.project.layers:
@@ -1048,49 +1174,21 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(
-            self, "About Stitch Studio",
-            "<h2>Stitch Studio v1.0</h2>"
-            "<p>Image to Embroidery Pattern Converter</p>"
-            "<p>Features:</p>"
-            "<ul>"
-            "<li>Thread pack database with color matching (CIEDE2000)</li>"
-            "<li>Image adjustments (brightness, contrast, saturation, etc.)</li>"
-            "<li>K-means color quantization in CIELAB space</li>"
-            "<li>Multiple fill modes: scanline, contour, flow-guided, satin, "
-            "radial, spiral, stipple, cross-stitch</li>"
-            "<li>Flow field computation from image structure tensor</li>"
-            "<li>Per-region stitch control: direction, length, spacing, density</li>"
-            "<li>Underlay and contour row generation</li>"
-            "<li>Pull compensation</li>"
-            "<li>Export to DST, PES, JEF, VP3, EXP, SVG, PNG</li>"
-            "<li>Project save/load</li>"
-            "</ul>"
+            self, tr("dialog.about_title"),
+            tr("dialog.about_body")
         )
 
     def _show_shortcuts(self):
         QMessageBox.information(
-            self, "Keyboard Shortcuts",
-            "Ctrl+I — Load Image\n"
-            "Ctrl+Q — Quantize & Segment\n"
-            "Ctrl+G — Generate Stitches\n"
-            "Ctrl+E — Export Pattern\n"
-            "Ctrl+S — Save Project\n"
-            "Ctrl+O — Open Project\n"
-            "Ctrl+N — New Project\n\n"
-            "Canvas:\n"
-            "F — Fit to Content\n"
-            "+/- — Zoom In/Out\n"
-            "0 — Reset Zoom\n"
-            "Middle Mouse / Alt+Left — Pan\n"
-            "Scroll Wheel — Zoom\n"
-            "Right Click — Context Menu\n"
+            self, tr("dialog.shortcuts_title"),
+            tr("dialog.shortcuts_body")
         )
 
     def closeEvent(self, event):
         if self.project.modified:
             reply = QMessageBox.question(
-                self, "Quit",
-                "Save changes before quitting?",
+                self, tr("dialog.quit"),
+                tr("dialog.save_before_quit"),
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
             )
             if reply == QMessageBox.Save:

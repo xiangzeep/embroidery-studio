@@ -5,6 +5,7 @@ import tempfile
 import types
 import unittest
 import numpy as np
+from PIL import Image
 
 
 def install_fake_pyembroidery():
@@ -53,6 +54,86 @@ def install_fake_pyembroidery():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_load_image_downscales_oversized_source_for_stable_processing(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "large.png")
+            Image.fromarray(np.full((1200, 1600, 3), 180, dtype=np.uint8)).save(path)
+
+            image = image_mod.ImageEngine.load_image(path, max_pixels=300_000)
+
+        self.assertLessEqual(image.shape[0] * image.shape[1], 300_000)
+        self.assertEqual(image.dtype, np.uint8)
+
+    def test_main_window_quantization_runs_through_background_worker(self):
+        import inspect
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        source = inspect.getsource(main_mod)
+        quantize_source = inspect.getsource(main_mod.MainWindow._quantize_and_segment)
+
+        self.assertIn("class QuantizeWorker", source)
+        self.assertIn("self._quant_worker.start()", quantize_source)
+        self.assertNotIn("quantize_to_palette(", quantize_source)
+
+    def test_i18n_defaults_to_chinese_with_english_fallback(self):
+        i18n_mod = importlib.import_module("stitch_studio.i18n")
+
+        self.assertEqual(i18n_mod.current_language(), "zh_CN")
+        self.assertEqual(i18n_mod.tr("app.title"), "Stitch Studio — 绣花图案设计器")
+        self.assertEqual(i18n_mod.tr("missing.key"), "missing.key")
+
+        i18n_mod.set_language("en_US")
+        try:
+            self.assertEqual(i18n_mod.tr("action.load_image"), "Load Image...")
+            self.assertEqual(i18n_mod.tr("image.cross"), "Cross Stitch")
+        finally:
+            i18n_mod.set_language("zh_CN")
+
+    def test_image_panel_default_copy_is_chinese_for_beginner_workflow(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        panels_mod = importlib.import_module("stitch_studio.ui.panels")
+
+        qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        panel = panels_mod.ImagePanel()
+
+        self.assertEqual(panel.lbl_step_image.text(), "1. 导入图片并调整")
+        self.assertEqual(panel.lbl_step_type.text(), "2. 选择绣法")
+        self.assertEqual(panel.btn_photo_stitch.text(), "照片绣")
+        self.assertEqual(panel.btn_cross_stitch.text(), "十字绣")
+        self.assertEqual(panel.btn_advanced_color.text(), "高级颜色设置")
+        self.assertIn("照片绣", panel.btn_quantize.text())
+
+    def test_properties_panel_core_parameters_are_chinese(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        panels_mod = importlib.import_module("stitch_studio.ui.panels")
+
+        qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        panel = panels_mod.PropertiesPanel()
+
+        group_titles = {
+            child.title()
+            for child in panel.findChildren(panels_mod.QGroupBox)
+        }
+
+        self.assertIn("填充针法", group_titles)
+        self.assertIn("针迹方向", group_titles)
+        self.assertIn("十字绣", group_titles)
+
+    def test_main_window_uses_i18n_for_primary_navigation(self):
+        import inspect
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        source = inspect.getsource(main_mod.MainWindow)
+
+        self.assertIn('tr("app.title")', source)
+        self.assertIn('tr("action.load_image")', source)
+        self.assertIn('tr("dock.image")', source)
+        self.assertIn('tr("status.ready")', source)
+
     def test_stitch_settings_include_cross_stitch_defaults(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -1109,12 +1190,12 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(panel.btn_cross_stitch.isCheckable())
         self.assertTrue(panel.btn_photo_stitch.isChecked())
         self.assertEqual(panel.get_generation_mode(), "photo_stitch")
-        self.assertIn("Photo Stitch", panel.btn_quantize.text())
+        self.assertIn("照片绣", panel.btn_quantize.text())
         panel.set_generation_mode("cross_stitch")
         self.assertEqual(panel.get_generation_mode(), "cross_stitch")
         self.assertTrue(panel.btn_cross_stitch.isChecked())
-        self.assertIn("Cross Stitch", panel.btn_quantize.text())
-        self.assertEqual(panel.lbl_step_type.text(), "2. Choose Stitch Type")
+        self.assertIn("十字绣", panel.btn_quantize.text())
+        self.assertEqual(panel.lbl_step_type.text(), "2. 选择绣法")
         self.assertTrue(panel.btn_advanced_color.isCheckable())
         self.assertFalse(panel.grp_quant.isVisible())
         self.assertTrue(hasattr(panel, "combo_method"))

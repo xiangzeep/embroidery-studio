@@ -26,6 +26,7 @@ from ..core.project import (
     Project, Layer, Region, StitchSettings, ImageSettings,
     QuantizationSettings, FillMode, StitchDirection
 )
+from ..i18n import tr
 
 
 def _color_icon(r, g, b, size=16):
@@ -66,13 +67,13 @@ class ThreadPanel(QWidget):
 
         btn_add_pack = QToolButton()
         btn_add_pack.setText("+")
-        btn_add_pack.setToolTip("New Pack")
+        btn_add_pack.setToolTip(tr("thread.new_pack"))
         btn_add_pack.clicked.connect(self._add_pack)
         pack_bar.addWidget(btn_add_pack)
 
         btn_del_pack = QToolButton()
         btn_del_pack.setText("−")
-        btn_del_pack.setToolTip("Delete Pack")
+        btn_del_pack.setToolTip(tr("thread.delete_pack"))
         btn_del_pack.clicked.connect(self._delete_pack)
         pack_bar.addWidget(btn_del_pack)
 
@@ -80,13 +81,13 @@ class ThreadPanel(QWidget):
 
         # Import / Export
         io_bar = QHBoxLayout()
-        btn_import_json = QPushButton("Import JSON")
+        btn_import_json = QPushButton(tr("common.import_json"))
         btn_import_json.clicked.connect(self._import_json)
-        btn_import_csv = QPushButton("Import CSV")
+        btn_import_csv = QPushButton(tr("common.import_csv"))
         btn_import_csv.clicked.connect(self._import_csv)
-        btn_export_json = QPushButton("Export JSON")
+        btn_export_json = QPushButton(tr("common.export_json"))
         btn_export_json.clicked.connect(self._export_json)
-        btn_export_csv = QPushButton("Export CSV")
+        btn_export_csv = QPushButton(tr("common.export_csv"))
         btn_export_csv.clicked.connect(self._export_csv)
         io_bar.addWidget(btn_import_json)
         io_bar.addWidget(btn_import_csv)
@@ -96,7 +97,12 @@ class ThreadPanel(QWidget):
 
         # Thread list
         self.thread_tree = QTreeWidget()
-        self.thread_tree.setHeaderLabels(["Color", "Name", "Type", "Cat#"])
+        self.thread_tree.setHeaderLabels([
+            tr("thread.headers.color"),
+            tr("thread.headers.name"),
+            tr("thread.headers.type"),
+            tr("thread.headers.catalog"),
+        ])
         self.thread_tree.setColumnWidth(0, 30)
         self.thread_tree.setColumnWidth(1, 100)
         self.thread_tree.setRootIsDecorated(False)
@@ -106,11 +112,11 @@ class ThreadPanel(QWidget):
 
         # Thread actions
         act_bar = QHBoxLayout()
-        btn_add = QPushButton("Add Thread")
+        btn_add = QPushButton(tr("thread.add"))
         btn_add.clicked.connect(self._add_thread)
-        btn_del = QPushButton("Remove")
+        btn_del = QPushButton(tr("common.remove"))
         btn_del.clicked.connect(self._remove_selected)
-        btn_edit = QPushButton("Edit")
+        btn_edit = QPushButton(tr("common.edit"))
         btn_edit.clicked.connect(self._edit_selected)
         act_bar.addWidget(btn_add)
         act_bar.addWidget(btn_edit)
@@ -158,7 +164,9 @@ class ThreadPanel(QWidget):
         )
 
     def _add_pack(self):
-        name, ok = QInputDialog.getText(self, "New Thread Pack", "Pack name:")
+        name, ok = QInputDialog.getText(
+            self, tr("thread.dialog.new_pack"), tr("thread.dialog.pack_name")
+        )
         if ok and name:
             pack = ThreadPack(name=name)
             self.db.add_pack(pack)
@@ -171,8 +179,10 @@ class ThreadPanel(QWidget):
         if not pack:
             return
         reply = QMessageBox.question(
-            self, "Delete Pack",
-            f"Delete '{pack.name}' with {len(pack.threads)} threads?"
+            self, tr("thread.dialog.delete_pack"),
+            tr("thread.dialog.delete_pack_body").format(
+                name=pack.name, count=len(pack.threads)
+            )
         )
         if reply == QMessageBox.Yes:
             self.db.remove_pack(pack.uid)
@@ -185,16 +195,21 @@ class ThreadPanel(QWidget):
         if not pack:
             return
 
-        color = QColorDialog.getColor(Qt.white, self, "Choose Thread Color")
+        color = QColorDialog.getColor(Qt.white, self, tr("thread.dialog.choose_color"))
         if not color.isValid():
             return
 
-        name, ok = QInputDialog.getText(self, "Thread Name", "Name:")
+        name, ok = QInputDialog.getText(
+            self, tr("thread.dialog.thread_name"), tr("thread.dialog.name")
+        )
         if not ok:
             return
 
         types = [t.value for t in ThreadType]
-        type_str, ok = QInputDialog.getItem(self, "Thread Type", "Type:", types, 0, False)
+        type_str, ok = QInputDialog.getItem(
+            self, tr("thread.dialog.thread_type"), tr("thread.dialog.type"),
+            types, 0, False
+        )
         if not ok:
             return
 
@@ -235,12 +250,15 @@ class ThreadPanel(QWidget):
             return
 
         color = QColorDialog.getColor(
-            QColor(*thread.color_rgb), self, "Edit Thread Color"
+            QColor(*thread.color_rgb), self, tr("thread.dialog.edit_color")
         )
         if color.isValid():
             thread.color_rgb = (color.red(), color.green(), color.blue())
 
-        name, ok = QInputDialog.getText(self, "Edit Name", "Name:", text=thread.name)
+        name, ok = QInputDialog.getText(
+            self, tr("thread.dialog.edit_name"), tr("thread.dialog.name"),
+            text=thread.name
+        )
         if ok:
             thread.name = name
 
@@ -249,7 +267,9 @@ class ThreadPanel(QWidget):
         self.threads_changed.emit()
 
     def _import_json(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import Thread Pack", "", "JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("thread.dialog.import"), "", "JSON (*.json)"
+        )
         if path:
             self.db.import_pack_json(path)
             self.db.save()
@@ -257,7 +277,9 @@ class ThreadPanel(QWidget):
             self.threads_changed.emit()
 
     def _import_csv(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import Thread Pack", "", "CSV (*.csv)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("thread.dialog.import"), "", "CSV (*.csv)"
+        )
         if path:
             self.db.import_pack_csv(path)
             self.db.save()
@@ -268,7 +290,9 @@ class ThreadPanel(QWidget):
         pack = self._current_pack()
         if not pack:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Thread Pack", pack.name + ".json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("thread.dialog.export"), pack.name + ".json", "JSON (*.json)"
+        )
         if path:
             self.db.export_pack_json(pack.uid, path)
 
@@ -276,7 +300,9 @@ class ThreadPanel(QWidget):
         pack = self._current_pack()
         if not pack:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Thread Pack", pack.name + ".csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("thread.dialog.export"), pack.name + ".csv", "CSV (*.csv)"
+        )
         if path:
             self.db.export_pack_csv(pack.uid, path)
 
@@ -304,16 +330,22 @@ class LayerPanel(QWidget):
 
         # Title
         title_bar = QHBoxLayout()
-        title_bar.addWidget(QLabel("Layers"))
-        btn_regen = QPushButton("⟳ Regenerate")
-        btn_regen.setToolTip("Regenerate all stitches")
+        title_bar.addWidget(QLabel(tr("layer.title")))
+        btn_regen = QPushButton("⟳ " + tr("layer.regenerate"))
+        btn_regen.setToolTip(tr("layer.regenerate_tip"))
         btn_regen.clicked.connect(self.request_regenerate.emit)
         title_bar.addWidget(btn_regen)
         layout.addLayout(title_bar)
 
         # Layer tree
         self.layer_tree = QTreeWidget()
-        self.layer_tree.setHeaderLabels(["👁", "Color", "Name", "Regions", "Stitches"])
+        self.layer_tree.setHeaderLabels([
+            tr("layer.headers.visible"),
+            tr("thread.headers.color"),
+            tr("thread.headers.name"),
+            tr("layer.headers.regions"),
+            tr("layer.headers.stitches"),
+        ])
         self.layer_tree.setColumnWidth(0, 30)
         self.layer_tree.setColumnWidth(1, 30)
         self.layer_tree.setColumnWidth(2, 100)
@@ -327,17 +359,17 @@ class LayerPanel(QWidget):
         # Layer actions
         btn_bar = QHBoxLayout()
         btn_up = QPushButton("↑")
-        btn_up.setToolTip("Move Up")
+        btn_up.setToolTip(tr("layer.move_up"))
         btn_up.setMaximumWidth(40)
         btn_up.clicked.connect(lambda: self._move_layer(-1))
         btn_down = QPushButton("↓")
-        btn_down.setToolTip("Move Down")
+        btn_down.setToolTip(tr("layer.move_down"))
         btn_down.setMaximumWidth(40)
         btn_down.clicked.connect(lambda: self._move_layer(1))
-        btn_del = QPushButton("Delete")
+        btn_del = QPushButton(tr("common.delete"))
         btn_del.clicked.connect(self._delete_layer)
-        btn_merge = QPushButton("Merge")
-        btn_merge.setToolTip("Merge selected layers")
+        btn_merge = QPushButton(tr("layer.merge"))
+        btn_merge.setToolTip(tr("layer.merge_tip"))
         btn_merge.clicked.connect(self._merge_layers)
         btn_bar.addWidget(btn_up)
         btn_bar.addWidget(btn_down)
@@ -461,14 +493,17 @@ class LayerPanel(QWidget):
         if not item:
             return
         menu = QMenu(self)
-        menu.addAction("Rename", lambda: self._rename_item(item))
-        menu.addAction("Duplicate", lambda: self._duplicate_item(item))
-        menu.addAction("Delete", self._delete_layer)
+        menu.addAction(tr("common.rename"), lambda: self._rename_item(item))
+        menu.addAction(tr("common.duplicate"), lambda: self._duplicate_item(item))
+        menu.addAction(tr("common.delete"), self._delete_layer)
         menu.exec(self.layer_tree.mapToGlobal(pos))
 
     def _rename_item(self, item):
         uid = item.data(0, Qt.UserRole)
-        name, ok = QInputDialog.getText(self, "Rename", "New name:", text=item.text(2))
+        name, ok = QInputDialog.getText(
+            self, tr("layer.dialog.rename"), tr("layer.dialog.new_name"),
+            text=item.text(2)
+        )
         if ok and self.project:
             layer = self.project.get_layer(uid)
             if layer:
@@ -511,7 +546,7 @@ class PropertiesPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         # --- Fill Mode ---
-        grp_fill = QGroupBox("Fill Mode")
+        grp_fill = QGroupBox(tr("properties.fill_mode"))
         fl = QVBoxLayout(grp_fill)
         self.combo_fill = QComboBox()
         self.combo_fill.addItems([
@@ -523,9 +558,9 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_fill)
 
         # --- Direction ---
-        grp_dir = QGroupBox("Stitch Direction")
+        grp_dir = QGroupBox(tr("properties.direction"))
         dl = QGridLayout(grp_dir)
-        dl.addWidget(QLabel("Mode:"), 0, 0)
+        dl.addWidget(QLabel(tr("properties.direction_mode")), 0, 0)
         self.combo_dir = QComboBox()
         self.combo_dir.addItems([
             "fixed_angle", "image_gradient", "contour_follow",
@@ -534,7 +569,7 @@ class PropertiesPanel(QWidget):
         self.combo_dir.currentTextChanged.connect(self._on_changed)
         dl.addWidget(self.combo_dir, 0, 1)
 
-        dl.addWidget(QLabel("Angle (°):"), 1, 0)
+        dl.addWidget(QLabel(tr("properties.angle")), 1, 0)
         self.spin_angle = QDoubleSpinBox()
         self.spin_angle.setRange(0, 360)
         self.spin_angle.setSingleStep(5)
@@ -548,10 +583,10 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_dir)
 
         # --- Stitch Length ---
-        grp_len = QGroupBox("Stitch Length (mm)")
+        grp_len = QGroupBox(tr("properties.length_group"))
         ll = QGridLayout(grp_len)
 
-        ll.addWidget(QLabel("Length:"), 0, 0)
+        ll.addWidget(QLabel(tr("properties.length")), 0, 0)
         self.spin_length = QDoubleSpinBox()
         self.spin_length.setRange(0.5, 12.0)
         self.spin_length.setSingleStep(0.1)
@@ -564,7 +599,7 @@ class PropertiesPanel(QWidget):
         self.slider_length.valueChanged.connect(lambda v: self.spin_length.setValue(v / 10))
         ll.addWidget(self.slider_length, 1, 0, 1, 2)
 
-        ll.addWidget(QLabel("Min:"), 2, 0)
+        ll.addWidget(QLabel(tr("properties.min")), 2, 0)
         self.spin_len_min = QDoubleSpinBox()
         self.spin_len_min.setRange(0.5, 12.0)
         self.spin_len_min.setSingleStep(0.1)
@@ -572,7 +607,7 @@ class PropertiesPanel(QWidget):
         self.spin_len_min.valueChanged.connect(self._on_changed)
         ll.addWidget(self.spin_len_min, 2, 1)
 
-        ll.addWidget(QLabel("Max:"), 3, 0)
+        ll.addWidget(QLabel(tr("properties.max")), 3, 0)
         self.spin_len_max = QDoubleSpinBox()
         self.spin_len_max.setRange(0.5, 12.0)
         self.spin_len_max.setSingleStep(0.1)
@@ -580,7 +615,7 @@ class PropertiesPanel(QWidget):
         self.spin_len_max.valueChanged.connect(self._on_changed)
         ll.addWidget(self.spin_len_max, 3, 1)
 
-        ll.addWidget(QLabel("Randomize:"), 4, 0)
+        ll.addWidget(QLabel(tr("properties.randomize")), 4, 0)
         self.slider_random = QSlider(Qt.Horizontal)
         self.slider_random.setRange(0, 100)
         self.slider_random.valueChanged.connect(self._on_changed)
@@ -588,10 +623,10 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_len)
 
         # --- Density ---
-        grp_density = QGroupBox("Density & Spacing")
+        grp_density = QGroupBox(tr("properties.density_spacing"))
         ddl = QGridLayout(grp_density)
 
-        ddl.addWidget(QLabel("Row Spacing (mm):"), 0, 0)
+        ddl.addWidget(QLabel(tr("properties.row_spacing")), 0, 0)
         self.spin_spacing = QDoubleSpinBox()
         self.spin_spacing.setRange(0.1, 5.0)
         self.spin_spacing.setSingleStep(0.05)
@@ -604,7 +639,7 @@ class PropertiesPanel(QWidget):
         self.slider_spacing.valueChanged.connect(lambda v: self.spin_spacing.setValue(v / 100))
         ddl.addWidget(self.slider_spacing, 1, 0, 1, 2)
 
-        ddl.addWidget(QLabel("Density multiplier:"), 2, 0)
+        ddl.addWidget(QLabel(tr("properties.density_multiplier")), 2, 0)
         self.spin_density = QDoubleSpinBox()
         self.spin_density.setRange(0.1, 5.0)
         self.spin_density.setSingleStep(0.1)
@@ -619,20 +654,20 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_density)
 
         # --- Underlay ---
-        grp_under = QGroupBox("Underlay")
+        grp_under = QGroupBox(tr("properties.underlay"))
         ul = QGridLayout(grp_under)
-        self.chk_underlay = QCheckBox("Enable Underlay")
+        self.chk_underlay = QCheckBox(tr("properties.enable_underlay"))
         self.chk_underlay.stateChanged.connect(self._on_changed)
         ul.addWidget(self.chk_underlay, 0, 0, 1, 2)
 
-        ul.addWidget(QLabel("Angle Offset:"), 1, 0)
+        ul.addWidget(QLabel(tr("properties.angle_offset")), 1, 0)
         self.spin_under_angle = QDoubleSpinBox()
         self.spin_under_angle.setRange(0, 180)
         self.spin_under_angle.setSingleStep(15)
         self.spin_under_angle.valueChanged.connect(self._on_changed)
         ul.addWidget(self.spin_under_angle, 1, 1)
 
-        ul.addWidget(QLabel("Density:"), 2, 0)
+        ul.addWidget(QLabel(tr("common.density")), 2, 0)
         self.spin_under_density = QDoubleSpinBox()
         self.spin_under_density.setRange(0.1, 2.0)
         self.spin_under_density.setSingleStep(0.1)
@@ -642,15 +677,15 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_under)
 
         # --- Contour ---
-        grp_contour = QGroupBox("Contour")
+        grp_contour = QGroupBox(tr("properties.contour"))
         cl = QGridLayout(grp_contour)
-        cl.addWidget(QLabel("Contour Rows:"), 0, 0)
+        cl.addWidget(QLabel(tr("properties.contour_rows")), 0, 0)
         self.spin_contour_count = QSpinBox()
         self.spin_contour_count.setRange(0, 20)
         self.spin_contour_count.valueChanged.connect(self._on_changed)
         cl.addWidget(self.spin_contour_count, 0, 1)
 
-        cl.addWidget(QLabel("Offset (mm):"), 1, 0)
+        cl.addWidget(QLabel(tr("common.offset")), 1, 0)
         self.spin_contour_offset = QDoubleSpinBox()
         self.spin_contour_offset.setRange(0.1, 5.0)
         self.spin_contour_offset.setSingleStep(0.1)
@@ -660,9 +695,9 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_contour)
 
         # --- Pull Compensation ---
-        grp_pull = QGroupBox("Pull Compensation")
+        grp_pull = QGroupBox(tr("properties.pull"))
         pl = QGridLayout(grp_pull)
-        pl.addWidget(QLabel("Expand (mm):"), 0, 0)
+        pl.addWidget(QLabel(tr("properties.expand")), 0, 0)
         self.spin_pull = QDoubleSpinBox()
         self.spin_pull.setRange(0, 2.0)
         self.spin_pull.setSingleStep(0.05)
@@ -672,15 +707,15 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_pull)
 
         # --- Flow Field ---
-        grp_flow = QGroupBox("Flow Field (for flow_guided)")
+        grp_flow = QGroupBox(tr("properties.flow"))
         ffl = QGridLayout(grp_flow)
-        ffl.addWidget(QLabel("Strength:"), 0, 0)
+        ffl.addWidget(QLabel(tr("common.strength")), 0, 0)
         self.slider_flow_str = QSlider(Qt.Horizontal)
         self.slider_flow_str.setRange(0, 100)
         self.slider_flow_str.valueChanged.connect(self._on_changed)
         ffl.addWidget(self.slider_flow_str, 0, 1)
 
-        ffl.addWidget(QLabel("Smoothing:"), 1, 0)
+        ffl.addWidget(QLabel(tr("common.smoothing")), 1, 0)
         self.slider_flow_smooth = QSlider(Qt.Horizontal)
         self.slider_flow_smooth.setRange(1, 100)
         self.slider_flow_smooth.valueChanged.connect(self._on_changed)
@@ -688,9 +723,9 @@ class PropertiesPanel(QWidget):
         layout.addWidget(grp_flow)
 
         # --- Cross Stitch ---
-        grp_cross = QGroupBox("Cross Stitch")
+        grp_cross = QGroupBox(tr("properties.cross"))
         xl = QGridLayout(grp_cross)
-        xl.addWidget(QLabel("Method:"), 0, 0)
+        xl.addWidget(QLabel(tr("common.method")), 0, 0)
         self.combo_cross_method = QComboBox()
         self.combo_cross_method.addItems([
             "auto", "cross", "cross_flipped", "half", "half_flipped",
@@ -700,7 +735,7 @@ class PropertiesPanel(QWidget):
         self.combo_cross_method.currentTextChanged.connect(self._on_changed)
         xl.addWidget(self.combo_cross_method, 0, 1)
 
-        xl.addWidget(QLabel("Pattern (mm):"), 1, 0)
+        xl.addWidget(QLabel(tr("properties.pattern")), 1, 0)
         self.spin_cross_pattern = QDoubleSpinBox()
         self.spin_cross_pattern.setRange(0.5, 12.0)
         self.spin_cross_pattern.setSingleStep(0.1)
@@ -708,7 +743,7 @@ class PropertiesPanel(QWidget):
         self.spin_cross_pattern.valueChanged.connect(self._on_changed)
         xl.addWidget(self.spin_cross_pattern, 1, 1)
 
-        xl.addWidget(QLabel("Coverage:"), 2, 0)
+        xl.addWidget(QLabel(tr("properties.coverage")), 2, 0)
         self.spin_cross_coverage = QDoubleSpinBox()
         self.spin_cross_coverage.setRange(0.05, 1.0)
         self.spin_cross_coverage.setSingleStep(0.05)
@@ -716,25 +751,25 @@ class PropertiesPanel(QWidget):
         self.spin_cross_coverage.valueChanged.connect(self._on_changed)
         xl.addWidget(self.spin_cross_coverage, 2, 1)
 
-        self.chk_cross_align = QCheckBox("Align grid with canvas")
+        self.chk_cross_align = QCheckBox(tr("properties.align_grid"))
         self.chk_cross_align.stateChanged.connect(self._on_changed)
         xl.addWidget(self.chk_cross_align, 3, 0, 1, 2)
 
-        xl.addWidget(QLabel("Offset X:"), 4, 0)
+        xl.addWidget(QLabel(tr("properties.offset_x")), 4, 0)
         self.spin_cross_offset_x = QDoubleSpinBox()
         self.spin_cross_offset_x.setRange(-50.0, 50.0)
         self.spin_cross_offset_x.setSingleStep(0.1)
         self.spin_cross_offset_x.valueChanged.connect(self._on_changed)
         xl.addWidget(self.spin_cross_offset_x, 4, 1)
 
-        xl.addWidget(QLabel("Offset Y:"), 5, 0)
+        xl.addWidget(QLabel(tr("properties.offset_y")), 5, 0)
         self.spin_cross_offset_y = QDoubleSpinBox()
         self.spin_cross_offset_y.setRange(-50.0, 50.0)
         self.spin_cross_offset_y.setSingleStep(0.1)
         self.spin_cross_offset_y.valueChanged.connect(self._on_changed)
         xl.addWidget(self.spin_cross_offset_y, 5, 1)
 
-        xl.addWidget(QLabel("Detail Boost:"), 6, 0)
+        xl.addWidget(QLabel(tr("properties.detail_boost")), 6, 0)
         self.slider_cross_detail = QSlider(Qt.Horizontal)
         self.slider_cross_detail.setRange(0, 100)
         self.slider_cross_detail.valueChanged.connect(self._on_changed)
@@ -844,20 +879,20 @@ class ImagePanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         # --- Image Adjustments ---
-        self.lbl_step_image = QLabel("1. Import Image & Adjust")
+        self.lbl_step_image = QLabel(tr("image.step_image"))
         self.lbl_step_image.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_image)
 
-        grp_adj = QGroupBox("Image Adjustments")
+        grp_adj = QGroupBox(tr("image.adjustments"))
         al = QGridLayout(grp_adj)
 
         self._sliders = {}
         adjustments = [
-            ("Brightness", "brightness", -100, 100, 0),
-            ("Contrast", "contrast", 10, 300, 100),
-            ("Saturation", "saturation", 0, 300, 100),
-            ("Sharpness", "sharpness", 0, 200, 0),
-            ("Blur", "blur", 0, 100, 0),
+            (tr("image.brightness"), "brightness", -100, 100, 0),
+            (tr("image.contrast"), "contrast", 10, 300, 100),
+            (tr("image.saturation"), "saturation", 0, 300, 100),
+            (tr("image.sharpness"), "sharpness", 0, 200, 0),
+            (tr("image.blur"), "blur", 0, 100, 0),
         ]
 
         for row, (label, key, lo, hi, default) in enumerate(adjustments):
@@ -873,55 +908,55 @@ class ImagePanel(QWidget):
             al.addWidget(val_label, row, 2)
             self._sliders[key] = slider
 
-        btn_reset = QPushButton("Reset Adjustments")
+        btn_reset = QPushButton(tr("image.reset"))
         btn_reset.clicked.connect(self._reset_adjustments)
         al.addWidget(btn_reset, len(adjustments), 0, 1, 3)
         layout.addWidget(grp_adj)
 
         # --- Output Size ---
-        grp_size = QGroupBox("Output Size")
+        grp_size = QGroupBox(tr("image.output_size"))
         sl = QGridLayout(grp_size)
 
-        sl.addWidget(QLabel("Width (mm):"), 0, 0)
+        sl.addWidget(QLabel(tr("common.width_mm")), 0, 0)
         self.spin_width = QDoubleSpinBox()
         self.spin_width.setRange(10, 2000)
         self.spin_width.setValue(100)
         self.spin_width.valueChanged.connect(self._on_image_changed)
         sl.addWidget(self.spin_width, 0, 1)
 
-        sl.addWidget(QLabel("Height (mm):"), 1, 0)
+        sl.addWidget(QLabel(tr("common.height_mm")), 1, 0)
         self.spin_height = QDoubleSpinBox()
         self.spin_height.setRange(10, 2000)
         self.spin_height.setValue(100)
         self.spin_height.valueChanged.connect(self._on_image_changed)
         sl.addWidget(self.spin_height, 1, 1)
 
-        self.chk_lock_ratio = QCheckBox("Lock Aspect Ratio")
+        self.chk_lock_ratio = QCheckBox(tr("image.lock_ratio"))
         self.chk_lock_ratio.setChecked(True)
         sl.addWidget(self.chk_lock_ratio, 2, 0, 1, 2)
         layout.addWidget(grp_size)
 
         # --- Generation Target ---
-        self.lbl_step_type = QLabel("2. Choose Stitch Type")
+        self.lbl_step_type = QLabel(tr("image.step_type"))
         self.lbl_step_type.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_type)
 
-        grp_target = QGroupBox("Generate As")
+        grp_target = QGroupBox(tr("image.generate_as"))
         tl = QVBoxLayout(grp_target)
         mode_row = QHBoxLayout()
         self.generation_mode_buttons = QButtonGroup(self)
         self.generation_mode_buttons.setExclusive(True)
 
-        self.btn_photo_stitch = QPushButton("Photo Stitch")
+        self.btn_photo_stitch = QPushButton(tr("image.photo"))
         self.btn_photo_stitch.setCheckable(True)
         self.btn_photo_stitch.setChecked(True)
         self.btn_photo_stitch.setMinimumHeight(34)
-        self.btn_photo_stitch.setToolTip("Continuous fills for smoother photo-like embroidery")
+        self.btn_photo_stitch.setToolTip(tr("image.photo_tip"))
 
-        self.btn_cross_stitch = QPushButton("Cross Stitch")
+        self.btn_cross_stitch = QPushButton(tr("image.cross"))
         self.btn_cross_stitch.setCheckable(True)
         self.btn_cross_stitch.setMinimumHeight(34)
-        self.btn_cross_stitch.setToolTip("Grid-based cross stitch generation")
+        self.btn_cross_stitch.setToolTip(tr("image.cross_tip"))
 
         self.generation_mode_buttons.addButton(self.btn_photo_stitch)
         self.generation_mode_buttons.addButton(self.btn_cross_stitch)
@@ -929,27 +964,27 @@ class ImagePanel(QWidget):
         mode_row.addWidget(self.btn_cross_stitch)
         tl.addLayout(mode_row)
 
-        self.lbl_generation_hint = QLabel("Continuous photo-style fills")
+        self.lbl_generation_hint = QLabel(tr("image.photo_hint"))
         self.lbl_generation_hint.setStyleSheet("color: gray; font-size: 11px;")
         tl.addWidget(self.lbl_generation_hint)
         layout.addWidget(grp_target)
 
         # --- Quantization ---
-        self.lbl_step_prepare = QLabel("3. Prepare Colors")
+        self.lbl_step_prepare = QLabel(tr("image.step_prepare"))
         self.lbl_step_prepare.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_prepare)
 
-        self.btn_advanced_color = QPushButton("Advanced Color Settings")
+        self.btn_advanced_color = QPushButton(tr("common.advanced_color"))
         self.btn_advanced_color.setCheckable(True)
         self.btn_advanced_color.setChecked(False)
         layout.addWidget(self.btn_advanced_color)
 
-        self.grp_quant = QGroupBox("Advanced Color Settings")
+        self.grp_quant = QGroupBox(tr("common.advanced_color"))
         self.grp_quant.setVisible(False)
         self.btn_advanced_color.toggled.connect(self.grp_quant.setVisible)
         ql = QGridLayout(self.grp_quant)
 
-        ql.addWidget(QLabel("Colors:"), 0, 0)
+        ql.addWidget(QLabel(tr("common.colors")), 0, 0)
         self.spin_colors = QSpinBox()
         self.spin_colors.setRange(2, 64)
         self.spin_colors.setValue(16)
@@ -962,34 +997,34 @@ class ImagePanel(QWidget):
         self.spin_colors.valueChanged.connect(self.slider_colors.setValue)
         ql.addWidget(self.slider_colors, 1, 0, 1, 2)
 
-        ql.addWidget(QLabel("Method:"), 2, 0)
+        ql.addWidget(QLabel(tr("common.method")), 2, 0)
         self.combo_method = QComboBox()
         self.combo_method.addItems(["kmeans_lab", "median_cut", "octree"])
         ql.addWidget(self.combo_method, 2, 1)
 
-        ql.addWidget(QLabel("Min Region (px²):"), 3, 0)
+        ql.addWidget(QLabel(tr("image.min_region")), 3, 0)
         self.spin_min_area = QSpinBox()
         self.spin_min_area.setRange(1, 10000)
         self.spin_min_area.setValue(40)
         ql.addWidget(self.spin_min_area, 3, 1)
 
-        ql.addWidget(QLabel("Smooth Kernel:"), 4, 0)
+        ql.addWidget(QLabel(tr("image.smooth_kernel")), 4, 0)
         self.spin_kernel = QSpinBox()
         self.spin_kernel.setRange(1, 21)
         self.spin_kernel.setSingleStep(2)
         self.spin_kernel.setValue(5)
         ql.addWidget(self.spin_kernel, 4, 1)
 
-        self.chk_smooth = QCheckBox("Smooth Regions")
+        self.chk_smooth = QCheckBox(tr("image.smooth_regions"))
         self.chk_smooth.setChecked(True)
         ql.addWidget(self.chk_smooth, 5, 0, 1, 2)
 
-        self.chk_dither = QCheckBox("Dithering")
+        self.chk_dither = QCheckBox(tr("image.dithering"))
         ql.addWidget(self.chk_dither, 6, 0, 1, 2)
 
         layout.addWidget(self.grp_quant)
 
-        self.lbl_step_generate = QLabel("4. Generate")
+        self.lbl_step_generate = QLabel(tr("image.step_generate"))
         self.lbl_step_generate.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_generate)
 
@@ -1041,11 +1076,11 @@ class ImagePanel(QWidget):
 
     def _on_generation_mode_changed(self, *args):
         if self.get_generation_mode() == "cross_stitch":
-            self.btn_quantize.setText("⟳ Quantize for Cross Stitch")
-            self.lbl_generation_hint.setText("Grid-based output with cross-stitch settings")
+            self.btn_quantize.setText(tr("image.prepare_cross"))
+            self.lbl_generation_hint.setText(tr("image.cross_hint"))
         else:
-            self.btn_quantize.setText("⟳ Quantize for Photo Stitch")
-            self.lbl_generation_hint.setText("Continuous photo-style fills")
+            self.btn_quantize.setText(tr("image.prepare_photo"))
+            self.lbl_generation_hint.setText(tr("image.photo_hint"))
 
     def set_image_settings(self, s: ImageSettings):
         self._blocking = True
@@ -1098,12 +1133,15 @@ class StatsPanel(QWidget):
 
     def update_stats(self, stats: dict):
         lines = [
-            f"Total stitches: {stats.get('total_stitches', 0):,}",
-            f"Jump stitches: {stats.get('total_jumps', 0):,}",
-            f"Trim commands: {stats.get('total_trims', 0):,}",
-            f"Color changes: {stats.get('color_changes', 0)}",
-            f"Colors used: {stats.get('n_colors', 0)}",
-            f"Size: {stats.get('width_mm', 0):.1f} × {stats.get('height_mm', 0):.1f} mm",
-            f"Thread length: {stats.get('thread_length_m', 0):.1f} m",
+            tr("stats.total_stitches").format(value=stats.get("total_stitches", 0)),
+            tr("stats.jump_stitches").format(value=stats.get("total_jumps", 0)),
+            tr("stats.trim_commands").format(value=stats.get("total_trims", 0)),
+            tr("stats.color_changes").format(value=stats.get("color_changes", 0)),
+            tr("stats.colors_used").format(value=stats.get("n_colors", 0)),
+            tr("stats.size").format(
+                width=stats.get("width_mm", 0),
+                height=stats.get("height_mm", 0),
+            ),
+            tr("stats.thread_length").format(value=stats.get("thread_length_m", 0)),
         ]
         self.text.setText("\n".join(lines))
