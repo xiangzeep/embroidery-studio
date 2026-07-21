@@ -54,6 +54,36 @@ def install_fake_pyembroidery():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_export_end_command_stays_at_last_needle_position(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [[(18.0, 5.0), (1494.0, 1458.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(pattern.stitches[-1], (1494, 1458, pyembroidery.END))
+        self.assertEqual(pattern.bounds(), (18, 5, 1494, 1458))
+
+    def test_dst_validation_bounds_ignore_non_sewing_commands(self):
+        pyembroidery = install_fake_pyembroidery()
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        pattern = pyembroidery.EmbPattern()
+        pattern.add_stitch_absolute(pyembroidery.JUMP, -30, -20)
+        pattern.add_stitch_absolute(pyembroidery.JUMP, 18, 5)
+        pattern.add_stitch_absolute(pyembroidery.STITCH, 1494, 1458)
+        pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
+
+        bounds = export_mod.ExportEngine._sewn_bounds(pattern)
+
+        self.assertEqual(bounds, (18.0, 5.0, 1494.0, 1458.0))
+
     def test_load_image_downscales_oversized_source_for_stable_processing(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
 

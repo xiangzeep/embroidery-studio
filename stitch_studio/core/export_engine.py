@@ -98,8 +98,11 @@ class ExportEngine:
                             last_y,
                         )
 
-        # End pattern
-        pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
+        # END does not encode movement in DST. Keep it at the needle position so
+        # in-memory bounds match the file that machines and viewers decode.
+        end_x = 0 if last_x is None else last_x
+        end_y = 0 if last_y is None else last_y
+        pattern.add_stitch_absolute(pyembroidery.END, end_x, end_y)
 
         # Fix up thread/color consistency
         pattern.fix_color_count()
@@ -130,14 +133,14 @@ class ExportEngine:
         source_pattern: pyembroidery.EmbPattern,
         filepath: str,
     ):
-        """Reject a DST whose encoded movement stream changes design size."""
+        """Reject a DST whose encoded sewing area changes design size."""
         # Test doubles may capture writes without creating a physical file.
         if not os.path.isfile(filepath):
             return
         try:
             decoded = pyembroidery.EmbPattern(filepath)
-            expected = source_pattern.bounds()
-            actual = decoded.bounds()
+            expected = self._sewn_bounds(source_pattern)
+            actual = self._sewn_bounds(decoded)
             has_end = bool(
                 decoded.stitches
                 and (int(decoded.stitches[-1][2]) & 0xFF) == pyembroidery.END
@@ -171,6 +174,23 @@ class ExportEngine:
             except OSError:
                 pass
             raise ValueError(f"DST validation failed: {error}") from error
+
+    @staticmethod
+    def _sewn_bounds(pattern: pyembroidery.EmbPattern):
+        """Return bounds of sewn segments, excluding travel-only movement."""
+        points = []
+        previous = None
+        for x, y, command in pattern.stitches:
+            point = (float(x), float(y))
+            if (int(command) & 0xFF) == pyembroidery.STITCH:
+                if previous is not None:
+                    points.append(previous)
+                points.append(point)
+            previous = point
+        if not points:
+            return None
+        xs, ys = zip(*points)
+        return min(xs), min(ys), max(xs), max(ys)
 
     def has_stitches(self, project: Project) -> bool:
         """Return whether the project contains at least one drawable path."""
