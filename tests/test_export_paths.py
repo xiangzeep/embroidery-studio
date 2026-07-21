@@ -105,6 +105,8 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(panel.btn_cross_stitch.text(), "十字绣")
         self.assertEqual(panel.btn_advanced_color.text(), "高级颜色设置")
         self.assertIn("照片绣", panel.btn_quantize.text())
+        self.assertEqual(panel.chk_include_background.text(), "生成背景")
+        self.assertFalse(panel.chk_include_background.isChecked())
 
     def test_properties_panel_core_parameters_are_chinese(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
@@ -367,6 +369,32 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0][0], 1)
         self.assertEqual(int(np.count_nonzero(regions[0][1])), 40)
+
+    def test_segmentation_can_include_border_background_when_requested(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        image = np.full((20, 20, 3), (190, 0, 20), dtype=np.uint8)
+        image[5:15, 8:12] = (0, 0, 0)
+        thread_map = np.zeros((20, 20), dtype=np.int32)
+        thread_map[5:15, 8:12] = 1
+
+        settings = project_mod.QuantizationSettings(
+            min_region_area_px=1,
+            include_background=True,
+        )
+        regions = image_mod.ImageEngine.segment_regions(thread_map, settings, image)
+        region_pixels = {
+            tid: sum(
+                int(np.count_nonzero(mask))
+                for region_tid, mask in regions
+                if region_tid == tid
+            )
+            for tid in {0, 1}
+        }
+
+        self.assertEqual(region_pixels[0], 360)
+        self.assertEqual(region_pixels[1], 40)
 
     def test_segmentation_preserves_dark_outline_on_canvas(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")

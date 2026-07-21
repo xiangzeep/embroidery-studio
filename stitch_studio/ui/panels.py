@@ -974,6 +974,11 @@ class ImagePanel(QWidget):
         self.lbl_step_prepare.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_prepare)
 
+        self.chk_include_background = QCheckBox(tr("image.include_background"))
+        self.chk_include_background.setToolTip(tr("image.include_background_tip"))
+        self.chk_include_background.setChecked(False)
+        layout.addWidget(self.chk_include_background)
+
         self.btn_advanced_color = QPushButton(tr("common.advanced_color"))
         self.btn_advanced_color.setCheckable(True)
         self.btn_advanced_color.setChecked(False)
@@ -1058,6 +1063,7 @@ class ImagePanel(QWidget):
         q = QuantizationSettings()
         q.n_colors = self.spin_colors.value()
         q.method = self.combo_method.currentText()
+        q.include_background = self.chk_include_background.isChecked()
         q.min_region_area_px = self.spin_min_area.value()
         q.morphology_kernel_size = self.spin_kernel.value()
         q.smooth_regions = self.chk_smooth.isChecked()
@@ -1097,6 +1103,7 @@ class ImagePanel(QWidget):
         self._blocking = True
         self.spin_colors.setValue(q.n_colors)
         self.combo_method.setCurrentText(q.method)
+        self.chk_include_background.setChecked(q.include_background)
         self.spin_min_area.setValue(q.min_region_area_px)
         self.spin_kernel.setValue(q.morphology_kernel_size)
         self.chk_smooth.setChecked(q.smooth_regions)

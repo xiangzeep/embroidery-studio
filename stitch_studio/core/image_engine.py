@@ -193,7 +193,7 @@ class ImageEngine:
         """
         regions = []
         foreground = None
-        if source_image is not None:
+        if source_image is not None and not settings.include_background:
             foreground = ~ImageEngine._detect_background_mask(source_image)
         protected_black = None
         black_tids = set()

@@ -341,6 +341,7 @@ class QuantizationSettings:
     n_colors: int = 16
     method: str = "kmeans_lab"  # "kmeans_lab", "median_cut", "octree"
     dither: bool = False
+    include_background: bool = False
     min_region_area_px: int = 40
     morphology_kernel_size: int = 5
     smooth_regions: bool = True
