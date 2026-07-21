@@ -81,6 +81,19 @@ class ExportPathTests(unittest.TestCase):
         self.assertIn("RecognitionEngine.recognize(", worker_source)
         self.assertNotIn("quantize_to_palette(", worker_source)
 
+    def test_export_without_stitches_generates_then_continues(self):
+        import inspect
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        export_source = inspect.getsource(main_mod.MainWindow._export_pattern)
+        done_source = inspect.getsource(main_mod.MainWindow._on_stitch_done)
+
+        self.assertIn("has_stitches", export_source)
+        self.assertIn("_pending_export_path", export_source)
+        self.assertIn("_generate_stitches", export_source)
+        self.assertIn("_pending_export_path", done_source)
+        self.assertIn("_write_export_pattern", done_source)
+
     def test_i18n_defaults_to_chinese_with_english_fallback(self):
         i18n_mod = importlib.import_module("stitch_studio.i18n")
 
@@ -243,6 +256,26 @@ class ExportPathTests(unittest.TestCase):
             if cmd == install_fake_pyembroidery().STITCH
         ]
         self.assertIn((10, 10), stitched_points)
+
+    def test_large_photo_stitch_export_skips_quadratic_path_reordering(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        engine = export_mod.ExportEngine()
+        region = project_mod.Region()
+        region.stitch_settings.fill_mode = "scanline"
+        paths = [
+            [(float(index), 0.0), (float(index), 1.0)]
+            for index in range(600)
+        ]
+        engine._order_paths_from = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("large designs should use the linear export path")
+        )
+
+        ordered = engine._order_region_paths(region, paths, None, None)
+
+        self.assertEqual(len(ordered), len(paths))
 
 
     def test_region_can_store_path_boundaries_for_preview_and_export(self):
@@ -1822,6 +1855,40 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(diagonal_edges), 1)
         self.assertLessEqual(len(coords), 5)
 
+    def test_geometry_engine_preserves_disconnected_islands_and_holes(self):
+        import cv2
+
+        geom_mod = importlib.import_module("stitch_studio.core.geometry_engine")
+        mask = np.zeros((96, 128), dtype=np.uint8)
+        cv2.rectangle(mask, (8, 8), (62, 82), 255, -1)
+        cv2.rectangle(mask, (24, 26), (48, 64), 0, -1)
+        cv2.circle(mask, (102, 25), 14, 255, -1)
+        mask[74:77, 86:120] = 255
+
+        geometry = geom_mod.GeometryEngine.reconstruct_region_polygon(mask)
+
+        self.assertIsNotNone(geometry)
+        self.assertTrue(geometry.is_valid)
+        self.assertGreaterEqual(len(getattr(geometry, "geoms", [geometry])), 3)
+
+        raster = np.zeros_like(mask)
+        geometries = getattr(geometry, "geoms", [geometry])
+        for polygon in geometries:
+            exterior = np.rint(np.asarray(polygon.exterior.coords)).astype(np.int32)
+            cv2.fillPoly(raster, [exterior], 255)
+            for interior in polygon.interiors:
+                hole = np.rint(np.asarray(interior.coords)).astype(np.int32)
+                cv2.fillPoly(raster, [hole], 0)
+
+        source = mask > 0
+        rendered = raster > 0
+        intersection = int(np.count_nonzero(source & rendered))
+        union = int(np.count_nonzero(source | rendered))
+        self.assertGreaterEqual(intersection / union, 0.95)
+        self.assertEqual(int(raster[45, 35]), 0)
+        self.assertEqual(int(raster[25, 102]), 255)
+        self.assertEqual(int(raster[75, 105]), 255)
+
     def test_layer_regions_store_reconstructed_polygon(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -2160,6 +2227,23 @@ class ExportPathTests(unittest.TestCase):
             ],
         )
         self.assertEqual(written_files, [filepath, edr_path])
+
+    def test_export_rejects_pattern_without_stitches(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(10, 120, 30), order=0)
+        layer.regions = [project_mod.Region()]
+        project.layers = [layer]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "empty.dst")
+            with self.assertRaisesRegex(ValueError, "no stitches"):
+                export_mod.ExportEngine().export(project, filepath)
+
+            self.assertFalse(os.path.exists(filepath))
 
     def test_export_sanitizes_non_ascii_internal_design_name(self):
         install_fake_pyembroidery()

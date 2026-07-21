@@ -1,52 +1,61 @@
-"""
-Geometry reconstruction for embroidery regions.
+"""Reconstruct embroidery-ready vector geometry from raster region masks."""
 
-Masks remain useful for segmentation, but embroidery boundaries should be
-vector geometry. This module converts mask contours into polygons that can be
-shared by preview and stitch generation.
-"""
+from typing import Any, Optional
 
-from typing import Optional
-
-import cv2
 import numpy as np
-from shapely.geometry import Polygon
+from shapely.geometry import LineString
+from shapely.ops import polygonize, unary_union
+from skimage.measure import find_contours
 
 
 class GeometryEngine:
-    """Build embroidery-ready vector polygons from raster region masks."""
+    """Build complete region geometry without dropping islands or holes."""
 
     @staticmethod
     def reconstruct_region_polygon(
         mask: np.ndarray,
         compensation_px: float = 0.0,
-    ) -> Optional[Polygon]:
-        clean = (mask > 0).astype(np.uint8) * 255
-        if int(np.count_nonzero(clean)) == 0:
+    ) -> Optional[Any]:
+        binary = np.asarray(mask) > 0
+        if not np.any(binary):
             return None
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=1)
-        contours, _ = cv2.findContours(clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if not contours:
+        # Padding closes contours that touch an image edge. The 0.5 level lies
+        # on pixel boundaries, so isolated pixels and one-pixel lines remain
+        # drawable geometry rather than collapsing to zero-area contours.
+        padded = np.pad(binary, 1, mode="constant", constant_values=False)
+        lines = []
+        for contour in find_contours(padded.astype(np.uint8), level=0.5):
+            coordinates = [
+                (float(column - 1), float(row - 1))
+                for row, column in contour
+            ]
+            if len(coordinates) >= 4:
+                lines.append(LineString(coordinates))
+        if not lines:
             return None
 
-        contour = max(contours, key=cv2.contourArea)
-        perimeter = float(cv2.arcLength(contour, True))
-        epsilon = max(0.9, 0.006 * perimeter)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-        if len(approx) < 3:
+        faces = polygonize(unary_union(lines))
+        polygons = []
+        height, width = binary.shape
+        for face in faces:
+            sample = face.representative_point()
+            x = int(round(sample.x))
+            y = int(round(sample.y))
+            if not (0 <= x < width and 0 <= y < height and binary[y, x]):
+                continue
+
+            epsilon = max(0.25, min(0.9, 0.006 * face.exterior.length))
+            simplified = face.simplify(epsilon, preserve_topology=True)
+            if not simplified.is_empty:
+                polygons.append(simplified)
+
+        if not polygons:
             return None
 
-        poly = Polygon(approx[:, 0, :].astype(np.float64))
-        if not poly.is_valid:
-            poly = poly.buffer(0)
+        geometry = unary_union(polygons)
         if compensation_px:
-            poly = poly.buffer(float(compensation_px), join_style=1)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        if hasattr(poly, "geoms"):
-            poly = max(poly.geoms, key=lambda geom: geom.area)
-        if poly.is_empty:
-            return None
-        return poly
+            geometry = geometry.buffer(float(compensation_px), join_style=1)
+        if not geometry.is_valid:
+            geometry = geometry.buffer(0)
+        return None if geometry.is_empty else geometry

@@ -86,6 +86,8 @@ class ExportEngine:
 
     def export(self, project: Project, filepath: str, settings: dict = None) -> List[str]:
         """Export project to embroidery file."""
+        if not self.has_stitches(project):
+            raise ValueError("Pattern has no stitches to export")
         pattern = self.build_pattern(project)
 
         write_settings = {}
@@ -102,8 +104,24 @@ class ExportEngine:
             written_files.append(edr_path)
         return written_files
 
+    def has_stitches(self, project: Project) -> bool:
+        """Return whether the project contains at least one drawable path."""
+        return any(
+            self._region_paths(region)
+            for layer in project.layers
+            if layer.visible
+            for region in layer.regions
+            if region.visible
+        )
+
     def export_layer(self, layer: Layer, filepath: str, settings: dict = None):
         """Export a single layer to its own embroidery file."""
+        if not any(
+            self._region_paths(region)
+            for region in layer.regions
+            if region.visible
+        ):
+            raise ValueError("Layer has no stitches to export")
         pattern = pyembroidery.EmbPattern()
 
         thread = self._thread_for_layer(layer, 0)
@@ -269,18 +287,21 @@ class ExportEngine:
         last_x: Optional[int],
         last_y: Optional[int],
     ) -> List[List[Tuple[float, float]]]:
-        """Choose a path order without making cross-stitch export quadratic."""
-        if getattr(region.stitch_settings, "fill_mode", "") == "cross_stitch":
-            return self._order_cross_stitch_paths_linear(paths, last_x, last_y)
+        """Choose a path order without making large exports quadratic."""
+        if (
+            getattr(region.stitch_settings, "fill_mode", "") == "cross_stitch"
+            or len(paths) >= 256
+        ):
+            return self._order_paths_linear(paths, last_x, last_y)
         return self._order_paths_from(paths, last_x, last_y)
 
-    def _order_cross_stitch_paths_linear(
+    def _order_paths_linear(
         self,
         paths: List[List[Tuple[float, float]]],
         last_x: Optional[int],
         last_y: Optional[int],
     ) -> List[List[Tuple[float, float]]]:
-        """Keep generator row order and only flip each next segment locally."""
+        """Keep generator order and only flip each next segment locally."""
         ordered: List[List[Tuple[float, float]]] = []
         current = None if last_x is None or last_y is None else (float(last_x), float(last_y))
         for path in paths:

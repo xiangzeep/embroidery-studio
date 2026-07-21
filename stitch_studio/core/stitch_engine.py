@@ -296,6 +296,23 @@ class StitchEngine:
         if poly is None or poly.is_empty:
             return self._generate_hairline_fill_paths(mask, settings)
 
+        geometries = getattr(poly, "geoms", None)
+        if geometries is None:
+            geometries = [poly]
+
+        paths: List[List[Tuple[float, float]]] = []
+        for geometry in geometries:
+            if geometry.is_empty or not hasattr(geometry, "exterior"):
+                continue
+            paths.extend(self._generate_scanline_polygon_paths(geometry, settings))
+        return paths or self._generate_hairline_fill_paths(mask, settings)
+
+    def _generate_scanline_polygon_paths(
+        self,
+        poly: Polygon,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Generate scanlines inside one connected polygon island."""
         angle = settings.angle_deg
         pitch_px = settings.row_spacing_mm * self.px_per_mm / settings.density
         stitch_len_px = settings.stitch_length_mm * self.px_per_mm
@@ -337,11 +354,22 @@ class StitchEngine:
             y += pitch_px
             row_idx += 1
 
-        return self._chain_fill_rows(
+        paths = self._chain_fill_rows(
             row_paths,
             max_gap_px=max(pitch_px * 2.8, stitch_len_px * 1.8),
             containment_polygon=poly,
         )
+        if paths:
+            return paths
+
+        # Very thin islands can fall between scan rows. Trace their boundary
+        # instead of silently dropping a one-pixel line or isolated detail.
+        outline = self._resample_line(
+            list(poly.exterior.coords),
+            max(1.0, stitch_len_px),
+            0,
+        )
+        return [outline] if len(outline) >= 2 else []
 
     def _generate_hairline_fill_paths(
         self,
@@ -1491,8 +1519,6 @@ class StitchEngine:
                 poly = poly.buffer(compensation_mm * self.px_per_mm, join_style=1)
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            if hasattr(poly, "geoms"):
-                poly = max(poly.geoms, key=lambda geom: geom.area)
             return None if poly.is_empty else poly
         return self._mask_to_polygon(mask, compensation_mm)
 

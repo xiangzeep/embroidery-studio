@@ -268,6 +268,27 @@ class PatrickRegressionTests(unittest.TestCase):
         repeated = RecognitionEngine.recognize(image, threads, settings)
         np.testing.assert_array_equal(result.design_map, repeated.design_map)
 
+        import shapely
+
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        rows, columns = np.indices(image.shape[:2])
+        intersection = 0
+        union = 0
+        for layer in layers:
+            for region in layer.regions:
+                source = region.mask > 0
+                rendered = shapely.intersects_xy(region.polygon, columns, rows)
+                intersection += int(np.count_nonzero(source & rendered))
+                union += int(np.count_nonzero(source | rendered))
+
+        self.assertGreaterEqual(intersection / max(1, union), 0.95)
+
 
 if __name__ == "__main__":
     unittest.main()

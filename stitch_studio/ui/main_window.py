@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
         self._coherence_field = None
         self._worker = None
         self._quant_worker = None
+        self._pending_export_path = None
 
         # Build UI
         self._create_actions()
@@ -803,6 +804,10 @@ class MainWindow(QMainWindow):
         self.layer_panel.refresh()
         self.status_info.setText(tr("status.generated"))
         self._worker = None
+        if self._pending_export_path:
+            path = self._pending_export_path
+            self._pending_export_path = None
+            self._write_export_pattern(path)
 
     def _on_stitch_error(self, msg):
         QMessageBox.critical(
@@ -810,6 +815,7 @@ class MainWindow(QMainWindow):
             tr("dialog.stitch_failed").format(error=msg)
         )
         self._worker = None
+        self._pending_export_path = None
 
     def _export_pattern(self):
         """Export to embroidery file format."""
@@ -831,6 +837,16 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        if not self.export_engine.has_stitches(self.project):
+            self._pending_export_path = path
+            self._generate_stitches()
+            self.status_info.setText(tr("status.generating_for_export"))
+            return
+
+        self._write_export_pattern(path)
+
+    def _write_export_pattern(self, path: str):
+        """Write a prepared pattern after explicit or automatic generation."""
         try:
             written_files = self.export_engine.export(self.project, path)
             self.status_info.setText(tr("status.exported").format(path=path))
