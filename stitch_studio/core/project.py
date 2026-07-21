@@ -56,7 +56,7 @@ class StitchSettings:
     flow_strength: float = 1.0  # how much flow field influences direction
     flow_smoothing: float = 3.0  # gaussian sigma for flow field smoothing
     cross_method: str = "auto"
-    cross_pattern_size_mm: float = 2.0
+    cross_pattern_size_mm: float = 1.8
     cross_coverage: float = 0.5
     cross_align_grid: bool = True
     cross_grid_offset_x_mm: float = 0.0

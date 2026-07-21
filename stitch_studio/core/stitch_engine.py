@@ -969,14 +969,13 @@ class StitchEngine:
         offset_y = reference.cross_grid_offset_y_mm * self.px_per_mm
         start_x = offset_x + np.floor((0.0 - offset_x) / cell_size) * cell_size
         start_y = offset_y + np.floor((0.0 - offset_y) / cell_size) * cell_size
-        assigned = {
-            region.uid: np.zeros(shape, dtype=np.uint8)
-            for region, _ in entries
-        }
+        assigned = {region.uid: np.zeros(shape, dtype=np.uint8) for region, _ in entries}
         minimum_coverage = max(0.05, min(0.25, reference.cross_coverage * 0.5))
 
+        grid = []
         y = start_y
         while y < height:
+            row = []
             x = start_x
             while x < width:
                 # Use the same rounded boundary for adjacent cells. Independent
@@ -996,16 +995,55 @@ class StitchEngine:
                     ]
                     occupied = min((x1 - x0) * (y1 - y0), sum(counts))
                     cell_area = max(1, (x1 - x0) * (y1 - y0))
-                    if occupied / cell_area + 1e-9 >= minimum_coverage:
-                        winner = max(
-                            range(len(entries)),
-                            key=lambda index: counts[index] * entries[index][1],
-                        )
-                        if counts[winner] > 0:
-                            assigned[entries[winner][0].uid][y0:y1, x0:x1] = 255
+                    row.append({
+                        "bounds": (y0, y1, x0, x1),
+                        "counts": counts,
+                        "area": cell_area,
+                        "valid": occupied / cell_area + 1e-9 >= minimum_coverage,
+                    })
                 x += cell_size
+            grid.append(row)
             y += cell_size
+
+        priorities = [priority for _, priority in entries]
+        for row_index, row in enumerate(grid):
+            for column_index, cell in enumerate(row):
+                if not cell["valid"]:
+                    continue
+                counts = cell["counts"]
+                base_winner = max(range(len(entries)), key=lambda index: counts[index])
+                winner = max(
+                    range(len(entries)),
+                    key=lambda index: counts[index] * priorities[index],
+                )
+                if winner != base_winner and priorities[winner] > priorities[base_winner]:
+                    coverage = counts[winner] / max(1, cell["area"])
+                    support = self._cross_cell_neighbor_support(
+                        grid,
+                        row_index,
+                        column_index,
+                        winner,
+                    )
+                    if coverage < 0.30 and support < 2:
+                        winner = base_winner
+                if counts[winner] <= 0:
+                    continue
+                y0, y1, x0, x1 = cell["bounds"]
+                assigned[entries[winner][0].uid][y0:y1, x0:x1] = 255
         return assigned
+
+    @staticmethod
+    def _cross_cell_neighbor_support(grid, row_index, column_index, color_index):
+        support = 0
+        for y in range(max(0, row_index - 1), min(len(grid), row_index + 2)):
+            row = grid[y]
+            for x in range(max(0, column_index - 1), min(len(row), column_index + 2)):
+                if y == row_index and x == column_index:
+                    continue
+                cell = row[x]
+                if cell["valid"] and cell["counts"][color_index] > 0:
+                    support += 1
+        return support
 
     @staticmethod
     def _cross_grid_signature(settings: StitchSettings) -> tuple:

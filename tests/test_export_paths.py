@@ -170,7 +170,7 @@ class ExportPathTests(unittest.TestCase):
         settings = project_mod.StitchSettings()
 
         self.assertEqual(settings.cross_method, "auto")
-        self.assertAlmostEqual(settings.cross_pattern_size_mm, 2.0)
+        self.assertAlmostEqual(settings.cross_pattern_size_mm, 1.8)
         self.assertAlmostEqual(settings.cross_coverage, 0.5)
         self.assertTrue(settings.cross_align_grid)
         self.assertAlmostEqual(settings.cross_grid_offset_x_mm, 0.0)
@@ -1575,6 +1575,56 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(sum(np.count_nonzero(mask) for mask in assigned.values()), 16)
         self.assertEqual(sum(bool(np.any(mask)) for mask in assigned.values()), 1)
+
+    def test_cross_stitch_grid_rejects_isolated_high_priority_color_speck(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        base_mask = np.full((6, 6), 255, dtype=np.uint8)
+        detail_mask = np.zeros((6, 6), dtype=np.uint8)
+        detail_mask[2, 2] = 255
+        base_mask[2, 2] = 0
+        base = project_mod.Region(mask=base_mask)
+        detail = project_mod.Region(mask=detail_mask)
+        for region in (base, detail):
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+            )
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(base, 1.0), (detail, 5.0)]
+        )
+
+        self.assertEqual(int(np.count_nonzero(assigned[detail.uid])), 0)
+        self.assertEqual(int(np.count_nonzero(assigned[base.uid])), 36)
+
+    def test_cross_stitch_grid_preserves_connected_one_pixel_detail_line(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        base_mask = np.full((6, 6), 255, dtype=np.uint8)
+        detail_mask = np.zeros((6, 6), dtype=np.uint8)
+        detail_mask[1, :] = 255
+        base_mask[1, :] = 0
+        base = project_mod.Region(mask=base_mask)
+        detail = project_mod.Region(mask=detail_mask)
+        for region in (base, detail):
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+            )
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(base, 1.0), (detail, 5.0)]
+        )
+
+        self.assertEqual(int(np.count_nonzero(assigned[detail.uid])), 12)
+        self.assertEqual(int(np.count_nonzero(assigned[base.uid])), 24)
 
     def test_cross_stitch_priority_uses_region_detail_metadata_after_layer_merge(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")

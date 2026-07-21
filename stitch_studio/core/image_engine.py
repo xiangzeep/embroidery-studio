@@ -886,7 +886,7 @@ class ImageEngine:
             contour_count=0,
             pull_compensation_mm=0.0,
             cross_method="auto",
-            cross_pattern_size_mm=2.0,
+            cross_pattern_size_mm=1.8,
             cross_coverage=0.5,
             cross_align_grid=True,
             cross_grid_offset_x_mm=0.0,
