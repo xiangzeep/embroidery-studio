@@ -342,6 +342,7 @@ class QuantizationSettings:
     method: str = "kmeans_lab"  # "kmeans_lab", "median_cut", "octree"
     dither: bool = False
     include_background: bool = False
+    preserve_details: bool = True
     min_region_area_px: int = 40
     morphology_kernel_size: int = 5
     smooth_regions: bool = True

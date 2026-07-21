@@ -123,6 +123,16 @@ class ImageEngine:
         # Step 3: Map pixels to thread indices
         thread_map = np.array(assignments)[labels].reshape(h, w)
 
+        if settings.preserve_details:
+            detail_mask = ImageEngine._detect_detail_pixels(image)
+            if np.any(detail_mask):
+                detail_assignments = ImageEngine._nearest_palette_indices_for_pixels(
+                    image[detail_mask],
+                    palette_lab,
+                )
+                thread_map[detail_mask] = detail_assignments
+                assignments.extend(int(idx) for idx in np.unique(detail_assignments))
+
         black_thread_idx = ImageEngine._find_black_thread_index(palette_threads)
         if black_thread_idx is not None:
             rgb = image[:, :, :3].astype(np.int16)
@@ -145,6 +155,73 @@ class ImageEngine:
         used_indices = sorted(set(assignments))
 
         return thread_map, used_indices
+
+    @staticmethod
+    def _detect_detail_pixels(image: np.ndarray) -> np.ndarray:
+        """Find thin high-contrast line pixels before quantization smooths them away."""
+        if image.ndim != 3 or image.shape[2] < 3:
+            return np.zeros(image.shape[:2], dtype=bool)
+
+        rgb = image[:, :, :3].astype(np.float32)
+        gray = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+        local_mean = cv2.GaussianBlur(rgb, (0, 0), sigmaX=1.2, sigmaY=1.2)
+        color_contrast = np.sqrt(np.sum((rgb - local_mean) ** 2, axis=2))
+        laplacian = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+        sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge_strength = cv2.magnitude(sobel_x, sobel_y)
+
+        chroma = rgb.max(axis=2) - rgb.min(axis=2)
+        candidate = (
+            (color_contrast >= 24.0) |
+            (laplacian >= 30.0) |
+            ((edge_strength >= 55.0) & (chroma >= 18.0))
+        )
+
+        # Keep the detector focused on fine marks instead of entire large shapes.
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            candidate.astype(np.uint8),
+            connectivity=8,
+        )
+        detail = np.zeros(candidate.shape, dtype=bool)
+        image_area = candidate.size
+        for lbl in range(1, n_labels):
+            area = int(stats[lbl, cv2.CC_STAT_AREA])
+            width = int(stats[lbl, cv2.CC_STAT_WIDTH])
+            height = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+            short_axis = min(width, height)
+            long_axis = max(width, height)
+            if (
+                area <= max(256, int(image_area * 0.015)) and
+                (short_axis <= 5 or long_axis >= short_axis * 3)
+            ):
+                detail[labels == lbl] = True
+
+        if not np.any(detail):
+            return detail
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        return cv2.dilate(detail.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+    @staticmethod
+    def _nearest_palette_indices_for_pixels(
+        pixels: np.ndarray,
+        palette_lab: np.ndarray,
+    ) -> np.ndarray:
+        if pixels.size == 0:
+            return np.array([], dtype=np.int32)
+
+        pixels_lab = rgb2lab(pixels.reshape(1, -1, 3).astype(np.float64) / 255.0)[0]
+        assignments = np.empty(pixels_lab.shape[0], dtype=np.int32)
+        chunk_size = 8192
+        for start in range(0, pixels_lab.shape[0], chunk_size):
+            chunk = pixels_lab[start:start + chunk_size]
+            dists = deltaE_ciede2000(
+                chunk.reshape(-1, 1, 3),
+                palette_lab.reshape(1, -1, 3),
+            )
+            assignments[start:start + chunk.shape[0]] = np.argmin(dists, axis=1)
+        return assignments
 
     @staticmethod
     def _expand_black_outline_pixels(

@@ -107,6 +107,8 @@ class ExportPathTests(unittest.TestCase):
         self.assertIn("照片绣", panel.btn_quantize.text())
         self.assertEqual(panel.chk_include_background.text(), "生成背景")
         self.assertFalse(panel.chk_include_background.isChecked())
+        self.assertEqual(panel.chk_preserve_details.text(), "保留细线")
+        self.assertTrue(panel.chk_preserve_details.isChecked())
 
     def test_properties_panel_core_parameters_are_chinese(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
@@ -543,6 +545,27 @@ class ExportPathTests(unittest.TestCase):
         )
 
         self.assertTrue(np.all(thread_map[14:26, 16:25] == 1))
+
+    def test_quantization_preserves_one_pixel_colored_line_detail(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Skin", color_rgb=(252, 156, 132)),
+            thread_mod.ThreadColor(name="Red Detail", color_rgb=(136, 30, 18)),
+        ]
+        image = np.full((44, 44, 3), (252, 156, 132), dtype=np.uint8)
+        image[22, 8:36] = (136, 30, 18)
+
+        thread_map, used_indices = image_mod.ImageEngine.quantize_to_palette(
+            image,
+            palette,
+            project_mod.QuantizationSettings(n_colors=1, preserve_details=True),
+        )
+
+        self.assertEqual(int(np.count_nonzero(thread_map[22, 8:36] == 1)), 28)
+        self.assertIn(1, used_indices)
 
     def test_default_segmentation_keeps_small_dark_detail_regions(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")

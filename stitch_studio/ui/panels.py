@@ -979,6 +979,11 @@ class ImagePanel(QWidget):
         self.chk_include_background.setChecked(False)
         layout.addWidget(self.chk_include_background)
 
+        self.chk_preserve_details = QCheckBox(tr("image.preserve_details"))
+        self.chk_preserve_details.setToolTip(tr("image.preserve_details_tip"))
+        self.chk_preserve_details.setChecked(True)
+        layout.addWidget(self.chk_preserve_details)
+
         self.btn_advanced_color = QPushButton(tr("common.advanced_color"))
         self.btn_advanced_color.setCheckable(True)
         self.btn_advanced_color.setChecked(False)
@@ -1064,6 +1069,7 @@ class ImagePanel(QWidget):
         q.n_colors = self.spin_colors.value()
         q.method = self.combo_method.currentText()
         q.include_background = self.chk_include_background.isChecked()
+        q.preserve_details = self.chk_preserve_details.isChecked()
         q.min_region_area_px = self.spin_min_area.value()
         q.morphology_kernel_size = self.spin_kernel.value()
         q.smooth_regions = self.chk_smooth.isChecked()
@@ -1104,6 +1110,7 @@ class ImagePanel(QWidget):
         self.spin_colors.setValue(q.n_colors)
         self.combo_method.setCurrentText(q.method)
         self.chk_include_background.setChecked(q.include_background)
+        self.chk_preserve_details.setChecked(q.preserve_details)
         self.spin_min_area.setValue(q.min_region_area_px)
         self.spin_kernel.setValue(q.morphology_kernel_size)
         self.chk_smooth.setChecked(q.smooth_regions)
