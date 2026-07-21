@@ -55,6 +55,13 @@ class StitchSettings:
     randomize_length: float = 0.0  # 0-1, amount of length randomization
     flow_strength: float = 1.0  # how much flow field influences direction
     flow_smoothing: float = 3.0  # gaussian sigma for flow field smoothing
+    cross_method: str = "auto"
+    cross_pattern_size_mm: float = 2.0
+    cross_coverage: float = 0.5
+    cross_align_grid: bool = True
+    cross_grid_offset_x_mm: float = 0.0
+    cross_grid_offset_y_mm: float = 0.0
+    cross_detail_boost: float = 0.5
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -364,6 +371,7 @@ class Project:
         self.layers: List[Layer] = []
         self.image_settings = ImageSettings()
         self.quant_settings = QuantizationSettings()
+        self.generation_mode = "photo_stitch"
         # Thread pack UIDs used in this project
         self.active_pack_uids: List[str] = []
         self.modified = False
@@ -409,6 +417,7 @@ class Project:
             'uid': self.uid,
             'name': self.name,
             'source_image_path': self.source_image_path,
+            'generation_mode': self.generation_mode,
             'image_settings': self.image_settings.to_dict(),
             'quant_settings': self.quant_settings.to_dict(),
             'active_pack_uids': self.active_pack_uids,
@@ -434,13 +443,32 @@ class Project:
         with open(filepath, 'r') as f:
             data = json.load(f)
 
-        self.uid = data.get('uid', str(uuid.uuid4())[:8])
-        self.name = data.get('name', 'Untitled')
-        self.source_image_path = data.get('source_image_path', '')
-        self.image_settings = ImageSettings.from_dict(data.get('image_settings', {}))
-        self.quant_settings = QuantizationSettings.from_dict(data.get('quant_settings', {}))
-        self.active_pack_uids = data.get('active_pack_uids', [])
-        self.layers = [Layer.from_dict(ld) for ld in data.get('layers', [])]
+        loaded = Project.from_dict(data)
+        self.uid = loaded.uid
+        self.name = loaded.name
+        self.source_image_path = loaded.source_image_path
+        self.image_settings = loaded.image_settings
+        self.quant_settings = loaded.quant_settings
+        self.generation_mode = loaded.generation_mode
+        self.active_pack_uids = loaded.active_pack_uids
+        self.layers = loaded.layers
+
+        # Restore source image
+        self.source_image = loaded.source_image
+        self.modified = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Project':
+        data = data or {}
+        project = cls()
+        project.uid = data.get('uid', str(uuid.uuid4())[:8])
+        project.name = data.get('name', 'Untitled')
+        project.source_image_path = data.get('source_image_path', '')
+        project.generation_mode = data.get('generation_mode', 'photo_stitch')
+        project.image_settings = ImageSettings.from_dict(data.get('image_settings', {}))
+        project.quant_settings = QuantizationSettings.from_dict(data.get('quant_settings', {}))
+        project.active_pack_uids = data.get('active_pack_uids', [])
+        project.layers = [Layer.from_dict(ld) for ld in data.get('layers', [])]
 
         # Restore source image
         if 'source_image_b64' in data:
@@ -448,9 +476,10 @@ class Project:
             import io
             img_bytes = base64.b64decode(data['source_image_b64'])
             img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-            self.source_image = np.array(img)
+            project.source_image = np.array(img)
 
-        self.modified = False
+        project.modified = False
+        return project
 
 
 # --- RLE Encoding for Masks ---

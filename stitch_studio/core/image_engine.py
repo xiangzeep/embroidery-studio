@@ -373,6 +373,7 @@ class ImageEngine:
         regions: List[Tuple[int, np.ndarray]],
         palette_threads: List[ThreadColor],
         source_image: Optional[np.ndarray] = None,
+        generation_mode: str = "photo_stitch",
     ) -> List[Layer]:
         """Group regions by thread color into layers."""
         layer_map = {}  # thread_idx -> Layer
@@ -411,10 +412,16 @@ class ImageEngine:
                 mask=mask,
             )
             region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
-            region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
-                mask,
-                layer_map[tid].thread_color_rgb,
-            )
+            if generation_mode == "cross_stitch":
+                region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
+                    mask,
+                    source_image,
+                )
+            else:
+                region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                    mask,
+                    layer_map[tid].thread_color_rgb,
+                )
             layer_map[tid].add_region(region)
 
         ImageEngine._merge_tiny_similar_layers(layer_map, image_area)
@@ -653,6 +660,36 @@ class ImageEngine:
             underlay_density=0.25,
             contour_count=1,
             pull_compensation_mm=0.22,
+        )
+
+    @staticmethod
+    def _default_cross_stitch_settings_for_mask(
+        mask: np.ndarray,
+        source_image: Optional[np.ndarray] = None,
+    ) -> StitchSettings:
+        """Choose initial cross-stitch settings for a quantized region."""
+        binary = (mask > 0).astype(np.uint8)
+        area = int(binary.sum())
+        if area <= 0:
+            return StitchSettings(fill_mode="none", underlay=False)
+
+        return StitchSettings(
+            fill_mode="cross_stitch",
+            stitch_length_mm=2.0,
+            stitch_length_min_mm=0.5,
+            stitch_length_max_mm=12.0,
+            row_spacing_mm=2.0,
+            density=1.0,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            cross_method="auto",
+            cross_pattern_size_mm=2.0,
+            cross_coverage=0.5,
+            cross_align_grid=True,
+            cross_grid_offset_x_mm=0.0,
+            cross_grid_offset_y_mm=0.0,
+            cross_detail_boost=0.5,
         )
 
     @staticmethod

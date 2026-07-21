@@ -390,6 +390,7 @@ class MainWindow(QMainWindow):
                 self.canvas.set_background_image(self.project.source_image, size)
                 self.image_panel.set_image_settings(self.project.image_settings)
                 self.image_panel.set_quant_settings(self.project.quant_settings)
+                self.image_panel.set_generation_mode(self.project.generation_mode)
 
             self._refresh_canvas()
             self.status_info.setText(f"Opened: {path}")
@@ -403,6 +404,7 @@ class MainWindow(QMainWindow):
         try:
             self.project.image_settings = self.image_panel.get_image_settings()
             self.project.quant_settings = self.image_panel.get_quant_settings()
+            self.project.generation_mode = self.image_panel.get_generation_mode()
             self.project.save()
             self.status_info.setText(f"Saved: {self.project.filepath}")
         except Exception as e:
@@ -416,6 +418,7 @@ class MainWindow(QMainWindow):
         if path:
             self.project.image_settings = self.image_panel.get_image_settings()
             self.project.quant_settings = self.image_panel.get_quant_settings()
+            self.project.generation_mode = self.image_panel.get_generation_mode()
             self.project.save(path)
             self.status_info.setText(f"Saved: {path}")
 
@@ -482,6 +485,7 @@ class MainWindow(QMainWindow):
             # Get settings
             img_settings = self.image_panel.get_image_settings()
             quant_settings = self.image_panel.get_quant_settings()
+            self.project.generation_mode = self.image_panel.get_generation_mode()
 
             # Process image
             processed = self.image_engine.apply_adjustments(
@@ -512,6 +516,7 @@ class MainWindow(QMainWindow):
                 regions,
                 all_threads,
                 processed,
+                self.project.generation_mode,
             )
             self.project.layers = layers
             self.project.modified = True

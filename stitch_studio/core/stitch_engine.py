@@ -55,7 +55,7 @@ class StitchEngine:
 
         paths: List[List[Tuple[float, float]]] = []
 
-        if settings.underlay and settings.fill_mode != "run":
+        if settings.underlay and settings.fill_mode not in ("run", "cross_stitch"):
             underlay_settings = StitchSettings(
                 fill_mode=settings.fill_mode,
                 angle_deg=settings.angle_deg + settings.underlay_angle_offset,
@@ -69,7 +69,7 @@ class StitchEngine:
                 )
             )
 
-        if settings.contour_count > 0 and settings.fill_mode != "run":
+        if settings.contour_count > 0 and settings.fill_mode not in ("run", "cross_stitch"):
             paths.extend(self._generate_contour_paths(mask, settings, getattr(region, "polygon", None)))
 
         fill_paths = self._dispatch_fill_paths(
@@ -225,7 +225,7 @@ class StitchEngine:
         if mode == "stipple":
             return [self._generate_stipple_fill(mask, settings)]
         if mode == "cross_stitch":
-            return [self._generate_cross_stitch_fill(mask, settings)]
+            return self._generate_cross_stitch_paths(mask, settings, image)
         if mode == "none":
             return []
         return self._generate_scanline_paths(mask, settings, polygon)
@@ -908,31 +908,178 @@ class StitchEngine:
 
     # ========== CROSS-STITCH FILL ==========
 
-    def _generate_cross_stitch_fill(
-        self, mask: np.ndarray, settings: StitchSettings,
-    ) -> List[Tuple[float, float]]:
-        """Grid of X stitches within the mask."""
-        pitch = settings.stitch_length_mm * self.px_per_mm
+    def _cross_stitch_cells(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[Tuple[float, float, float, float]]:
+        cell_w = max(1.0, settings.cross_pattern_size_mm * self.px_per_mm)
+        cell_h = cell_w
+        coverage_threshold = float(np.clip(settings.cross_coverage, 0.0, 1.0))
+        offset_x = settings.cross_grid_offset_x_mm * self.px_per_mm
+        offset_y = settings.cross_grid_offset_y_mm * self.px_per_mm
+
         h, w = mask.shape
-        stitches = []
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return []
 
-        for y in np.arange(0, h, pitch):
-            for x in np.arange(0, w, pitch):
-                ix, iy = int(x), int(y)
-                if ix >= w or iy >= h:
-                    continue
-                if mask[iy, ix] == 0:
-                    continue
+        if settings.cross_align_grid:
+            start_x = offset_x + np.floor((xs.min() - offset_x) / cell_w) * cell_w
+            start_y = offset_y + np.floor((ys.min() - offset_y) / cell_h) * cell_h
+        else:
+            start_x = float(xs.min()) + offset_x
+            start_y = float(ys.min()) + offset_y
 
-                half = pitch / 2
-                # First diagonal
-                stitches.append((x - half, y - half))
-                stitches.append((x + half, y + half))
-                # Second diagonal
-                stitches.append((x + half, y - half))
-                stitches.append((x - half, y + half))
+        end_x = float(xs.max() + 1)
+        end_y = float(ys.max() + 1)
+        cells: List[Tuple[float, float, float, float]] = []
 
-        return stitches
+        y = start_y
+        while y < end_y:
+            x = start_x
+            while x < end_x:
+                ix0 = max(0, int(np.floor(x)))
+                iy0 = max(0, int(np.floor(y)))
+                ix1 = min(w, int(np.ceil(x + cell_w)))
+                iy1 = min(h, int(np.ceil(y + cell_h)))
+                if ix1 > ix0 and iy1 > iy0:
+                    cell_mask = mask[iy0:iy1, ix0:ix1] > 0
+                    coverage = float(np.count_nonzero(cell_mask)) / float(cell_mask.size)
+                    if coverage + 1e-9 >= coverage_threshold:
+                        cells.append((float(x), float(y), float(cell_w), float(cell_h)))
+                x += cell_w
+            y += cell_h
+
+        return cells
+
+    def _cross_stitch_cell_paths(
+        self,
+        cell: Tuple[float, float, float, float],
+        method: str,
+        max_segment_px: float,
+    ) -> List[List[Tuple[float, float]]]:
+        x, y, w, h = cell
+        tl = (x, y)
+        tr = (x + w, y)
+        br = (x + w, y + h)
+        bl = (x, y + h)
+        ml = (x, y + h / 2.0)
+        mt = (x + w / 2.0, y)
+        mr = (x + w, y + h / 2.0)
+        mb = (x + w / 2.0, y + h)
+
+        diagonal_a = [tl, br]
+        diagonal_b = [tr, bl]
+        if "flipped" in method:
+            diagonal_a, diagonal_b = diagonal_b, diagonal_a
+
+        upright_paths = [[ml, mr], [mt, mb]]
+        cross_paths = [diagonal_a, diagonal_b]
+
+        if method.startswith("half"):
+            return [self._segmentized_path(diagonal_a, max_segment_px)]
+        if method.startswith("upright") and "double" not in method and "smyrna" not in method:
+            return [self._segmentized_path(path, max_segment_px) for path in upright_paths]
+        if "double_cross" in method:
+            paths = upright_paths + cross_paths
+            return [self._segmentized_path(path, max_segment_px) for path in paths]
+        if "smyrna" in method:
+            paths = cross_paths + upright_paths
+            return [self._segmentized_path(path, max_segment_px) for path in paths]
+        return [self._segmentized_path(path, max_segment_px) for path in cross_paths]
+
+    def _segmentized_path(
+        self,
+        coords: List[Tuple[float, float]],
+        max_len: float,
+    ) -> List[Tuple[float, float]]:
+        if len(coords) < 2:
+            return coords
+        line = LineString(coords).segmentize(max(max_len, 1e-6))
+        return [(float(x), float(y)) for x, y in line.coords]
+
+    def _generate_cross_stitch_paths(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        image: Optional[np.ndarray] = None,
+    ) -> List[List[Tuple[float, float]]]:
+        method = settings.cross_method
+        if method == "auto":
+            method = self._choose_cross_stitch_method(mask, settings, image)
+        max_segment_px = settings.stitch_length_max_mm * self.px_per_mm
+        cells = self._cross_stitch_cells(mask, settings)
+        paths: List[List[Tuple[float, float]]] = []
+
+        rows = {}
+        for cell in cells:
+            rows.setdefault(round(cell[1], 6), []).append(cell)
+
+        for row_index, row_y in enumerate(sorted(rows)):
+            row = sorted(rows[row_y], key=lambda c: c[0], reverse=bool(row_index % 2))
+            for cell in row:
+                paths.extend(self._cross_stitch_cell_paths(cell, method, max_segment_px))
+
+        if method.startswith("dense_upright"):
+            half = max(1.0, settings.cross_pattern_size_mm * self.px_per_mm / 2.0)
+            dense_settings = StitchSettings.from_dict(settings.to_dict())
+            dense_settings.cross_grid_offset_x_mm += half / self.px_per_mm
+            dense_settings.cross_grid_offset_y_mm += half / self.px_per_mm
+            dense_method = "upright_flipped" if "flipped" in method else "upright"
+            for cell in self._cross_stitch_cells(mask, dense_settings):
+                paths.extend(self._cross_stitch_cell_paths(cell, dense_method, max_segment_px))
+
+        return [path for path in paths if len(path) >= 2]
+
+    def _generate_cross_stitch_fill(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        image: Optional[np.ndarray] = None,
+    ) -> List[Tuple[float, float]]:
+        return [pt for path in self._generate_cross_stitch_paths(mask, settings, image) for pt in path]
+
+    def _choose_cross_stitch_method(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        image: Optional[np.ndarray] = None,
+    ) -> str:
+        binary = mask > 0
+        area = int(np.count_nonzero(binary))
+        if area <= 0:
+            return "cross"
+        ys, xs = np.where(binary)
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        aspect = max(width, height) / max(1, min(width, height))
+        boost = float(np.clip(settings.cross_detail_boost, 0.0, 1.0))
+
+        if image is None or image.shape[:2] != mask.shape:
+            return "cross"
+
+        pixels = image[binary, :3].astype(np.float64)
+        median = np.median(pixels, axis=0)
+        luminance = 0.299 * median[0] + 0.587 * median[1] + 0.114 * median[2]
+        chroma = float(median.max() - median.min())
+        gray = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        contrast = float(np.median(np.hypot(gx[binary], gy[binary]))) if area else 0.0
+        orthogonal = float(np.mean(np.abs(gx[binary]) + np.abs(gy[binary]))) if area else 0.0
+
+        if area <= 24 and contrast >= 28:
+            return "smyrna" if boost >= 0.45 else "cross"
+        if luminance >= 220 and contrast < 24:
+            return "half"
+        if orthogonal >= 42 and aspect >= 1.4:
+            return "upright"
+        if contrast >= 42 and boost >= 0.65:
+            return "dense_upright"
+        if luminance <= 85 or (chroma >= 80 and boost >= 0.45):
+            return "double_cross"
+        return "cross"
 
     # ========== UTILITIES ==========
 

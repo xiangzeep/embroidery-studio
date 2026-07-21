@@ -161,10 +161,15 @@ class BoundaryHandleItem(QGraphicsEllipseItem):
         color: QColor,
         parent=None,
     ):
-        super().__init__(-radius, -radius, radius * 2, radius * 2, parent)
+        hit_radius = max(radius + 3.0, radius * 1.8)
+        super().__init__(-hit_radius, -hit_radius, hit_radius * 2, hit_radius * 2, parent)
         self.editor = editor
         self.index = index
         self.role = role
+        self.visual_radius_scene = float(radius)
+        self.visual_diameter_scene = float(radius) * 2.0
+        self.hit_radius_scene = float(hit_radius)
+        self._visual_rect = QRectF(-radius, -radius, radius * 2, radius * 2)
         self.setPos(pos)
         self.setBrush(QBrush(color))
         pen = QPen(QColor(255, 255, 255))
@@ -175,6 +180,12 @@ class BoundaryHandleItem(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setCursor(Qt.PointingHandCursor)
+
+    def paint(self, painter: QPainter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(self.brush())
+        painter.setPen(self.pen())
+        painter.drawEllipse(self._visual_rect)
 
     def itemChange(self, change, value):
         if (
@@ -386,6 +397,8 @@ class EmbroideryCanvas(QGraphicsView):
         self._show_grid = False
         self._grid_size_mm = 10.0  # grid spacing in mm
         self._base_pan_margin = 200.0
+        self._min_zoom = 0.05
+        self._max_zoom = 40.0
 
         # Scene items
         self._bg_item: Optional[QGraphicsPixmapItem] = None
@@ -577,20 +590,28 @@ class EmbroideryCanvas(QGraphicsView):
         self.zoom_changed.emit(self._zoom)
 
     def zoom_in(self):
-        self.scale(1.2, 1.2)
-        self._zoom *= 1.2
-        self._update_scene_rect_for_panning()
-        self.zoom_changed.emit(self._zoom)
+        self._zoom_by(1.2)
 
     def zoom_out(self):
-        self.scale(1 / 1.2, 1 / 1.2)
-        self._zoom /= 1.2
-        self._update_scene_rect_for_panning()
-        self.zoom_changed.emit(self._zoom)
+        self._zoom_by(1 / 1.2)
 
     def reset_zoom(self):
         self.resetTransform()
         self._zoom = 1.0
+        self._update_scene_rect_for_panning()
+        self.zoom_changed.emit(self._zoom)
+
+    def _zoom_by(self, factor: float):
+        current = self.transform().m11()
+        if current <= 0:
+            current = self._zoom
+        target = float(np.clip(current * factor, self._min_zoom, self._max_zoom))
+        applied = target / current
+        if abs(applied - 1.0) <= 1e-6:
+            return
+        self.scale(applied, applied)
+        self._zoom = self.transform().m11()
+        self._update_scene_rect_for_panning()
         self.zoom_changed.emit(self._zoom)
 
     def select_object(self, uid: str):
@@ -966,13 +987,10 @@ class EmbroideryCanvas(QGraphicsView):
     def wheelEvent(self, event: QWheelEvent):
         factor = 1.15
         if event.angleDelta().y() > 0:
-            self.scale(factor, factor)
-            self._zoom *= factor
+            self._zoom_by(factor)
         else:
-            self.scale(1 / factor, 1 / factor)
-            self._zoom /= factor
-        self._update_scene_rect_for_panning()
-        self.zoom_changed.emit(self._zoom)
+            self._zoom_by(1 / factor)
+        event.accept()
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton and self._left_press_hits_interactive_item(event):
@@ -1016,6 +1034,16 @@ class EmbroideryCanvas(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            item = self._stitch_object_at(event.position().toPoint())
+            if item is not None:
+                self.select_object(item.uid)
+                self.boundary_edit_requested.emit(item.uid)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     @staticmethod
     def _is_pan_gesture(button, modifiers) -> bool:
         return button == Qt.MiddleButton or button == Qt.LeftButton
@@ -1026,6 +1054,15 @@ class EmbroideryCanvas(QGraphicsView):
             if isinstance(item, (ResizeHandleItem, SelectionBoxItem, BoundaryHandleItem, StitchObjectItem)):
                 return True
         return False
+
+    def _stitch_object_at(self, point) -> Optional[StitchObjectItem]:
+        for item in self.items(point):
+            current = item
+            while current is not None:
+                if isinstance(current, StitchObjectItem):
+                    return current
+                current = current.parentItem()
+        return None
 
     def _update_scene_rect_for_panning(self):
         rect = self.scene.itemsBoundingRect()

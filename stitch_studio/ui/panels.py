@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QSlider, QSpinBox, QDoubleSpinBox, QComboBox,
     QCheckBox, QPushButton, QToolButton, QGroupBox, QScrollArea,
+    QButtonGroup,
     QListWidget, QListWidgetItem, QTabWidget, QFileDialog,
     QColorDialog, QLineEdit, QTextEdit, QSplitter, QFrame,
     QTreeWidget, QTreeWidgetItem, QHeaderView, QMenu,
@@ -390,11 +391,14 @@ class LayerPanel(QWidget):
             item = self.layer_tree.topLevelItem(i)
             if item.data(0, Qt.UserRole) == uid:
                 self.layer_tree.setCurrentItem(item)
+                self.layer_tree.scrollToItem(item)
                 return
             for j in range(item.childCount()):
                 child = item.child(j)
                 if child.data(0, Qt.UserRole) == uid:
+                    item.setExpanded(True)
                     self.layer_tree.setCurrentItem(child)
+                    self.layer_tree.scrollToItem(child)
                     return
 
     def _on_item_clicked(self, item, column):
@@ -683,6 +687,60 @@ class PropertiesPanel(QWidget):
         ffl.addWidget(self.slider_flow_smooth, 1, 1)
         layout.addWidget(grp_flow)
 
+        # --- Cross Stitch ---
+        grp_cross = QGroupBox("Cross Stitch")
+        xl = QGridLayout(grp_cross)
+        xl.addWidget(QLabel("Method:"), 0, 0)
+        self.combo_cross_method = QComboBox()
+        self.combo_cross_method.addItems([
+            "auto", "cross", "cross_flipped", "half", "half_flipped",
+            "upright", "upright_flipped", "dense_upright", "dense_upright_flipped",
+            "double_cross", "upright_double_cross", "smyrna", "upright_smyrna",
+        ])
+        self.combo_cross_method.currentTextChanged.connect(self._on_changed)
+        xl.addWidget(self.combo_cross_method, 0, 1)
+
+        xl.addWidget(QLabel("Pattern (mm):"), 1, 0)
+        self.spin_cross_pattern = QDoubleSpinBox()
+        self.spin_cross_pattern.setRange(0.5, 12.0)
+        self.spin_cross_pattern.setSingleStep(0.1)
+        self.spin_cross_pattern.setDecimals(1)
+        self.spin_cross_pattern.valueChanged.connect(self._on_changed)
+        xl.addWidget(self.spin_cross_pattern, 1, 1)
+
+        xl.addWidget(QLabel("Coverage:"), 2, 0)
+        self.spin_cross_coverage = QDoubleSpinBox()
+        self.spin_cross_coverage.setRange(0.05, 1.0)
+        self.spin_cross_coverage.setSingleStep(0.05)
+        self.spin_cross_coverage.setDecimals(2)
+        self.spin_cross_coverage.valueChanged.connect(self._on_changed)
+        xl.addWidget(self.spin_cross_coverage, 2, 1)
+
+        self.chk_cross_align = QCheckBox("Align grid with canvas")
+        self.chk_cross_align.stateChanged.connect(self._on_changed)
+        xl.addWidget(self.chk_cross_align, 3, 0, 1, 2)
+
+        xl.addWidget(QLabel("Offset X:"), 4, 0)
+        self.spin_cross_offset_x = QDoubleSpinBox()
+        self.spin_cross_offset_x.setRange(-50.0, 50.0)
+        self.spin_cross_offset_x.setSingleStep(0.1)
+        self.spin_cross_offset_x.valueChanged.connect(self._on_changed)
+        xl.addWidget(self.spin_cross_offset_x, 4, 1)
+
+        xl.addWidget(QLabel("Offset Y:"), 5, 0)
+        self.spin_cross_offset_y = QDoubleSpinBox()
+        self.spin_cross_offset_y.setRange(-50.0, 50.0)
+        self.spin_cross_offset_y.setSingleStep(0.1)
+        self.spin_cross_offset_y.valueChanged.connect(self._on_changed)
+        xl.addWidget(self.spin_cross_offset_y, 5, 1)
+
+        xl.addWidget(QLabel("Detail Boost:"), 6, 0)
+        self.slider_cross_detail = QSlider(Qt.Horizontal)
+        self.slider_cross_detail.setRange(0, 100)
+        self.slider_cross_detail.valueChanged.connect(self._on_changed)
+        xl.addWidget(self.slider_cross_detail, 6, 1)
+        layout.addWidget(grp_cross)
+
         layout.addStretch()
         scroll.setWidget(container)
 
@@ -717,6 +775,13 @@ class PropertiesPanel(QWidget):
         self.spin_pull.setValue(settings.pull_compensation_mm)
         self.slider_flow_str.setValue(int(settings.flow_strength * 100))
         self.slider_flow_smooth.setValue(int(settings.flow_smoothing * 10))
+        self.combo_cross_method.setCurrentText(settings.cross_method)
+        self.spin_cross_pattern.setValue(settings.cross_pattern_size_mm)
+        self.spin_cross_coverage.setValue(settings.cross_coverage)
+        self.chk_cross_align.setChecked(settings.cross_align_grid)
+        self.spin_cross_offset_x.setValue(settings.cross_grid_offset_x_mm)
+        self.spin_cross_offset_y.setValue(settings.cross_grid_offset_y_mm)
+        self.slider_cross_detail.setValue(int(settings.cross_detail_boost * 100))
 
         self._blocking = False
 
@@ -742,6 +807,13 @@ class PropertiesPanel(QWidget):
         s.pull_compensation_mm = self.spin_pull.value()
         s.flow_strength = self.slider_flow_str.value() / 100.0
         s.flow_smoothing = self.slider_flow_smooth.value() / 10.0
+        s.cross_method = self.combo_cross_method.currentText()
+        s.cross_pattern_size_mm = self.spin_cross_pattern.value()
+        s.cross_coverage = self.spin_cross_coverage.value()
+        s.cross_align_grid = self.chk_cross_align.isChecked()
+        s.cross_grid_offset_x_mm = self.spin_cross_offset_x.value()
+        s.cross_grid_offset_y_mm = self.spin_cross_offset_y.value()
+        s.cross_detail_boost = self.slider_cross_detail.value() / 100.0
 
         self.settings_changed.emit(self._current_uid, s)
 
@@ -825,6 +897,35 @@ class ImagePanel(QWidget):
         sl.addWidget(self.chk_lock_ratio, 2, 0, 1, 2)
         layout.addWidget(grp_size)
 
+        # --- Generation Target ---
+        grp_target = QGroupBox("Generate As")
+        tl = QVBoxLayout(grp_target)
+        mode_row = QHBoxLayout()
+        self.generation_mode_buttons = QButtonGroup(self)
+        self.generation_mode_buttons.setExclusive(True)
+
+        self.btn_photo_stitch = QPushButton("Photo Stitch")
+        self.btn_photo_stitch.setCheckable(True)
+        self.btn_photo_stitch.setChecked(True)
+        self.btn_photo_stitch.setMinimumHeight(34)
+        self.btn_photo_stitch.setToolTip("Continuous fills for smoother photo-like embroidery")
+
+        self.btn_cross_stitch = QPushButton("Cross Stitch")
+        self.btn_cross_stitch.setCheckable(True)
+        self.btn_cross_stitch.setMinimumHeight(34)
+        self.btn_cross_stitch.setToolTip("Grid-based cross stitch generation")
+
+        self.generation_mode_buttons.addButton(self.btn_photo_stitch)
+        self.generation_mode_buttons.addButton(self.btn_cross_stitch)
+        mode_row.addWidget(self.btn_photo_stitch)
+        mode_row.addWidget(self.btn_cross_stitch)
+        tl.addLayout(mode_row)
+
+        self.lbl_generation_hint = QLabel("Continuous photo-style fills")
+        self.lbl_generation_hint.setStyleSheet("color: gray; font-size: 11px;")
+        tl.addWidget(self.lbl_generation_hint)
+        layout.addWidget(grp_target)
+
         # --- Quantization ---
         grp_quant = QGroupBox("Color Quantization")
         ql = QGridLayout(grp_quant)
@@ -867,10 +968,13 @@ class ImagePanel(QWidget):
         self.chk_dither = QCheckBox("Dithering")
         ql.addWidget(self.chk_dither, 6, 0, 1, 2)
 
-        btn_quantize = QPushButton("⟳ Quantize & Segment")
-        btn_quantize.setStyleSheet("font-weight: bold; padding: 8px;")
-        btn_quantize.clicked.connect(self.quantize_requested.emit)
-        ql.addWidget(btn_quantize, 7, 0, 1, 2)
+        self.btn_quantize = QPushButton()
+        self.btn_quantize.setStyleSheet("font-weight: bold; padding: 8px;")
+        self.btn_quantize.clicked.connect(self.quantize_requested.emit)
+        ql.addWidget(self.btn_quantize, 7, 0, 1, 2)
+        self.btn_photo_stitch.toggled.connect(self._on_generation_mode_changed)
+        self.btn_cross_stitch.toggled.connect(self._on_generation_mode_changed)
+        self._on_generation_mode_changed()
 
         layout.addWidget(grp_quant)
         layout.addStretch()
@@ -900,6 +1004,24 @@ class ImagePanel(QWidget):
         q.smooth_regions = self.chk_smooth.isChecked()
         q.dither = self.chk_dither.isChecked()
         return q
+
+    def get_generation_mode(self) -> str:
+        if self.btn_cross_stitch.isChecked():
+            return "cross_stitch"
+        return "photo_stitch"
+
+    def set_generation_mode(self, mode: str):
+        self.btn_cross_stitch.setChecked(mode == "cross_stitch")
+        self.btn_photo_stitch.setChecked(mode != "cross_stitch")
+        self._on_generation_mode_changed()
+
+    def _on_generation_mode_changed(self, *args):
+        if self.get_generation_mode() == "cross_stitch":
+            self.btn_quantize.setText("⟳ Quantize for Cross Stitch")
+            self.lbl_generation_hint.setText("Grid-based output with cross-stitch settings")
+        else:
+            self.btn_quantize.setText("⟳ Quantize for Photo Stitch")
+            self.lbl_generation_hint.setText("Continuous photo-style fills")
 
     def set_image_settings(self, s: ImageSettings):
         self._blocking = True
