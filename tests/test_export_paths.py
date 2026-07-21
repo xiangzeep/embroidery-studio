@@ -128,6 +128,11 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(panel.chk_preserve_details.isChecked())
         self.assertEqual(panel.chk_auto_design_colors.text(), "自动高保真配色")
         self.assertTrue(panel.chk_auto_design_colors.isChecked())
+        self.assertEqual(panel.spin_colors.value(), 12)
+        self.assertIn(
+            "实体绣线颜色上限:",
+            {label.text() for label in panel.findChildren(qt_widgets.QLabel)},
+        )
         self.assertEqual(panel.spin_design_colors.maximum(), 128)
         self.assertEqual(panel.slider_detail_sensitivity.value(), 65)
 
@@ -2176,6 +2181,37 @@ class ExportPathTests(unittest.TestCase):
         pattern = export_mod.ExportEngine().build_pattern(project)
         commands = [cmd for _, _, cmd in pattern.stitches]
 
+        self.assertEqual(commands.count(pyembroidery.JUMP), 1)
+
+    def test_export_spatially_orders_merged_cross_stitch_shades(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        for index, x_positions in enumerate(((0, 40, 80), (20, 60, 100))):
+            layer = project_mod.Layer(
+                thread_uid="shared-thread",
+                thread_color_rgb=(20 + index, 100, 200),
+                matched_thread_rgb=(20, 100, 200),
+                order=index,
+            )
+            region = project_mod.Region()
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_pattern_size_mm=2.0,
+            )
+            region.stitch_paths = [
+                [(float(x), 0.0), (float(x), 10.0)]
+                for x in x_positions
+            ]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [command for _, _, command in pattern.stitches]
+
+        self.assertEqual(len(pattern.threadlist), 1)
         self.assertEqual(commands.count(pyembroidery.JUMP), 1)
 
     def test_export_uses_scaled_region_stitch_paths(self):

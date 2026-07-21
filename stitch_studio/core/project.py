@@ -365,7 +365,7 @@ class ImageSettings:
 @dataclass
 class QuantizationSettings:
     """Settings for color quantization."""
-    n_colors: int = 16
+    n_colors: int = 12
     method: str = "kmeans_lab"  # "kmeans_lab", "median_cut", "octree"
     dither: bool = False
     include_background: bool = False

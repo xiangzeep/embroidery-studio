@@ -77,9 +77,26 @@ class ExportEngine:
                     last_y or 0,
                 )
 
-            for region, paths in region_paths:
-                for path in self._order_region_paths(region, paths, last_x, last_y):
+            if region_paths and all(
+                region.stitch_settings.fill_mode == "cross_stitch"
+                for region, _ in region_paths
+            ):
+                ordered_paths = self._order_cross_stitch_group_paths(
+                    region_paths,
+                    last_x,
+                    last_y,
+                )
+                for path in ordered_paths:
                     last_x, last_y = self._write_path(pattern, path, last_x, last_y)
+            else:
+                for region, paths in region_paths:
+                    for path in self._order_region_paths(region, paths, last_x, last_y):
+                        last_x, last_y = self._write_path(
+                            pattern,
+                            path,
+                            last_x,
+                            last_y,
+                        )
 
         # End pattern
         pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
@@ -426,6 +443,44 @@ class ExportEngine:
             ordered.append(candidate)
             current = candidate[-1]
         return ordered
+
+    def _order_cross_stitch_group_paths(
+        self,
+        region_paths,
+        last_x: Optional[int],
+        last_y: Optional[int],
+    ) -> List[List[Tuple[float, float]]]:
+        """Spatially order all shades assigned to one physical cross-stitch thread."""
+        flattened = []
+        cell_sizes = []
+        for region, paths in region_paths:
+            cell_sizes.append(
+                max(1.0, float(region.stitch_settings.cross_pattern_size_mm) * 10.0)
+            )
+            for path in paths:
+                if len(path) < 2:
+                    continue
+                center_x = (path[0][0] + path[-1][0]) * 0.5
+                center_y = (path[0][1] + path[-1][1]) * 0.5
+                flattened.append((center_x, center_y, path))
+        if not flattened:
+            return []
+
+        row_height = float(np.median(cell_sizes)) if cell_sizes else 20.0
+        rows = {}
+        for center_x, center_y, path in flattened:
+            row = int(np.floor(center_y / max(1.0, row_height) + 0.5))
+            rows.setdefault(row, []).append((center_x, center_y, path))
+
+        spatial = []
+        for row_index, row in enumerate(sorted(rows)):
+            entries = sorted(
+                rows[row],
+                key=lambda entry: (entry[0], entry[1]),
+                reverse=bool(row_index % 2),
+            )
+            spatial.extend(path for _, _, path in entries)
+        return self._order_paths_linear(spatial, last_x, last_y)
 
     def _write_path(
         self,

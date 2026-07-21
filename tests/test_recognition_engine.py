@@ -13,6 +13,9 @@ from stitch_studio.core.thread_db import ThreadColor
 
 
 class RecognitionMetricTests(unittest.TestCase):
+    def test_beginner_default_limits_physical_thread_count(self):
+        self.assertEqual(QuantizationSettings().n_colors, 12)
+
     def test_identical_image_has_perfect_recognition_metrics(self):
         image = np.array(
             [[[10, 20, 30], [220, 210, 200]]],
@@ -118,6 +121,41 @@ class DetailRecognitionTests(unittest.TestCase):
 
 
 class ThreadSuggestionTests(unittest.TestCase):
+    def test_physical_thread_matches_respect_requested_color_limit(self):
+        colors = [
+            (12, 18, 24),
+            (245, 245, 240),
+            (210, 35, 45),
+            (35, 170, 75),
+            (30, 90, 210),
+            (235, 190, 30),
+        ]
+        image = np.zeros((24, 24, 3), dtype=np.uint8)
+        for index, color in enumerate(colors):
+            image[:, index * 4:(index + 1) * 4] = color
+        threads = [
+            ThreadColor(name=f"Thread {index}", color_rgb=color)
+            for index, color in enumerate(colors)
+        ]
+        settings = QuantizationSettings(
+            n_colors=4,
+            design_color_budget=6,
+            auto_design_colors=False,
+            preserve_details=True,
+            include_background=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+        matched = {
+            color.nearest_thread_index
+            for color in result.design_colors
+            if color.nearest_thread_index is not None
+        }
+
+        self.assertLessEqual(len(matched), 4)
+        darkest = min(result.design_colors, key=lambda color: sum(color.color_rgb))
+        self.assertEqual(darkest.nearest_thread_index, 0)
+
     def test_close_design_colors_remain_distinct_when_thread_match_is_shared(self):
         image = np.zeros((20, 20, 3), dtype=np.uint8)
         image[:, :10] = (30, 140, 205)

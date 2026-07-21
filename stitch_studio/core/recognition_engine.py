@@ -126,13 +126,24 @@ class RecognitionEngine:
         reconstructed = centers_rgb[design_map]
 
         palette_lab = cls._physical_palette_lab(physical_threads)
+        pixel_counts = np.bincount(
+            design_map.reshape(-1),
+            minlength=len(centers_rgb),
+        )
+        thread_matches = cls._match_threads_with_budget(
+            centers_rgb,
+            pixel_counts,
+            detail_design_ids,
+            palette_lab,
+            int(getattr(settings, "n_colors", len(physical_threads))),
+        )
         design_colors = []
         for design_id, color in enumerate(centers_rgb):
-            nearest_idx, nearest_delta = cls._nearest_thread(color, palette_lab)
+            nearest_idx, nearest_delta = thread_matches[design_id]
             design_colors.append(DesignColor(
                 design_id=design_id,
                 color_rgb=tuple(int(channel) for channel in color),
-                pixel_count=int(np.count_nonzero(design_map == design_id)),
+                pixel_count=int(pixel_counts[design_id]),
                 nearest_thread_index=nearest_idx,
                 nearest_thread_delta_e=nearest_delta,
             ))
@@ -271,6 +282,76 @@ class RecognitionEngine:
         )[0]
         index = int(np.argmin(distances))
         return index, float(distances[index])
+
+    @classmethod
+    def _match_threads_with_budget(
+        cls,
+        design_colors: np.ndarray,
+        pixel_counts: np.ndarray,
+        detail_design_ids,
+        palette_lab: np.ndarray,
+        color_limit: int,
+    ):
+        """Limit physical spools while retaining high-resolution design colors."""
+        if palette_lab.size == 0:
+            return [(None, None) for _ in design_colors]
+
+        design_lab = rgb2lab(
+            design_colors.reshape(1, -1, 3).astype(np.float64) / 255.0
+        )[0]
+        distances = deltaE_ciede2000(
+            design_lab.reshape(-1, 1, 3),
+            palette_lab.reshape(1, -1, 3),
+        )
+        nearest = np.argmin(distances, axis=1)
+        limit = max(1, min(int(color_limit), palette_lab.shape[0]))
+        unique_nearest = np.unique(nearest)
+        if unique_nearest.size <= limit:
+            return [
+                (int(index), float(distances[design_id, index]))
+                for design_id, index in enumerate(nearest)
+            ]
+
+        detail_ids = set(int(index) for index in detail_design_ids)
+        scores = {}
+        for design_id, thread_index in enumerate(nearest):
+            weight = float(pixel_counts[design_id])
+            if design_id in detail_ids:
+                weight *= 4.0
+            scores[int(thread_index)] = scores.get(int(thread_index), 0.0) + weight
+
+        luminance = (
+            design_colors[:, 0] * 0.299
+            + design_colors[:, 1] * 0.587
+            + design_colors[:, 2] * 0.114
+        )
+        required = [
+            int(nearest[int(np.argmin(luminance))]),
+            int(nearest[int(np.argmax(luminance))]),
+        ]
+        detail_candidates = sorted(
+            {int(nearest[index]) for index in detail_ids},
+            key=lambda index: (-scores.get(index, 0.0), index),
+        )
+        ranked = sorted(scores, key=lambda index: (-scores[index], index))
+
+        selected = []
+        for index in required + detail_candidates + ranked:
+            if index not in selected:
+                selected.append(index)
+            if len(selected) >= limit:
+                break
+
+        selected_array = np.asarray(selected, dtype=np.int32)
+        selected_distances = distances[:, selected_array]
+        selected_positions = np.argmin(selected_distances, axis=1)
+        return [
+            (
+                int(selected_array[position]),
+                float(selected_distances[design_id, position]),
+            )
+            for design_id, position in enumerate(selected_positions)
+        ]
 
     @staticmethod
     def detect_fine_details(
