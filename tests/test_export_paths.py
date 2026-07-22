@@ -759,6 +759,64 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(modes["Black"], "run")
         self.assertEqual(modes["Dark Green"], "run")
 
+    def test_photo_layers_underpaint_run_details_with_adjacent_fills(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            thread_mod.ThreadColor(name="Blue", color_rgb=(30, 120, 210)),
+        ]
+        coral = np.zeros((30, 40), dtype=np.uint8)
+        coral[:, :19] = 255
+        outline = np.zeros((30, 40), dtype=np.uint8)
+        outline[:, 19:21] = 255
+        blue = np.zeros((30, 40), dtype=np.uint8)
+        blue[:, 21:] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, coral), (1, outline), (2, blue)],
+            palette,
+            generation_mode="photo_stitch",
+        )
+
+        run_mask = np.zeros(outline.shape, dtype=bool)
+        fill_mask = np.zeros(outline.shape, dtype=bool)
+        for layer in layers:
+            for region in layer.regions:
+                if region.stitch_settings.fill_mode == "run":
+                    run_mask |= region.mask > 0
+                elif region.stitch_settings.fill_mode == "scanline":
+                    fill_mask |= region.mask > 0
+
+        self.assertTrue(np.all(fill_mask[run_mask]))
+
+    def test_cross_stitch_layers_remain_non_overlapping(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+
+        palette = [
+            thread_mod.ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            thread_mod.ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        left = np.zeros((20, 20), dtype=np.uint8)
+        left[:, :10] = 255
+        right = np.zeros((20, 20), dtype=np.uint8)
+        right[:, 10:] = 255
+
+        layers = image_mod.ImageEngine.build_layers_from_regions(
+            [(0, left), (1, right)],
+            palette,
+            generation_mode="cross_stitch",
+        )
+
+        coverage = np.zeros(left.shape, dtype=np.uint8)
+        for layer in layers:
+            for region in layer.regions:
+                coverage += (region.mask > 0).astype(np.uint8)
+        self.assertEqual(int(coverage.max()), 1)
+
     def test_cross_stitch_generation_mode_sets_region_defaults_to_cross_stitch(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
@@ -1112,6 +1170,24 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(item.flags() & canvas_mod.QGraphicsItem.ItemIsSelectable)
         self.assertEqual(selected[-1], "region-1")
 
+    def test_canvas_stitch_layer_respects_visual_stack_z_value(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        region_data = [{
+            "uid": "outline-region",
+            "points": [(0.0, 0.0), (10.0, 0.0)],
+            "paths": [[(0.0, 0.0), (10.0, 0.0)]],
+            "color": (0, 0, 0),
+        }]
+
+        canvas.set_layer_stitches("outline", region_data, z_value=20.0)
+        app.processEvents()
+
+        self.assertEqual(canvas._layer_groups["outline"].zValue(), 20.0)
+
     def test_canvas_stitch_items_use_device_cache_for_large_design_interaction(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
         canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
@@ -1162,6 +1238,23 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertIs(first, second)
         self.assertEqual(first.elementCount(), 5)
+
+    def test_canvas_dark_thread_preview_stays_visible_on_dark_background(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        item = canvas_mod.StitchPreviewItem(
+            [[(0.0, 0.0), (10.0, 0.0)]],
+            canvas_mod.QColor(0, 0, 0),
+        )
+
+        overview = item._overview_color()
+        highlight = item._highlight_color()
+
+        self.assertEqual(item.color.getRgb()[:3], (0, 0, 0))
+        self.assertGreaterEqual(overview.lightness(), 90)
+        self.assertGreaterEqual(highlight.lightness(), 105)
 
     def test_canvas_arrow_key_moves_selected_stitch_object(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")

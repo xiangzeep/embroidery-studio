@@ -523,6 +523,8 @@ class ImageEngine:
         ImageEngine._merge_tiny_similar_layers(layer_map, image_area)
         if source_image is not None:
             ImageEngine._apply_source_region_colors(layer_map, source_image)
+        if generation_mode != "cross_stitch":
+            ImageEngine._underpaint_run_details(layer_map.values())
 
         # The layer panel follows the usual visual-stack convention: small
         # details sit above broad fills. Export reverses this order so broad
@@ -632,6 +634,10 @@ class ImageEngine:
                 )
             layer.add_region(region)
 
+        if generation_mode != "cross_stitch":
+            for layer in layer_map.values():
+                ImageEngine._reclassify_photo_layer_components(layer)
+            ImageEngine._underpaint_run_details(layer_map.values())
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
         for order, layer in enumerate(layers):
             layer.order = order
@@ -712,7 +718,151 @@ class ImageEngine:
     def _layer_sort_key(layer: Layer) -> Tuple[int, int]:
         area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
         is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
-        return (area, 0 if is_black_detail else 1)
+        has_run_detail = any(
+            region.stitch_settings.fill_mode == "run"
+            for region in layer.regions
+        )
+        return (0 if has_run_detail or is_black_detail else 1, area)
+
+    @staticmethod
+    def _reclassify_photo_layer_components(layer: Layer):
+        """Choose fill or running stitches after merging physical thread shades."""
+        masks = [region.mask for region in layer.regions if region.mask is not None]
+        if not masks:
+            return
+
+        shape = masks[0].shape
+        source_regions = [
+            region
+            for region in layer.regions
+            if region.mask is not None and region.mask.shape == shape
+        ]
+        if not source_regions:
+            return
+
+        combined = np.zeros(shape, dtype=np.uint8)
+        for region in source_regions:
+            combined[region.mask > 0] = 1
+
+        component_count, labels = cv2.connectedComponents(combined, connectivity=8)
+        mode_masks = {}
+        mode_settings = {}
+        for label in range(1, component_count):
+            component = labels == label
+            if not np.any(component):
+                continue
+            component_mask = component.astype(np.uint8) * 255
+            stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                component_mask,
+                layer.thread_color_rgb,
+            )
+            mode = stitch_settings.fill_mode
+            if mode not in ("run", "scanline"):
+                mode = "scanline"
+            if mode not in mode_masks:
+                mode_masks[mode] = np.zeros(shape, dtype=np.uint8)
+                mode_settings[mode] = stitch_settings
+            mode_masks[mode][component] = 255
+
+        rebuilt_regions = []
+        for mode in ("scanline", "run"):
+            mask = mode_masks.get(mode)
+            if mask is None or not np.any(mask):
+                continue
+
+            contributors = [
+                region
+                for region in source_regions
+                if np.any((region.mask > 0) & (mask > 0))
+            ]
+            design_ids = {region.design_color_id for region in contributors}
+            design_rgbs = {region.design_color_rgb for region in contributors}
+            deltas = [
+                region.thread_match_delta_e
+                for region in contributors
+                if region.thread_match_delta_e is not None
+            ]
+            is_detail = any(region.is_detail_region for region in contributors)
+            region = Region(
+                name=(
+                    f"{layer.name} fill"
+                    if mode == "scanline"
+                    else f"{layer.name} outline"
+                ),
+                mask=mask,
+                design_color_id=(next(iter(design_ids)) if len(design_ids) == 1 else None),
+                design_color_rgb=(next(iter(design_rgbs)) if len(design_rgbs) == 1 else None),
+                thread_match_delta_e=(max(deltas) if deltas else None),
+                is_detail_region=is_detail,
+                stitch_settings=mode_settings[mode],
+            )
+            region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
+            rebuilt_regions.append(region)
+
+        if rebuilt_regions:
+            layer.regions = rebuilt_regions
+
+    @staticmethod
+    def _underpaint_run_details(layers):
+        """Extend adjacent fills beneath running-stitch detail masks."""
+        layers = list(layers)
+        shape = next(
+            (
+                region.mask.shape
+                for layer in layers
+                for region in layer.regions
+                if region.mask is not None
+            ),
+            None,
+        )
+        if shape is None:
+            return
+
+        run_union = np.zeros(shape, dtype=np.uint8)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is not None
+                    and region.mask.shape == shape
+                    and region.stitch_settings.fill_mode == "run"
+                ):
+                    run_union[region.mask > 0] = 255
+        if not np.any(run_union):
+            return
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        run_pixels = run_union > 0
+        for layer in layers:
+            fill_regions = [
+                region
+                for region in layer.regions
+                if (
+                    region.mask is not None
+                    and region.mask.shape == shape
+                    and region.stitch_settings.fill_mode == "scanline"
+                )
+            ]
+            if not fill_regions:
+                continue
+
+            combined = np.zeros(shape, dtype=np.uint8)
+            for region in fill_regions:
+                combined[region.mask > 0] = 255
+            adjacent_underpaint = (
+                cv2.dilate(combined, kernel, iterations=2) > 0
+            ) & run_pixels
+            if not np.any(adjacent_underpaint):
+                continue
+
+            target = max(fill_regions, key=lambda region: np.count_nonzero(region.mask))
+            target.mask = np.maximum(
+                target.mask,
+                adjacent_underpaint.astype(np.uint8) * 255,
+            )
+            target.polygon = GeometryEngine.reconstruct_region_polygon(
+                target.mask,
+                simplify=False,
+            )
 
     @staticmethod
     def _merge_tiny_similar_layers(layer_map: Dict[int, Layer], image_area: int):

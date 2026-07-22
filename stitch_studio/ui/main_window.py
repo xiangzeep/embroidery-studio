@@ -1267,7 +1267,11 @@ class MainWindow(QMainWindow):
 
         regions_data = self._layer_regions_data(layer)
         if regions_data:
-            self.canvas.set_layer_stitches(layer.uid, regions_data)
+            self.canvas.set_layer_stitches(
+                layer.uid,
+                regions_data,
+                z_value=100.0 - float(layer.order),
+            )
         elif hasattr(self.canvas, "clear_layer_stitches"):
             self.canvas.clear_layer_stitches(layer.uid)
 

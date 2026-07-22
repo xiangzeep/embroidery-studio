@@ -173,12 +173,7 @@ class StitchPreviewItem(QGraphicsItem):
         painter.drawPath(visible_path)
 
         # thread highlight: thin upper-left pass gives stitches a raised look.
-        highlight = QColor(
-            min(255, int(self.color.red() * 1.25 + 28)),
-            min(255, int(self.color.green() * 1.25 + 28)),
-            min(255, int(self.color.blue() * 1.25 + 28)),
-            145,
-        )
+        highlight = self._highlight_color()
         highlight_pen = QPen(highlight)
         highlight_pen.setWidthF(max(0.18, width * 0.28))
         highlight_pen.setCapStyle(Qt.RoundCap)
@@ -189,13 +184,43 @@ class StitchPreviewItem(QGraphicsItem):
         painter.translate(width * 0.16, width * 0.18)
 
     def _paint_fast_overview(self, painter: QPainter, path: QPainterPath):
-        color = QColor(self.color)
-        color.setAlpha(210)
+        color = self._overview_color()
         pen = QPen(color)
         pen.setWidthF(0.9)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
         painter.drawPath(path)
+
+    def _overview_color(self) -> QColor:
+        """Keep dark thread recognizable without changing its export color."""
+        color = QColor(self.color)
+        if color.lightness() < 90:
+            lift = 90 - color.lightness()
+            color.setRgb(
+                min(255, color.red() + lift),
+                min(255, color.green() + lift),
+                min(255, color.blue() + lift),
+                230,
+            )
+        else:
+            color.setAlpha(210)
+        return color
+
+    def _highlight_color(self) -> QColor:
+        if self.color.lightness() < 72:
+            lift = 112 - self.color.lightness()
+            return QColor(
+                min(255, self.color.red() + lift),
+                min(255, self.color.green() + lift),
+                min(255, self.color.blue() + lift),
+                180,
+            )
+        return QColor(
+            min(255, int(self.color.red() * 1.25 + 28)),
+            min(255, int(self.color.green() * 1.25 + 28)),
+            min(255, int(self.color.blue() * 1.25 + 28)),
+            145,
+        )
 
     def _path_for_stride(self, stride: int) -> QPainterPath:
         stride = max(1, int(stride))
@@ -586,7 +611,12 @@ class EmbroideryCanvas(QGraphicsView):
         self._update_scene_rect_for_panning()
         self.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
 
-    def set_layer_stitches(self, layer_uid: str, regions_data: List[dict]):
+    def set_layer_stitches(
+        self,
+        layer_uid: str,
+        regions_data: List[dict],
+        z_value: float = 0.0,
+    ):
         """
         Set stitch paths for a layer.
         regions_data: list of {'uid': str, 'points': [(x,y),...], 'color': (r,g,b)}
@@ -601,7 +631,7 @@ class EmbroideryCanvas(QGraphicsView):
                 del self._object_layers[uid]
 
         group = QGraphicsItemGroup()
-        group.setZValue(0)
+        group.setZValue(z_value)
         group.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
         self.scene.addItem(group)
 

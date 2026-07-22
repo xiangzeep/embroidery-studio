@@ -6,7 +6,12 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from stitch_studio.core.recognition_engine import RecognitionEngine
+from stitch_studio.core.recognition_engine import (
+    DesignColor,
+    RecognitionEngine,
+    RecognitionMetrics,
+    RecognitionResult,
+)
 from stitch_studio.core.image_engine import ImageEngine
 from stitch_studio.core.project import QuantizationSettings
 from stitch_studio.core.thread_db import ThreadColor
@@ -156,7 +161,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         darkest = min(result.design_colors, key=lambda color: sum(color.color_rgb))
         self.assertEqual(darkest.nearest_thread_index, 0)
 
-    def test_close_design_colors_share_one_thread_layer_but_keep_editable_regions(self):
+    def test_close_design_colors_share_one_thread_layer_and_geometry_region(self):
         image = np.zeros((20, 20, 3), dtype=np.uint8)
         image[:, :10] = (30, 140, 205)
         image[:, 10:] = (38, 149, 212)
@@ -180,11 +185,98 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(len(result.design_colors), 2)
         self.assertEqual(len(layers), 1)
         self.assertEqual(layers[0].thread_uid, threads[0].uid)
-        self.assertEqual(len(layers[0].regions), 2)
-        self.assertEqual(
-            len({region.design_color_rgb for region in layers[0].regions}),
-            2,
+        self.assertEqual(len(layers[0].regions), 1)
+        self.assertTrue(np.all(layers[0].regions[0].mask > 0))
+        self.assertEqual(layers[0].regions[0].stitch_settings.fill_mode, "scanline")
+
+    def test_recognition_photo_layers_underpaint_outline_pixels(self):
+        design_map = np.zeros((30, 40), dtype=np.int32)
+        design_map[:, 19:21] = 1
+        design_map[:, 21:] = 2
+        detail_mask = design_map == 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="Blue", color_rgb=(30, 120, 210)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), 570, 0, 0.0),
+                DesignColor(1, (0, 0, 0), 60, 1, 0.0),
+                DesignColor(2, (30, 120, 210), 570, 2, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((30, 40, 3), dtype=np.uint8),
+            detail_mask=detail_mask,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
         )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        run_mask = np.zeros(design_map.shape, dtype=bool)
+        fill_mask = np.zeros(design_map.shape, dtype=bool)
+        for layer in layers:
+            for region in layer.regions:
+                if region.stitch_settings.fill_mode == "run":
+                    run_mask |= region.mask > 0
+                elif region.stitch_settings.fill_mode == "scanline":
+                    fill_mask |= region.mask > 0
+        self.assertTrue(np.all(fill_mask[run_mask]))
+
+    def test_recognition_reclassifies_joined_thread_components_by_geometry(self):
+        design_map = np.zeros((36, 48), dtype=np.int32)
+        design_map[8:22, 12:15] = 1
+        design_map[8:22, 15:18] = 2
+        design_map[26:28, 25:43] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), 1654, 0, 0.0),
+                DesignColor(1, (6, 6, 6), 78, 1, 0.0),
+                DesignColor(2, (35, 20, 18), 42, 1, 1.0),
+            ],
+            reconstructed_rgb=np.zeros((36, 48, 3), dtype=np.uint8),
+            detail_mask=design_map > 0,
+            detail_design_ids=(1, 2),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        self.assertEqual(
+            {region.stitch_settings.fill_mode for region in black.regions},
+            {"scanline", "run"},
+        )
+        self.assertLessEqual(len(black.regions), 2)
+        fill_mask = next(
+            region.mask > 0
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "scanline"
+        )
+        run_mask = next(
+            region.mask > 0
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "run"
+        )
+        self.assertTrue(np.all(fill_mask[8:22, 12:18]))
+        self.assertTrue(np.all(run_mask[26:28, 25:43]))
+        self.assertFalse(np.any(run_mask[8:22, 12:18]))
 
     def test_layer_recognition_metadata_survives_serialization(self):
         image = np.full((8, 8, 3), (80, 120, 160), dtype=np.uint8)

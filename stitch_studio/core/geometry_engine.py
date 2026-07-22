@@ -15,6 +15,7 @@ class GeometryEngine:
     def reconstruct_region_polygon(
         mask: np.ndarray,
         compensation_px: float = 0.0,
+        simplify: bool = True,
     ) -> Optional[Any]:
         binary = np.asarray(mask) > 0
         if not np.any(binary):
@@ -45,8 +46,11 @@ class GeometryEngine:
             if not (0 <= x < width and 0 <= y < height and binary[y, x]):
                 continue
 
-            epsilon = max(0.25, min(0.9, 0.006 * face.exterior.length))
-            simplified = face.simplify(epsilon, preserve_topology=True)
+            if simplify:
+                epsilon = max(0.25, min(0.9, 0.006 * face.exterior.length))
+                simplified = face.simplify(epsilon, preserve_topology=True)
+            else:
+                simplified = face
             if not simplified.is_empty:
                 polygons.append(simplified)
 
