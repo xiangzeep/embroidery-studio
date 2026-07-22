@@ -616,7 +616,7 @@ class StitchEngine:
     def _generate_satin_paths(
         self, mask: np.ndarray, settings: StitchSettings,
     ) -> List[List[Tuple[float, float]]]:
-        """Generate one satin path per disconnected border component."""
+        """Generate independent satin paths for every skeleton branch."""
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             (mask > 0).astype(np.uint8), connectivity=8
         )
@@ -625,56 +625,71 @@ class StitchEngine:
             if int(stats[label, cv2.CC_STAT_AREA]) < 2:
                 continue
             component = (labels == label).astype(np.uint8) * 255
-            path = self._generate_satin_fill(component, settings)
-            if len(path) >= 2:
-                paths.append(path)
+            paths.extend(self._generate_satin_component_paths(component, settings))
         return paths
 
     def _generate_satin_fill(
         self, mask: np.ndarray, settings: StitchSettings,
     ) -> List[Tuple[float, float]]:
-        """Satin stitch: zigzag perpendicular to medial axis/skeleton."""
+        """Legacy single-path satin entry point."""
+        paths = self._generate_satin_component_paths(mask, settings)
+        return max(paths, key=len) if paths else []
+
+    def _generate_satin_component_paths(
+        self, mask: np.ndarray, settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Trace satin along topology-safe skeleton edges.
+
+        Branches deliberately remain separate paths. Exporters then insert a
+        jump between them instead of sewing a diagonal across empty fabric.
+        """
         from skimage.morphology import skeletonize
 
         skeleton = skeletonize(mask > 0)
-        ys, xs = np.where(skeleton)
-        if len(xs) < 2:
-            return self._generate_scanline_fill(mask, settings)
-
-        # Order skeleton points by walking along the path
-        spine_pts = self._order_skeleton_points(xs, ys)
-        if len(spine_pts) < 2:
-            return self._generate_scanline_fill(mask, settings)
+        raw_spines = self._trace_skeleton_component(skeleton)
+        if not raw_spines:
+            fallback = self._generate_scanline_fill(mask, settings)
+            return [fallback] if len(fallback) >= 2 else []
 
         width_px = settings.row_spacing_mm * self.px_per_mm * 10  # satin width
-        stitch_spacing = max(0.35, settings.stitch_length_mm * self.px_per_mm)
-        spine_pts = self._resample_line(spine_pts, stitch_spacing)
-        if len(spine_pts) < 2:
-            return self._generate_scanline_fill(mask, settings)
-
+        stitch_spacing = max(0.20, settings.stitch_length_mm * self.px_per_mm)
         dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-        stitches = []
+        paths = []
 
-        for i, (x0, y0) in enumerate(spine_pts):
-            prev = spine_pts[max(0, i - 1)]
-            nxt = spine_pts[min(len(spine_pts) - 1, i + 1)]
+        for raw_spine in raw_spines:
+            if len(raw_spine) < 2:
+                continue
+            spine_pts = self._resample_line(raw_spine, stitch_spacing)
+            if len(spine_pts) < 2:
+                continue
 
-            # Perpendicular direction
-            dx, dy = nxt[0] - prev[0], nxt[1] - prev[1]
-            length = np.hypot(dx, dy) + 1e-8
-            perp_x, perp_y = -dy / length, dx / length
+            stitches = []
+            for i, (x0, y0) in enumerate(spine_pts):
+                prev = spine_pts[max(0, i - 1)]
+                nxt = spine_pts[min(len(spine_pts) - 1, i + 1)]
+                dx, dy = nxt[0] - prev[0], nxt[1] - prev[1]
+                length = np.hypot(dx, dy) + 1e-8
+                perp_x, perp_y = -dy / length, dx / length
 
-            # Determine actual width at this point from mask distance transform
-            ix, iy = int(np.clip(x0, 0, mask.shape[1] - 1)), int(np.clip(y0, 0, mask.shape[0] - 1))
-            local_width = min(dt[iy, ix] * 2, width_px)
+                ix = int(np.clip(round(x0), 0, mask.shape[1] - 1))
+                iy = int(np.clip(round(y0), 0, mask.shape[0] - 1))
+                local_width = min(dt[iy, ix] * 2, width_px)
+                if local_width <= 0:
+                    continue
 
-            # Left and right stitch points
-            left = (x0 - perp_x * local_width / 2, y0 - perp_y * local_width / 2)
-            right = (x0 + perp_x * local_width / 2, y0 + perp_y * local_width / 2)
-            stitches.append(left)
-            stitches.append(right)
+                stitches.append((
+                    x0 - perp_x * local_width / 2,
+                    y0 - perp_y * local_width / 2,
+                ))
+                stitches.append((
+                    x0 + perp_x * local_width / 2,
+                    y0 + perp_y * local_width / 2,
+                ))
 
-        return stitches
+            if len(stitches) >= 2:
+                paths.append(stitches)
+
+        return paths
 
     # ========== RUN STITCH ==========
 
@@ -696,17 +711,25 @@ class StitchEngine:
         n_labels, labels = cv2.connectedComponents(skeleton, connectivity=8)
         stitch_len_px = settings.stitch_length_mm * self.px_per_mm
         min_len_px = max(1.5, 0.45 * self.px_per_mm)
-        raw_paths: List[List[Tuple[float, float]]] = []
+        raw_components: List[List[List[Tuple[float, float]]]] = []
 
         for lbl in range(1, n_labels):
             component = labels == lbl
             if int(component.sum()) < 2:
                 continue
 
-            raw_paths.extend(self._trace_skeleton_component(component))
+            raw_components.append(self._trace_skeleton_component(component))
 
         components = [(path, True) for path in loop_paths]
-        components.extend((path, False) for path in self._assemble_run_components(raw_paths, mask))
+        for raw_paths in raw_components:
+            component_mask = np.zeros_like(mask, dtype=np.uint8)
+            for raw_path in raw_paths:
+                for x, y in raw_path:
+                    component_mask[int(y), int(x)] = 255
+            components.extend(
+                (path, False)
+                for path in self._assemble_run_components(raw_paths, component_mask)
+            )
         paths: List[List[Tuple[float, float]]] = []
 
         for raw, forced_closed in components:
@@ -732,7 +755,7 @@ class StitchEngine:
             if len(resampled) >= 2:
                 paths.append(resampled)
 
-        return self._merge_close_run_paths(paths, max_gap_px=2.4 * self.px_per_mm)
+        return paths
 
     def _restore_line_art_run_mask(
         self,

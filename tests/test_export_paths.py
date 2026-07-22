@@ -520,6 +520,25 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0][0], paths[0][-1])
 
+    def test_disconnected_run_strokes_remain_separate_jump_paths(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((30, 50), dtype=np.uint8)
+        mask[14, 5:20] = 255
+        mask[14, 25:42] = 255
+        region = project_mod.Region(mask=mask)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.6,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 2)
+
     def test_segmentation_skips_border_background(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -2186,6 +2205,32 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertGreater(len(dense_path), len(sparse_path) * 2)
 
+    def test_branching_satin_border_splits_paths_instead_of_crossing_blank_space(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        mask[8:68, 37:43] = 255
+        mask[25:31, 12:68] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="satin",
+            stitch_length_mm=0.2,
+            row_spacing_mm=0.5,
+            underlay=False,
+            contour_count=0,
+        )
+
+        paths = engine._generate_satin_paths(mask, settings)
+        longest_segment = max(
+            np.hypot(b[0] - a[0], b[1] - a[1])
+            for path in paths
+            for a, b in zip(path, path[1:])
+        )
+
+        self.assertGreaterEqual(len(paths), 3)
+        self.assertLess(longest_segment, 10.0)
+
     def test_small_scanline_details_get_reinforcing_fill_pass(self):
         import cv2
 
@@ -2649,6 +2694,27 @@ class ExportPathTests(unittest.TestCase):
         commands = [cmd for _, _, cmd in pattern.stitches]
 
         self.assertEqual(commands.count(pyembroidery.JUMP), 1)
+
+    def test_export_run_paths_jump_instead_of_sewing_across_blank_space(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_settings = project_mod.StitchSettings(fill_mode="run")
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(25.0, 0.0), (35.0, 0.0)],
+        ]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [cmd for _, _, cmd in pattern.stitches]
+
+        self.assertEqual(commands.count(pyembroidery.JUMP), 2)
 
     def test_export_spatially_orders_merged_cross_stitch_shades(self):
         pyembroidery = install_fake_pyembroidery()

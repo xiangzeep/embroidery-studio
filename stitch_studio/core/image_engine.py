@@ -1113,8 +1113,8 @@ class ImageEngine:
     def _satin_outline_stitch_settings() -> StitchSettings:
         return StitchSettings(
             fill_mode="satin",
-            stitch_length_mm=0.22,
-            stitch_length_min_mm=0.18,
+            stitch_length_mm=0.16,
+            stitch_length_min_mm=0.12,
             stitch_length_max_mm=2.5,
             row_spacing_mm=0.16,
             density=1.0,

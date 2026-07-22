@@ -87,15 +87,27 @@ class ExportEngine:
                     last_y,
                 )
                 for path in ordered_paths:
-                    last_x, last_y = self._write_path(pattern, path, last_x, last_y)
+                    last_x, last_y = self._write_path(
+                        pattern,
+                        path,
+                        last_x,
+                        last_y,
+                        connect_nearby=True,
+                    )
             else:
                 for region, paths in region_paths:
+                    connect_nearby = region.stitch_settings.fill_mode not in (
+                        "run",
+                        "satin",
+                        "contour",
+                    )
                     for path in self._order_region_paths(region, paths, last_x, last_y):
                         last_x, last_y = self._write_path(
                             pattern,
                             path,
                             last_x,
                             last_y,
+                            connect_nearby=connect_nearby,
                         )
 
         # END does not encode movement in DST. Keep it at the needle position so
@@ -538,8 +550,9 @@ class ExportEngine:
         path: List[Tuple[float, float]],
         last_x: Optional[int],
         last_y: Optional[int],
+        connect_nearby: bool = True,
     ) -> Tuple[Optional[int], Optional[int]]:
-        """Write one continuous path, stitching safe in-object gaps."""
+        """Write one path, optionally sewing a short gap from the prior path."""
         if len(path) < 2:
             return last_x, last_y
 
@@ -547,7 +560,7 @@ class ExportEngine:
         connected_to_previous = False
         if last_x is not None and last_y is not None:
             gap = float(np.hypot(first_x - last_x, first_y - last_y))
-            if gap <= self.jump_threshold_units:
+            if connect_nearby and gap <= self.jump_threshold_units:
                 self._write_stitch_segment(pattern, last_x, last_y, first_x, first_y)
                 connected_to_previous = True
             elif gap > self.trim_threshold_units:
