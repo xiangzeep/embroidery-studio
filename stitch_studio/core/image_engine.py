@@ -637,6 +637,7 @@ class ImageEngine:
         if generation_mode != "cross_stitch":
             for layer in layer_map.values():
                 ImageEngine._reclassify_photo_layer_components(layer)
+            ImageEngine._suppress_satin_border_halos(layer_map.values())
             ImageEngine._underpaint_run_details(layer_map.values())
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
         for order, layer in enumerate(layers):
@@ -719,7 +720,7 @@ class ImageEngine:
         area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
         is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
         has_run_detail = any(
-            region.stitch_settings.fill_mode == "run"
+            region.stitch_settings.fill_mode in ("run", "satin")
             for region in layer.regions
         )
         return (0 if has_run_detail or is_black_detail else 1, area)
@@ -752,12 +753,52 @@ class ImageEngine:
             if not np.any(component):
                 continue
             component_mask = component.astype(np.uint8) * 255
+            component_area = int(np.count_nonzero(component))
+            ys, xs = np.where(component)
+            component_bbox_area = max(
+                1,
+                int(xs.max() - xs.min() + 1) * int(ys.max() - ys.min() + 1),
+            )
+            component_fill_ratio = component_area / component_bbox_area
+            component_width = int(xs.max() - xs.min() + 1)
+            component_height = int(ys.max() - ys.min() + 1)
+            component_long_axis = max(component_width, component_height)
+            component_short_axis = min(component_width, component_height)
+            distance = cv2.distanceTransform(component.astype(np.uint8), cv2.DIST_L2, 5)
+            positive_distance = distance[distance > 0]
+            component_median_width = (
+                float(np.median(positive_distance) * 2)
+                if positive_distance.size
+                else 0.0
+            )
+            component_max_width = float(distance.max() * 2)
             stitch_settings = ImageEngine._default_stitch_settings_for_mask(
                 component_mask,
                 layer.thread_color_rgb,
             )
+            is_satin_outline = (
+                ImageEngine._is_dark_thread_rgb(layer.thread_color_rgb)
+                and component_area >= 40
+                and component_long_axis >= 24
+                and component_median_width >= 2.0
+                and component_max_width <= 10.0
+                and (
+                    component_short_axis <= 8
+                    or component_fill_ratio <= 0.25
+                )
+            )
+            if is_satin_outline:
+                stitch_settings = ImageEngine._satin_outline_stitch_settings()
+            elif (
+                ImageEngine._is_dark_thread_rgb(layer.thread_color_rgb)
+                and (
+                    component_area < 36
+                    or (component_area < 180 and component_fill_ratio < 0.62)
+                )
+            ):
+                stitch_settings = ImageEngine._running_stitch_settings()
             mode = stitch_settings.fill_mode
-            if mode not in ("run", "scanline"):
+            if mode not in ("run", "scanline", "satin"):
                 mode = "scanline"
             if mode not in mode_masks:
                 mode_masks[mode] = np.zeros(shape, dtype=np.uint8)
@@ -765,7 +806,7 @@ class ImageEngine:
             mode_masks[mode][component] = 255
 
         rebuilt_regions = []
-        for mode in ("scanline", "run"):
+        for mode in ("scanline", "satin", "run"):
             mask = mode_masks.get(mode)
             if mask is None or not np.any(mask):
                 continue
@@ -787,7 +828,11 @@ class ImageEngine:
                 name=(
                     f"{layer.name} fill"
                     if mode == "scanline"
-                    else f"{layer.name} outline"
+                    else (
+                        f"{layer.name} border"
+                        if mode == "satin"
+                        else f"{layer.name} outline"
+                    )
                 ),
                 mask=mask,
                 design_color_id=(next(iter(design_ids)) if len(design_ids) == 1 else None),
@@ -801,6 +846,56 @@ class ImageEngine:
 
         if rebuilt_regions:
             layer.regions = rebuilt_regions
+
+    @staticmethod
+    def _suppress_satin_border_halos(layers):
+        """Give satin borders sole ownership of neighboring detail pixels."""
+        layers = list(layers)
+        shape = next(
+            (
+                region.mask.shape
+                for layer in layers
+                for region in layer.regions
+                if region.mask is not None
+            ),
+            None,
+        )
+        if shape is None:
+            return
+
+        satin_union = np.zeros(shape, dtype=np.uint8)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is not None
+                    and region.mask.shape == shape
+                    and region.stitch_settings.fill_mode == "satin"
+                ):
+                    satin_union[region.mask > 0] = 255
+        if not np.any(satin_union):
+            return
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        owned = cv2.dilate(satin_union, kernel, iterations=1) > 0
+        for layer in layers:
+            kept_regions = []
+            for region in layer.regions:
+                if (
+                    region.mask is None
+                    or region.mask.shape != shape
+                    or region.stitch_settings.fill_mode != "run"
+                ):
+                    kept_regions.append(region)
+                    continue
+
+                cleaned = region.mask.copy()
+                cleaned[owned] = 0
+                if not np.any(cleaned):
+                    continue
+                region.mask = cleaned
+                region.polygon = GeometryEngine.reconstruct_region_polygon(cleaned)
+                kept_regions.append(region)
+            layer.regions = kept_regions
 
     @staticmethod
     def _underpaint_run_details(layers):
@@ -824,7 +919,7 @@ class ImageEngine:
                 if (
                     region.mask is not None
                     and region.mask.shape == shape
-                    and region.stitch_settings.fill_mode == "run"
+                    and region.stitch_settings.fill_mode in ("run", "satin")
                 ):
                     run_union[region.mask > 0] = 255
         if not np.any(run_union):
@@ -987,17 +1082,7 @@ class ImageEngine:
 
         is_broad_art_stroke = area >= 180 and max_width_px >= 7.0
         if is_thin_stroke and not is_broad_art_stroke:
-            return StitchSettings(
-                fill_mode="run",
-                stitch_length_mm=2.0,
-                stitch_length_min_mm=1.0,
-                stitch_length_max_mm=2.5,
-                row_spacing_mm=0.4,
-                density=1.0,
-                underlay=False,
-                contour_count=0,
-                pull_compensation_mm=0.0,
-            )
+            return ImageEngine._running_stitch_settings()
 
         return StitchSettings(
             fill_mode="scanline",
@@ -1006,9 +1091,43 @@ class ImageEngine:
             density=1.45,
             underlay=False,
             underlay_density=0.25,
-            contour_count=1,
+            contour_count=0,
             pull_compensation_mm=0.22,
         )
+
+    @staticmethod
+    def _running_stitch_settings() -> StitchSettings:
+        return StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=2.0,
+            stitch_length_min_mm=1.0,
+            stitch_length_max_mm=2.5,
+            row_spacing_mm=0.4,
+            density=1.0,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+        )
+
+    @staticmethod
+    def _satin_outline_stitch_settings() -> StitchSettings:
+        return StitchSettings(
+            fill_mode="satin",
+            stitch_length_mm=0.45,
+            stitch_length_min_mm=0.3,
+            stitch_length_max_mm=2.5,
+            row_spacing_mm=0.16,
+            density=1.0,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+        )
+
+    @staticmethod
+    def _is_dark_thread_rgb(rgb: Tuple[int, int, int]) -> bool:
+        color = np.array(rgb, dtype=np.float64)
+        luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+        return bool(luminance <= 115)
 
     @staticmethod
     def _default_cross_stitch_settings_for_mask(

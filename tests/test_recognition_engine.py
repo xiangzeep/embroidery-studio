@@ -230,10 +230,13 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertTrue(np.all(fill_mask[run_mask]))
 
     def test_recognition_reclassifies_joined_thread_components_by_geometry(self):
-        design_map = np.zeros((36, 48), dtype=np.int32)
+        design_map = np.zeros((48, 64), dtype=np.int32)
         design_map[8:22, 12:15] = 1
         design_map[8:22, 15:18] = 2
         design_map[26:28, 25:43] = 1
+        design_map[29:33, 4:7] = 2
+        design_map[34:44, 35:47] = 1
+        design_map[36:42, 37:45] = 0
         threads = [
             ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
             ThreadColor(name="Black", color_rgb=(0, 0, 0)),
@@ -245,7 +248,7 @@ class ThreadSuggestionTests(unittest.TestCase):
                 DesignColor(1, (6, 6, 6), 78, 1, 0.0),
                 DesignColor(2, (35, 20, 18), 42, 1, 1.0),
             ],
-            reconstructed_rgb=np.zeros((36, 48, 3), dtype=np.uint8),
+            reconstructed_rgb=np.zeros((48, 64, 3), dtype=np.uint8),
             detail_mask=design_map > 0,
             detail_design_ids=(1, 2),
             metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
@@ -276,7 +279,75 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
         self.assertTrue(np.all(fill_mask[8:22, 12:18]))
         self.assertTrue(np.all(run_mask[26:28, 25:43]))
+        self.assertTrue(np.all(run_mask[29:33, 4:7]))
+        self.assertTrue(np.all(run_mask[34:36, 35:47]))
+        self.assertTrue(np.all(run_mask[36:42, 35:37]))
         self.assertFalse(np.any(run_mask[8:22, 12:18]))
+
+    def test_recognition_uses_satin_for_long_dark_photo_outline(self):
+        design_map = np.zeros((24, 64), dtype=np.int32)
+        design_map[10:13, 8:56] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), 1392, 0, 0.0),
+                DesignColor(1, (220, 30, 30), 144, 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((24, 64, 3), dtype=np.uint8),
+            detail_mask=design_map == 1,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        red = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        self.assertEqual(len(red.regions), 1)
+        self.assertEqual(red.regions[0].stitch_settings.fill_mode, "satin")
+        self.assertEqual(red.regions[0].stitch_settings.contour_count, 0)
+        self.assertLessEqual(red.regions[0].stitch_settings.row_spacing_mm, 0.18)
+
+    def test_satin_border_owns_adjacent_antialias_detail_pixels(self):
+        design_map = np.zeros((24, 64), dtype=np.int32)
+        design_map[10:13, 8:56] = 1
+        design_map[13:14, 20:44] = 2
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Blue", color_rgb=(80, 100, 200)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), 1368, 0, 0.0),
+                DesignColor(1, (220, 30, 30), 144, 1, 0.0),
+                DesignColor(2, (80, 100, 200), 24, 2, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((24, 64, 3), dtype=np.uint8),
+            detail_mask=design_map > 0,
+            detail_design_ids=(1, 2),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        blue = next(layer for layer in layers if layer.thread_uid == threads[2].uid)
+        blue_mask = blue.get_combined_mask()
+        self.assertIsNone(blue_mask)
 
     def test_layer_recognition_metadata_survives_serialization(self):
         image = np.full((8, 8, 3), (80, 120, 160), dtype=np.uint8)

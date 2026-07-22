@@ -223,7 +223,7 @@ class StitchEngine:
         if mode == "contour":
             return self._generate_contour_fill_paths(mask, settings, polygon)
         if mode == "satin":
-            return [self._generate_satin_fill(mask, settings)]
+            return self._generate_satin_paths(mask, settings)
         if mode == "flow_guided":
             return [self._generate_flow_fill(mask, settings, image, flow_field)]
         if mode == "radial":
@@ -612,6 +612,23 @@ class StitchEngine:
         return pts
 
     # ========== SATIN FILL ==========
+
+    def _generate_satin_paths(
+        self, mask: np.ndarray, settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Generate one satin path per disconnected border component."""
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (mask > 0).astype(np.uint8), connectivity=8
+        )
+        paths = []
+        for label in range(1, count):
+            if int(stats[label, cv2.CC_STAT_AREA]) < 2:
+                continue
+            component = (labels == label).astype(np.uint8) * 255
+            path = self._generate_satin_fill(component, settings)
+            if len(path) >= 2:
+                paths.append(path)
+        return paths
 
     def _generate_satin_fill(
         self, mask: np.ndarray, settings: StitchSettings,

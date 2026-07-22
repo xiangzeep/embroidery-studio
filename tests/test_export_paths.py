@@ -2025,7 +2025,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(engine._choose_cross_stitch_method(mask, settings, image), "half")
 
-    def test_default_fill_settings_are_dense_and_compensated(self):
+    def test_default_fill_settings_are_dense_without_duplicate_edge_contour(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
 
         mask = np.zeros((60, 60), dtype=np.uint8)
@@ -2037,7 +2037,7 @@ class ExportPathTests(unittest.TestCase):
         self.assertLessEqual(settings.row_spacing_mm, 0.20)
         self.assertGreaterEqual(settings.density, 1.35)
         self.assertGreaterEqual(settings.pull_compensation_mm, 0.18)
-        self.assertGreaterEqual(settings.contour_count, 1)
+        self.assertEqual(settings.contour_count, 0)
 
     def test_scanline_regions_include_edge_contour_for_fullness(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -2059,6 +2059,28 @@ class ExportPathTests(unittest.TestCase):
         paths = engine.generate_region_paths(region)
 
         self.assertGreater(len(paths), 1)
+
+    def test_satin_outline_keeps_disconnected_borders_as_separate_paths(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((30, 60), dtype=np.uint8)
+        region.mask[8:11, 5:25] = 255
+        region.mask[19:22, 35:55] = 255
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="satin",
+            stitch_length_mm=0.45,
+            row_spacing_mm=0.5,
+            underlay=False,
+            contour_count=0,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(len(path) >= 4 for path in paths))
 
     def test_small_scanline_details_get_reinforcing_fill_pass(self):
         import cv2
