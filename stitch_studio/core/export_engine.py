@@ -118,6 +118,10 @@ class ExportEngine:
         write_settings = {}
         if settings:
             write_settings.update(settings)
+        if filepath.lower().endswith(".pes"):
+            # PES v1 remaps custom RGB values to a small built-in Brother
+            # palette. Version 6 embeds the actual thread chart and colors.
+            write_settings.setdefault("version", 6.0)
         pyembroidery.write(pattern, filepath, write_settings)
         written_files = [filepath]
         if filepath.lower().endswith(".dst"):

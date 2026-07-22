@@ -1672,30 +1672,53 @@ class StitchEngine:
         return result
 
     def _mask_to_polygon(self, mask: np.ndarray, compensation_mm: float = 0) -> Optional[Polygon]:
-        """Convert binary mask to Shapely polygon."""
+        """Convert a binary mask without losing holes or separate islands."""
         clean = (mask > 0).astype(np.uint8) * 255
         if np.count_nonzero(clean) == 0:
             return None
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=1)
-        contours, _ = cv2.findContours(
-            clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+        contours, hierarchy = cv2.findContours(
+            clean, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE
         )
-        if not contours:
+        if not contours or hierarchy is None:
             return None
 
-        # Take largest contour
-        contour = max(contours, key=cv2.contourArea)
         epsilon = max(0.9, 0.18 * self.px_per_mm)
-        contour = cv2.approxPolyDP(contour, epsilon, closed=True)
-        pts = contour[:, 0, :].tolist()
-        if len(pts) < 3:
+        hierarchy = hierarchy[0]
+        polygons = []
+        for contour_index, contour in enumerate(contours):
+            if hierarchy[contour_index][3] != -1:
+                continue
+            outer = cv2.approxPolyDP(contour, epsilon, closed=True)
+            outer_points = outer[:, 0, :].tolist()
+            if len(outer_points) < 3:
+                continue
+
+            holes = []
+            child_index = int(hierarchy[contour_index][2])
+            while child_index != -1:
+                hole = cv2.approxPolyDP(
+                    contours[child_index],
+                    epsilon,
+                    closed=True,
+                )
+                hole_points = hole[:, 0, :].tolist()
+                if len(hole_points) >= 3:
+                    holes.append(hole_points)
+                child_index = int(hierarchy[child_index][0])
+
+            polygon = Polygon(outer_points, holes)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if not polygon.is_empty:
+                polygons.append(polygon)
+
+        if not polygons:
             return None
 
-        poly = Polygon(pts)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
+        poly = unary_union(polygons)
 
         # Apply pull compensation (expand polygon)
         if compensation_mm > 0:
@@ -1712,10 +1735,18 @@ class StitchEngine:
             poly = poly.buffer(0)
         simplify_px = max(1.2, 0.30 * self.px_per_mm)
         poly = poly.simplify(simplify_px, preserve_topology=True)
-        if hasattr(poly, "geoms"):
-            poly = max(poly.geoms, key=lambda geom: geom.area)
-        if poly.area >= 500 and not self._has_acute_vertices(poly):
-            poly = self._smooth_polygon(poly, iterations=2)
+
+        components = list(poly.geoms) if hasattr(poly, "geoms") else [poly]
+        regularized = []
+        for component in components:
+            if component.is_empty or not hasattr(component, "exterior"):
+                continue
+            if component.area >= 500 and not self._has_acute_vertices(component):
+                component = self._smooth_polygon(component, iterations=2)
+            regularized.append(component)
+        if not regularized:
+            return None
+        poly = unary_union(regularized)
 
         return poly
 

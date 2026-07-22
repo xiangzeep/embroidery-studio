@@ -1338,6 +1338,44 @@ class ExportPathTests(unittest.TestCase):
         finally:
             main_mod.os.cpu_count = original_cpu_count
 
+    def test_photo_worker_merges_identical_thread_settings_before_generation(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        layer = project_mod.Layer(thread_uid="coral", order=0)
+        first = project_mod.Region(mask=np.pad(np.ones((4, 4), dtype=np.uint8), 2))
+        second_mask = np.zeros((8, 8), dtype=np.uint8)
+        second_mask[1:3, 5:7] = 1
+        second = project_mod.Region(mask=second_mask)
+
+        work_items = main_mod.StitchWorker._photo_stitch_work_items(
+            [(layer, first), (layer, second)]
+        )
+
+        self.assertEqual(len(work_items), 1)
+        _, target, members, working_region, mask_override = work_items[0]
+        self.assertIs(target, first)
+        self.assertEqual(members, [first, second])
+        self.assertIsNone(mask_override)
+        np.testing.assert_array_equal(
+            working_region.mask > 0,
+            (first.mask > 0) | (second.mask > 0),
+        )
+        self.assertIsNone(working_region.polygon)
+
+    def test_photo_worker_preserves_separate_professional_settings(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        layer = project_mod.Layer(thread_uid="coral", order=0)
+        first = project_mod.Region(mask=np.ones((8, 8), dtype=np.uint8))
+        second = project_mod.Region(mask=np.ones((8, 8), dtype=np.uint8))
+        second.stitch_settings.angle_deg = first.stitch_settings.angle_deg + 15.0
+
+        work_items = main_mod.StitchWorker._photo_stitch_work_items(
+            [(layer, first), (layer, second)]
+        )
+
+        self.assertEqual(len(work_items), 2)
+
     def test_stitch_worker_uses_qthread_finished_after_run_returns(self):
         import inspect
 
@@ -2063,6 +2101,26 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreater(poly.area, float(np.count_nonzero(mask)) * 0.90)
         self.assertLess(len(poly.exterior.coords), 140)
 
+    def test_mask_polygon_preserves_border_hole_and_disconnected_island(self):
+        from shapely.geometry import Point
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((80, 100), dtype=np.uint8)
+        mask[2:6, 2:98] = 255
+        mask[74:78, 2:98] = 255
+        mask[2:78, 2:6] = 255
+        mask[2:78, 94:98] = 255
+        mask[28:42, 42:56] = 255
+
+        poly = engine._mask_to_polygon(mask, compensation_mm=0.0)
+
+        self.assertIsNotNone(poly)
+        self.assertFalse(poly.covers(Point(20, 30)))
+        self.assertTrue(poly.covers(Point(48, 34)))
+        self.assertTrue(hasattr(poly, "geoms"))
+        self.assertGreaterEqual(len(poly.geoms), 2)
+
     def test_mask_polygon_straightens_long_pixel_stair_diagonal(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         engine = stitch_mod.StitchEngine(px_per_mm=4.0)
@@ -2552,6 +2610,28 @@ class ExportPathTests(unittest.TestCase):
             ],
         )
         self.assertEqual(written_files, [filepath, edr_path])
+
+    def test_pes_export_defaults_to_version_6_for_exact_thread_colors(self):
+        fake = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        calls = []
+
+        def capture_write(pattern, filepath, settings=None):
+            calls.append((filepath, dict(settings or {})))
+
+        fake.write = capture_write
+        export_mod.pyembroidery.write = capture_write
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(250, 139, 119), order=0)
+        region = project_mod.Region()
+        region.stitch_paths = [[(0.0, 0.0), (20.0, 20.0)]]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        export_mod.ExportEngine().export(project, "/tmp/exact-color.pes")
+
+        self.assertEqual(calls[0][1]["version"], 6.0)
 
     def test_export_splits_long_jump_moves_into_dst_safe_deltas(self):
         pyembroidery = install_fake_pyembroidery()

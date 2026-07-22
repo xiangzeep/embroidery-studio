@@ -6,8 +6,11 @@ and the embroidery canvas.
 
 import os
 import traceback
+from copy import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
+
+import numpy as np
 
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QToolBar, QStatusBar,
@@ -46,50 +49,105 @@ class StitchWorker(QThread):
     def run(self):
         try:
             total_regions = sum(len(l.regions) for l in self.project.layers)
-            jobs = [
+            region_jobs = [
                 (layer, region)
                 for layer in self.project.layers
                 if layer.visible
                 for region in layer.regions
                 if region.visible
             ]
-            done = total_regions - len(jobs)
             ownership_masks = {}
-            if jobs and all(
+            is_cross_stitch = bool(region_jobs) and all(
                 region.stitch_settings.fill_mode == "cross_stitch"
-                for _, region in jobs
-            ):
+                for _, region in region_jobs
+            )
+            if is_cross_stitch:
                 ownership_masks = self.engine.build_cross_stitch_ownership_masks([
                     (region, self._cross_stitch_priority(layer, region))
-                    for layer, region in jobs
+                    for layer, region in region_jobs
                 ])
+                work_items = [
+                    (
+                        layer,
+                        region,
+                        [region],
+                        region,
+                        ownership_masks.get(region.uid),
+                    )
+                    for layer, region in region_jobs
+                ]
+            else:
+                work_items = self._photo_stitch_work_items(region_jobs)
 
-            worker_count = self._generation_worker_count(len(jobs))
+            done = total_regions - sum(len(item[2]) for item in work_items)
+
+            worker_count = self._generation_worker_count(len(work_items))
             if worker_count <= 1:
-                for _, region in jobs:
-                    self._generate_region(region, ownership_masks.get(region.uid))
-                    done += 1
+                for _, target, members, working_region, mask_override in work_items:
+                    paths = self.engine.generate_region_paths(
+                        working_region,
+                        self.image,
+                        self.flow_field,
+                        mask_override,
+                    )
+                    self._store_group_paths(target, members, paths)
+                    done += len(members)
                     self.progress.emit(done, total_regions)
             else:
                 with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    future_to_region = {
+                    future_to_item = {
                         executor.submit(
                             self.engine.generate_region_paths,
-                            region,
+                            working_region,
                             self.image,
                             self.flow_field,
-                            ownership_masks.get(region.uid),
-                        ): region
-                        for _, region in jobs
+                            mask_override,
+                        ): (target, members)
+                        for _, target, members, working_region, mask_override in work_items
                     }
-                    for future in as_completed(future_to_region):
-                        region = future_to_region[future]
+                    for future in as_completed(future_to_item):
+                        target, members = future_to_item[future]
                         paths = future.result()
-                        self._store_region_paths(region, paths)
-                        done += 1
+                        self._store_group_paths(target, members, paths)
+                        done += len(members)
                         self.progress.emit(done, total_regions)
         except Exception as e:
             self.failure_message = f"{e}\n{traceback.format_exc()}"
+
+    @staticmethod
+    def _photo_stitch_work_items(region_jobs):
+        """Merge same-thread masks when all professional settings match."""
+        groups = {}
+        for layer, region in region_jobs:
+            mask = region.mask
+            shape = tuple(mask.shape) if mask is not None else None
+            settings_key = tuple(sorted(region.stitch_settings.to_dict().items()))
+            key = (id(layer), shape, settings_key)
+            groups.setdefault(key, []).append((layer, region))
+
+        work_items = []
+        for entries in groups.values():
+            layer = entries[0][0]
+            members = [region for _, region in entries]
+            target = max(
+                members,
+                key=lambda region: (
+                    int(np.count_nonzero(region.mask))
+                    if region.mask is not None else 0
+                ),
+            )
+            if len(members) == 1 or target.mask is None:
+                working_region = target
+            else:
+                combined = np.zeros(target.mask.shape, dtype=np.uint8)
+                for region in members:
+                    if region.mask is not None and region.mask.shape == combined.shape:
+                        combined[region.mask > 0] = 255
+                working_region = copy(target)
+                working_region.mask = combined
+                working_region.polygon = None
+            work_items.append((layer, target, members, working_region, None))
+        return work_items
 
     @staticmethod
     def _generation_worker_count(job_count: int) -> int:
@@ -97,12 +155,6 @@ class StitchWorker(QThread):
             return 1
         cpu_count = os.cpu_count() or 1
         return max(1, min(job_count, cpu_count))
-
-    def _generate_region(self, region, mask_override=None):
-        paths = self.engine.generate_region_paths(
-            region, self.image, self.flow_field, mask_override
-        )
-        self._store_region_paths(region, paths)
 
     @staticmethod
     def _cross_stitch_priority(layer, region=None) -> float:
@@ -122,6 +174,14 @@ class StitchWorker(QThread):
     def _store_region_paths(region, paths):
         region.stitch_paths = paths
         region.stitch_points = [pt for path in paths for pt in path]
+
+    @classmethod
+    def _store_group_paths(cls, target, members, paths):
+        for region in members:
+            if region is not target:
+                region.stitch_paths = []
+                region.stitch_points = []
+        cls._store_region_paths(target, paths)
 
 
 class QuantizeWorker(QThread):
