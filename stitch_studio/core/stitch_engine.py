@@ -647,20 +647,24 @@ class StitchEngine:
             return self._generate_scanline_fill(mask, settings)
 
         width_px = settings.row_spacing_mm * self.px_per_mm * 10  # satin width
-        stitch_spacing = settings.stitch_length_mm * self.px_per_mm
+        stitch_spacing = max(0.35, settings.stitch_length_mm * self.px_per_mm)
+        spine_pts = self._resample_line(spine_pts, stitch_spacing)
+        if len(spine_pts) < 2:
+            return self._generate_scanline_fill(mask, settings)
+
+        dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         stitches = []
 
-        for i in range(0, len(spine_pts) - 1):
-            x0, y0 = spine_pts[i]
-            x1, y1 = spine_pts[i + 1]
+        for i, (x0, y0) in enumerate(spine_pts):
+            prev = spine_pts[max(0, i - 1)]
+            nxt = spine_pts[min(len(spine_pts) - 1, i + 1)]
 
             # Perpendicular direction
-            dx, dy = x1 - x0, y1 - y0
+            dx, dy = nxt[0] - prev[0], nxt[1] - prev[1]
             length = np.hypot(dx, dy) + 1e-8
             perp_x, perp_y = -dy / length, dx / length
 
             # Determine actual width at this point from mask distance transform
-            dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
             ix, iy = int(np.clip(x0, 0, mask.shape[1] - 1)), int(np.clip(y0, 0, mask.shape[0] - 1))
             local_width = min(dt[iy, ix] * 2, width_px)
 
@@ -783,45 +787,24 @@ class StitchEngine:
         self,
         mask: np.ndarray,
     ) -> Tuple[List[List[Tuple[float, float]]], np.ndarray]:
-        """Extract compact closed line-art islands as explicit run loops."""
+        """Extract genuine closed skeleton loops without tracing both edges."""
+        from skimage.morphology import skeletonize
+
         loop_paths: List[List[Tuple[float, float]]] = []
         exclusion = np.zeros_like(mask, dtype=np.uint8)
-        contours, hierarchy = cv2.findContours(
-            (mask > 0).astype(np.uint8) * 255,
-            cv2.RETR_CCOMP,
-            cv2.CHAIN_APPROX_NONE,
-        )
-        if hierarchy is None:
-            return loop_paths, exclusion
 
-        for idx, contour in enumerate(contours):
-            area = float(cv2.contourArea(contour))
-            if area < max(4.0, 0.12 * self.px_per_mm * self.px_per_mm):
+        skeleton = skeletonize(mask > 0).astype(np.uint8)
+        count, labels = cv2.connectedComponents(skeleton, connectivity=8)
+        for label in range(1, count):
+            component = labels == label
+            paths = self._trace_skeleton_component(component)
+            if len(paths) != 1 or len(paths[0]) < 4:
                 continue
-
-            perimeter = float(cv2.arcLength(contour, closed=True))
-            if perimeter < max(6.0, 2.0 * self.px_per_mm):
+            path = paths[0]
+            if path[0] != path[-1]:
                 continue
-
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < 3 or h < 3:
-                continue
-
-            # Filled blobs and broad borders should stay in the skeleton route.
-            region = mask[y:y + h, x:x + w] > 0
-            fill_ratio = float(region.mean()) if region.size else 0.0
-            if fill_ratio > 0.72:
-                continue
-
-            epsilon = max(0.35, 0.08 * self.px_per_mm)
-            approx = cv2.approxPolyDP(contour, epsilon, closed=True)
-            points = [(float(p[0][0]), float(p[0][1])) for p in approx]
-            if len(points) < 4:
-                continue
-
-            points = self._ensure_closed_path(points)
-            loop_paths.append(points)
-            cv2.drawContours(exclusion, [contour], -1, 255, thickness=max(1, int(round(self.px_per_mm))))
+            loop_paths.append(path)
+            exclusion[component] = 255
 
         return loop_paths, exclusion
 

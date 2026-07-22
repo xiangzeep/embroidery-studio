@@ -597,6 +597,7 @@ class EmbroideryCanvas(QGraphicsView):
 
         self._bg_item = QGraphicsPixmapItem(pixmap)
         self._bg_item.setTransformationMode(Qt.SmoothTransformation)
+        self._bg_item.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
 
         # Scale image to match output size in scene units (1/10mm)
         out_w = output_size_mm[0] * self._units_per_mm

@@ -425,10 +425,27 @@ class MainWindow(QMainWindow):
         self.toolbar_opacity.setValue(50)
         self.toolbar_opacity.setMaximumWidth(120)
         self.toolbar_opacity.setToolTip(tr("toolbar.image_opacity"))
-        self.toolbar_opacity.valueChanged.connect(
-            lambda v: self.canvas.set_image_opacity(v / 100.0)
-        )
+        self._pending_image_opacity = None
+        self._image_opacity_timer = QTimer(self)
+        self._image_opacity_timer.setSingleShot(True)
+        self._image_opacity_timer.setInterval(24)
+        self._image_opacity_timer.timeout.connect(self._flush_image_opacity)
+        self.toolbar_opacity.valueChanged.connect(self._queue_image_opacity)
+        self.toolbar_opacity.sliderPressed.connect(self.canvas.cancel_boundary_edit)
+        self.toolbar_opacity.sliderReleased.connect(self._flush_image_opacity)
         toolbar.addWidget(self.toolbar_opacity)
+
+    def _queue_image_opacity(self, value: int):
+        self._pending_image_opacity = max(0.0, min(1.0, float(value) / 100.0))
+        if not self._image_opacity_timer.isActive():
+            self._image_opacity_timer.start()
+
+    def _flush_image_opacity(self):
+        if self._pending_image_opacity is None:
+            return
+        opacity = self._pending_image_opacity
+        self._pending_image_opacity = None
+        self.canvas.set_image_opacity(opacity)
 
     def _create_canvas(self):
         self.canvas = EmbroideryCanvas(self)

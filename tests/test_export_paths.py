@@ -478,6 +478,48 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(assembled), 1)
         self.assertEqual(assembled[0][0], assembled[0][-1])
 
+    def test_thick_open_run_stroke_uses_one_centerline_without_closed_outline(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((50, 60), dtype=np.uint8)
+        cv2.ellipse(mask, (30, 30), (20, 8), 0, 190, 350, 255, 4)
+        region = project_mod.Region(mask=mask)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.6,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 1)
+        self.assertNotEqual(paths[0][0], paths[0][-1])
+
+    def test_hollow_run_ring_stays_one_closed_centerline(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((50, 50), dtype=np.uint8)
+        cv2.circle(mask, (25, 25), 15, 255, 3)
+        region = project_mod.Region(mask=mask)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.6,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0][0], paths[0][-1])
+
     def test_segmentation_skips_border_background(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -1097,6 +1139,41 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreater(scene_rect.right(), content.right())
         self.assertLess(scene_rect.top(), content.top())
         self.assertGreater(scene_rect.bottom(), content.bottom())
+
+    def test_toolbar_image_opacity_coalesces_rapid_slider_updates(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        class TimerStub:
+            def __init__(self):
+                self.starts = 0
+                self.active = False
+
+            def isActive(self):
+                return self.active
+
+            def start(self):
+                self.starts += 1
+                self.active = True
+
+        class CanvasStub:
+            def __init__(self):
+                self.applied = []
+
+            def set_image_opacity(self, value):
+                self.applied.append(value)
+
+        window = types.SimpleNamespace(
+            _pending_image_opacity=None,
+            _image_opacity_timer=TimerStub(),
+            canvas=CanvasStub(),
+        )
+
+        for value in range(51, 91):
+            main_mod.MainWindow._queue_image_opacity(window, value)
+        main_mod.MainWindow._flush_image_opacity(window)
+
+        self.assertEqual(window._image_opacity_timer.starts, 1)
+        self.assertEqual(window.canvas.applied, [0.9])
 
     def test_canvas_region_preview_uses_vector_polygon_when_available(self):
         from shapely.geometry import Polygon
@@ -2081,6 +2158,33 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(paths), 2)
         self.assertTrue(all(len(path) >= 4 for path in paths))
+
+    def test_satin_stitch_length_controls_border_density(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((30, 100), dtype=np.uint8)
+        mask[12:17, 8:92] = 255
+        dense = project_mod.StitchSettings(
+            fill_mode="satin",
+            stitch_length_mm=0.2,
+            row_spacing_mm=0.5,
+            underlay=False,
+            contour_count=0,
+        )
+        sparse = project_mod.StitchSettings(
+            fill_mode="satin",
+            stitch_length_mm=1.0,
+            row_spacing_mm=0.5,
+            underlay=False,
+            contour_count=0,
+        )
+
+        dense_path = engine._generate_satin_fill(mask, dense)
+        sparse_path = engine._generate_satin_fill(mask, sparse)
+
+        self.assertGreater(len(dense_path), len(sparse_path) * 2)
 
     def test_small_scanline_details_get_reinforcing_fill_pass(self):
         import cv2
