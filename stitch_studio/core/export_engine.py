@@ -439,12 +439,38 @@ class ExportEngine:
         last_y: Optional[int],
     ) -> List[List[Tuple[float, float]]]:
         """Choose a path order without making large exports quadratic."""
-        if (
-            getattr(region.stitch_settings, "fill_mode", "") == "cross_stitch"
-            or len(paths) >= 256
-        ):
+        if getattr(region.stitch_settings, "fill_mode", "") == "cross_stitch":
             return self._order_paths_linear(paths, last_x, last_y)
+        if len(paths) >= 256:
+            return self._order_paths_spatial(paths, last_x, last_y)
         return self._order_paths_from(paths, last_x, last_y)
+
+    def _order_paths_spatial(
+        self,
+        paths: List[List[Tuple[float, float]]],
+        last_x: Optional[int],
+        last_y: Optional[int],
+    ) -> List[List[Tuple[float, float]]]:
+        """Order large path sets by coarse rows without quadratic searches."""
+        row_height = max(40.0, float(self.jump_threshold_units) * 4.0)
+        rows = {}
+        for path in paths:
+            if len(path) < 2:
+                continue
+            center_x = (path[0][0] + path[-1][0]) * 0.5
+            center_y = (path[0][1] + path[-1][1]) * 0.5
+            row = int(np.floor(center_y / row_height))
+            rows.setdefault(row, []).append((center_x, center_y, path))
+
+        spatial = []
+        for row_index, row in enumerate(sorted(rows)):
+            entries = sorted(
+                rows[row],
+                key=lambda entry: (entry[0], entry[1]),
+                reverse=bool(row_index % 2),
+            )
+            spatial.extend(path for _, _, path in entries)
+        return self._order_paths_linear(spatial, last_x, last_y)
 
     def _order_paths_linear(
         self,

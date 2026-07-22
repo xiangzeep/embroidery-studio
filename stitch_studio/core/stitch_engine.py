@@ -75,7 +75,12 @@ class StitchEngine:
             paths.extend(self._generate_contour_paths(mask, settings, getattr(region, "polygon", None)))
 
         fill_paths = self._dispatch_fill_paths(
-            mask, settings, image, flow_field, getattr(region, "polygon", None)
+            mask,
+            settings,
+            image,
+            flow_field,
+            getattr(region, "polygon", None),
+            getattr(region, "design_color_rgb", None),
         )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
@@ -208,10 +213,11 @@ class StitchEngine:
         image: Optional[np.ndarray],
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]],
         polygon: Optional[Polygon] = None,
+        source_color: Optional[Tuple[int, int, int]] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
-            return self._generate_run_paths(mask, settings, image)
+            return self._generate_run_paths(mask, settings, image, source_color)
         if mode == "scanline":
             return self._generate_scanline_paths(mask, settings, polygon)
         if mode == "contour":
@@ -656,11 +662,12 @@ class StitchEngine:
         mask: np.ndarray,
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
+        source_color: Optional[Tuple[int, int, int]] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate single-centerline run stitch paths for thin strokes."""
         from skimage.morphology import skeletonize
 
-        mask = self._restore_line_art_run_mask(mask, image)
+        mask = self._restore_line_art_run_mask(mask, image, source_color)
         loop_paths, loop_exclusion = self._extract_closed_run_loops(mask)
 
         skeleton = skeletonize(mask > 0).astype(np.uint8)
@@ -710,6 +717,7 @@ class StitchEngine:
         self,
         mask: np.ndarray,
         image: Optional[np.ndarray],
+        source_color: Optional[Tuple[int, int, int]] = None,
     ) -> np.ndarray:
         """Recover nearby source line pixels that segmentation split away.
 
@@ -737,6 +745,10 @@ class StitchEngine:
         mean_channel = rgb.mean(axis=2)
         chroma = max_channel - min_channel
         non_background = alpha & (mean_channel < 248) & ((chroma > 6) | (mean_channel < 220))
+        if source_color is not None:
+            target = np.asarray(source_color, dtype=np.int16)
+            color_distance = np.linalg.norm(rgb - target, axis=2)
+            non_background &= color_distance <= 96.0
 
         radius_px = max(2, int(round(2.0 * self.px_per_mm)))
         kernel_size = radius_px * 2 + 1

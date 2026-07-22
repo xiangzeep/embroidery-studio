@@ -313,6 +313,33 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(ordered), len(paths))
 
+    def test_large_photo_stitch_spatially_orders_paths_to_reduce_travel(self):
+        install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        engine = export_mod.ExportEngine()
+        region = project_mod.Region()
+        region.stitch_settings.fill_mode = "scanline"
+        paths = [
+            [
+                (0.0 if index % 2 == 0 else 1000.0, float(index * 10)),
+                (1.0 if index % 2 == 0 else 1001.0, float(index * 10)),
+            ]
+            for index in range(300)
+        ]
+
+        ordered = engine._order_region_paths(region, paths, None, None)
+        travel = sum(
+            np.hypot(
+                ordered[index][0][0] - ordered[index - 1][-1][0],
+                ordered[index][0][1] - ordered[index - 1][-1][1],
+            )
+            for index in range(1, len(ordered))
+        )
+
+        self.assertLess(travel, 40000.0)
+
 
     def test_region_can_store_path_boundaries_for_preview_and_export(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -418,6 +445,25 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(paths)
         total_length = sum(engine._polyline_length(path) for path in paths)
         self.assertGreater(total_length, 80.0)
+
+    def test_colored_run_restoration_does_not_absorb_neighboring_fill(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        image = np.full((30, 50, 3), (250, 140, 119), dtype=np.uint8)
+        image[15, 5:45] = (230, 52, 25)
+        mask = np.zeros((30, 50), dtype=np.uint8)
+        mask[15, 5:18] = 255
+        mask[15, 32:45] = 255
+
+        restored = engine._restore_line_art_run_mask(
+            mask,
+            image,
+            source_color=(230, 52, 25),
+        )
+
+        self.assertTrue(np.all(restored[15, 5:45] > 0))
+        self.assertEqual(int(np.count_nonzero(restored)), 40)
 
     def test_run_component_closed_loop_is_explicitly_closed(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -692,7 +738,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(settings.fill_mode, "scanline")
 
-    def test_colored_detail_layers_default_to_fill_not_run(self):
+    def test_colored_detail_layers_default_to_run_stitch(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
 
@@ -711,7 +757,7 @@ class ExportPathTests(unittest.TestCase):
         modes = {layer.thread_name: layer.regions[0].stitch_settings.fill_mode for layer in layers}
 
         self.assertEqual(modes["Black"], "run")
-        self.assertEqual(modes["Dark Green"], "scanline")
+        self.assertEqual(modes["Dark Green"], "run")
 
     def test_cross_stitch_generation_mode_sets_region_defaults_to_cross_stitch(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
@@ -814,7 +860,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(layers[0].regions[0].stitch_settings.fill_mode, "scanline")
 
-    def test_black_detail_layer_stitches_after_green_fills(self):
+    def test_generated_layer_stack_places_details_above_green_fills(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
         thread_mod = importlib.import_module("stitch_studio.core.thread_db")
 
@@ -836,8 +882,8 @@ class ExportPathTests(unittest.TestCase):
             palette,
         )
 
-        self.assertEqual(layers[-1].thread_name, "Black")
-        self.assertGreater(layers[-1].order, layers[0].order)
+        indexes = {layer.thread_name: layer.order for layer in layers}
+        self.assertLess(indexes["Black"], indexes["Light Green"])
 
     def test_tiny_real_color_layers_are_not_merged_away(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")

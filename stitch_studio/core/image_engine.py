@@ -524,8 +524,9 @@ class ImageEngine:
         if source_image is not None:
             ImageEngine._apply_source_region_colors(layer_map, source_image)
 
-        # Sort fill colors first, then near-black outlines/details last so
-        # they are stitched and previewed on top of expanded fill regions.
+        # The layer panel follows the usual visual-stack convention: small
+        # details sit above broad fills. Export reverses this order so broad
+        # fills sew first and details remain visible on top.
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
 
         for i, layer in enumerate(layers):
@@ -631,8 +632,7 @@ class ImageEngine:
                 )
             layer.add_region(region)
 
-        layers = list(layer_map.values())
-        layers.sort(key=lambda layer: (1 if layer.is_detail_layer else 0, layer.design_color_id))
+        layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
         for order, layer in enumerate(layers):
             layer.order = order
         return layers
@@ -712,7 +712,7 @@ class ImageEngine:
     def _layer_sort_key(layer: Layer) -> Tuple[int, int]:
         area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
         is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
-        return (1 if is_black_detail else 0, -area)
+        return (area, 0 if is_black_detail else 1)
 
     @staticmethod
     def _merge_tiny_similar_layers(layer_map: Dict[int, Layer], image_area: int):
@@ -835,12 +835,8 @@ class ImageEngine:
             )
         )
 
-        is_outline_thread = (
-            thread_color_rgb is None or
-            ImageEngine._is_near_black_rgb(thread_color_rgb)
-        )
         is_broad_art_stroke = area >= 180 and max_width_px >= 7.0
-        if is_thin_stroke and is_outline_thread and not is_broad_art_stroke:
+        if is_thin_stroke and not is_broad_art_stroke:
             return StitchSettings(
                 fill_mode="run",
                 stitch_length_mm=2.0,

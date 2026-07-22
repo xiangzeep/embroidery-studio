@@ -261,7 +261,7 @@ class ThreadSuggestionTests(unittest.TestCase):
 class PatrickRegressionTests(unittest.TestCase):
     SOURCE_PATH = (
         "/var/folders/dr/g_jjd1vj4356dmv095y1l4jc0000gn/T/"
-        "codex-clipboard-70fefa60-8745-4e77-8642-e7e85c45be8d.png"
+        "codex-clipboard-8db3b55f-c71c-497e-9c3e-45a029756fe6.png"
     )
 
     def test_supplied_image_meets_high_fidelity_gates(self):
