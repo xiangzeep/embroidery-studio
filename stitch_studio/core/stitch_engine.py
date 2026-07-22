@@ -100,13 +100,6 @@ class StitchEngine:
                     mask, reinforce_settings, image, flow_field, getattr(region, "polygon", None)
                 )
             )
-        if settings.fill_mode == "scanline":
-            paths.extend(
-                self._generate_acute_tip_fill_paths(
-                    mask, settings, getattr(region, "polygon", None)
-                )
-            )
-
         scale = UNITS_PER_MM / self.px_per_mm
         return [[(x * scale, y * scale) for x, y in path] for path in paths if len(path) >= 2]
 
@@ -789,6 +782,12 @@ class StitchEngine:
         mean_channel = rgb.mean(axis=2)
         chroma = max_channel - min_channel
         non_background = alpha & (mean_channel < 248) & ((chroma > 6) | (mean_channel < 220))
+
+        gray = np.clip(mean_channel, 0, 255).astype(np.uint8)
+        local_high = cv2.dilate(gray, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        local_low = cv2.erode(gray, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        source_edge = (local_high.astype(np.int16) - local_low.astype(np.int16)) >= 10
+        non_background &= source_edge
         if source_color is not None:
             target = np.asarray(source_color, dtype=np.int16)
             color_distance = np.linalg.norm(rgb - target, axis=2)
@@ -1429,6 +1428,7 @@ class StitchEngine:
         merged = self._merge_close_run_paths(
             kept,
             max_gap_px=2.6 * self.px_per_mm,
+            support_mask=mask,
         )
 
         repaired = []
@@ -1460,7 +1460,10 @@ class StitchEngine:
         return bool(has_hole and gap <= 3.2 * self.px_per_mm)
 
     def _merge_close_run_paths(
-        self, paths: List[List[Tuple[float, float]]], max_gap_px: float,
+        self,
+        paths: List[List[Tuple[float, float]]],
+        max_gap_px: float,
+        support_mask: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Heal small line-art gaps while avoiding long accidental connectors."""
         changed = True
@@ -1473,6 +1476,18 @@ class StitchEngine:
                     match = self._best_endpoint_match(paths[i], paths[j], max_gap_px)
                     if match is None:
                         continue
+                    _, endpoint_a, endpoint_b, _ = match
+                    point_a = paths[i][-1] if endpoint_a == 1 else paths[i][0]
+                    point_b = paths[j][0] if endpoint_b == 0 else paths[j][-1]
+                    if (
+                        support_mask is not None
+                        and not self._run_connector_has_mask_support(
+                            point_a,
+                            point_b,
+                            support_mask,
+                        )
+                    ):
+                        continue
                     score = match[0] + match[3] * self.px_per_mm
                     if best is None or score < best[0]:
                         best = (score, i, j, match[1], match[2])
@@ -1484,6 +1499,29 @@ class StitchEngine:
             del paths[j]
             changed = True
         return paths
+
+    @staticmethod
+    def _run_connector_has_mask_support(
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        mask: np.ndarray,
+    ) -> bool:
+        """Require a prospective sewn connector to follow recognized line art."""
+        distance = float(np.hypot(end[0] - start[0], end[1] - start[1]))
+        if distance <= 1.5:
+            return True
+
+        supported = cv2.dilate(
+            (mask > 0).astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        ) > 0
+        count = max(3, int(np.ceil(distance * 2.0)) + 1)
+        xs = np.linspace(start[0], end[0], count)
+        ys = np.linspace(start[1], end[1], count)
+        ix = np.clip(np.rint(xs).astype(np.int32), 0, mask.shape[1] - 1)
+        iy = np.clip(np.rint(ys).astype(np.int32), 0, mask.shape[0] - 1)
+        return float(np.count_nonzero(supported[iy, ix])) / count >= 0.8
 
     def _best_endpoint_match(self, a, b, max_gap):
         ends_a = [a[0], a[-1]]

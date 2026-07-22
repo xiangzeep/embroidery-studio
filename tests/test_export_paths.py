@@ -421,6 +421,21 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertGreater(engine._polyline_length(merged[0]), 25.0)
 
+    def test_run_components_do_not_sew_diagonally_across_blank_space(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((20, 32), dtype=np.uint8)
+        mask[5, 2:13] = 255
+        mask[9, 14:25] = 255
+        raw_paths = [
+            [(2.0, 5.0), (12.0, 5.0)],
+            [(14.0, 9.0), (24.0, 9.0)],
+        ]
+
+        merged = engine._assemble_run_components(raw_paths, mask)
+
+        self.assertEqual(len(merged), 2)
+
     def test_run_generation_restores_line_art_mask_from_source_image(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -464,6 +479,23 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertTrue(np.all(restored[15, 5:45] > 0))
         self.assertEqual(int(np.count_nonzero(restored)), 40)
+
+    def test_run_restoration_does_not_absorb_flat_same_color_area(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        image = np.full((30, 50, 3), (230, 52, 25), dtype=np.uint8)
+        mask = np.zeros((30, 50), dtype=np.uint8)
+        mask[15, 5:18] = 255
+        mask[15, 32:45] = 255
+
+        restored = engine._restore_line_art_run_mask(
+            mask,
+            image,
+            source_color=(230, 52, 25),
+        )
+
+        self.assertEqual(int(np.count_nonzero(restored)), 26)
 
     def test_run_component_closed_loop_is_explicitly_closed(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -1334,6 +1366,16 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertIs(first, second)
         self.assertEqual(first.elementCount(), 5)
+
+    def test_canvas_preview_keeps_physical_thread_width_at_every_zoom(self):
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        widths = [
+            canvas_mod.StitchPreviewItem._thread_width_for_lod(lod)
+            for lod in (0.25, 0.5, 1.0, 2.0, 4.0)
+        ]
+
+        self.assertEqual(widths, [3.6] * 5)
 
     def test_canvas_dark_thread_preview_stays_visible_on_dark_background(self):
         qt_widgets = importlib.import_module("PySide6.QtWidgets")
@@ -2260,6 +2302,76 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreaterEqual(len(paths), 3)
         self.assertGreater(sum(len(path) for path in paths), 280)
 
+    def test_large_scanline_region_does_not_receive_artificial_acute_tip_paths(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((120, 120), dtype=np.uint8)
+        cv2.fillPoly(
+            mask,
+            [np.array([[8, 108], [60, 8], [112, 108]], dtype=np.int32)],
+            255,
+        )
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.2,
+            density=1.4,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+        )
+        region = project_mod.Region(mask=mask, stitch_settings=settings)
+
+        base_paths = engine._generate_scanline_paths(mask, settings)
+        generated_paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(generated_paths), len(base_paths))
+
+    def test_small_scanline_detail_does_not_add_automatic_miter_paths(self):
+        import cv2
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((60, 80), dtype=np.uint8)
+        cv2.fillPoly(
+            mask,
+            [np.array([[8, 40], [42, 20], [34, 38]], dtype=np.int32)],
+            255,
+        )
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=2.0,
+            row_spacing_mm=0.2,
+            density=1.4,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+        )
+        region = project_mod.Region(mask=mask, stitch_settings=settings)
+        primary = engine._generate_scanline_paths(mask, settings)
+        reinforce = project_mod.StitchSettings(
+            fill_mode="scanline",
+            angle_deg=settings.angle_deg + 90.0,
+            stitch_length_mm=max(1.2, settings.stitch_length_mm * 0.75),
+            row_spacing_mm=max(0.10, settings.row_spacing_mm * 0.75),
+            density=max(settings.density, 1.65),
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=settings.pull_compensation_mm,
+            randomize_length=settings.randomize_length,
+        )
+        reinforced = engine._generate_scanline_paths(mask, reinforce)
+
+        generated = engine.generate_region_paths(region)
+
+        self.assertEqual(len(generated), len(primary) + len(reinforced))
+
     def test_thin_colored_detail_line_is_preserved_for_fill(self):
         import cv2
 
@@ -2309,7 +2421,7 @@ class ExportPathTests(unittest.TestCase):
         self.assertTrue(paths)
         self.assertGreaterEqual(sum(len(path) for path in paths), 10)
 
-    def test_large_scanline_shape_adds_local_fill_for_acute_tip(self):
+    def test_large_scanline_shape_does_not_add_automatic_acute_tip_fill(self):
         import cv2
 
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -2333,9 +2445,15 @@ class ExportPathTests(unittest.TestCase):
             underlay=False,
         )
 
+        prepared = engine._prepare_mask(region.mask, region.stitch_settings)
+        expected_count = len(
+            engine._generate_contour_paths(prepared, region.stitch_settings)
+        ) + len(
+            engine._generate_scanline_paths(prepared, region.stitch_settings)
+        )
         paths = engine.generate_region_paths(region)
 
-        self.assertGreaterEqual(len(paths), 3)
+        self.assertEqual(len(paths), expected_count)
 
     def test_acute_tip_fill_adds_multiple_miter_cap_strokes(self):
         import cv2

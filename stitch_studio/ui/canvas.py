@@ -248,11 +248,9 @@ class StitchPreviewItem(QGraphicsItem):
 
     @staticmethod
     def _thread_width_for_lod(lod: float) -> float:
-        if lod >= 1.8:
-            return 1.45
-        if lod >= 0.7:
-            return 1.15
-        return 0.85
+        # Scene units are 0.1 mm. Keep a physical 0.36 mm thread diameter at
+        # every zoom level so zooming cannot create artificial gaps in fills.
+        return 3.6
 
     def _compute_bounds(self) -> QRectF:
         if not self.paths:
