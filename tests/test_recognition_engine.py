@@ -126,6 +126,49 @@ class DetailRecognitionTests(unittest.TestCase):
 
 
 class ThreadSuggestionTests(unittest.TestCase):
+    def test_subject_features_restore_eye_mouth_outlines_and_eyebrow(self):
+        image = np.full((80, 100, 3), (255, 127, 80), dtype=np.uint8)
+        subject = np.zeros((80, 100), dtype=bool)
+        subject[5:78, 15:85] = True
+        cv2.ellipse(image, (38, 30), (10, 15), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (64, 30), (10, 15), 0, 0, 360, (255, 255, 255), -1)
+        subject[np.all(image == (255, 255, 255), axis=2)] = False
+        subject[5:48, 15:34] = False
+        cv2.line(image, (32, 11), (43, 8), (0, 0, 0), 2)
+        cv2.ellipse(image, (52, 57), (18, 12), 0, 0, 360, (90, 0, 20), -1)
+        cv2.circle(image, (38, 30), 4, (0, 0, 0), -1)
+        cv2.circle(image, (64, 30), 4, (0, 0, 0), -1)
+        cv2.ellipse(image, (52, 58), (7, 4), 0, 0, 360, (255, 127, 80), -1)
+        thread_map = np.full((80, 100), 1, dtype=np.int32)
+        white = np.all(image == (255, 255, 255), axis=2)
+        mouth = np.all(image == (90, 0, 20), axis=2)
+        black = np.all(image == (0, 0, 0), axis=2)
+        thread_map[white] = 2
+        thread_map[mouth] = 3
+        thread_map[black] = 0
+        palette = np.array(
+            [(0, 0, 0), (255, 127, 80), (255, 255, 255), (128, 0, 32)],
+            dtype=np.uint8,
+        )
+
+        restored, outlines, outline_groups = RecognitionEngine._restore_subject_features(
+            thread_map,
+            image,
+            subject,
+            palette,
+        )
+
+        self.assertEqual(restored[9, 37], 0)
+        self.assertTrue(np.any(restored[27:34, 28:35] == 0))
+        self.assertTrue(np.any(restored[53:62, 31:38] == 0))
+        self.assertEqual(restored[57, 40], 3)
+        self.assertTrue(np.any(outlines[27:34, 28:35]))
+        self.assertTrue(np.any(outlines[53:62, 31:38]))
+        self.assertEqual(len(outline_groups), 3)
+        self.assertFalse(np.any(outline_groups[0][25:36, 34:43]))
+        self.assertFalse(np.any(outline_groups[1][25:36, 60:69]))
+        self.assertFalse(np.any(outline_groups[2][53:64, 44:61]))
+
     def test_thread_map_removes_isolated_subject_speckles_but_keeps_detail(self):
         thread_map = np.full((9, 9), 2, dtype=np.int32)
         thread_map[4, 4] = 0
@@ -302,6 +345,55 @@ class ThreadSuggestionTests(unittest.TestCase):
                     fill_mask |= region.mask > 0
         self.assertTrue(np.all(fill_mask[run_mask]))
 
+    def test_internal_run_detail_underpaints_neighboring_antialias_gap(self):
+        design_map = np.zeros((40, 52), dtype=np.int32)
+        black_line = np.zeros_like(design_map, dtype=np.uint8)
+        alias_line = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.line(black_line, (17, 22), (34, 14), 1, 1)
+        cv2.line(alias_line, (17, 23), (34, 15), 1, 1)
+        design_map[alias_line > 0] = 2
+        design_map[black_line > 0] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="Light Gray", color_rgb=(190, 190, 190)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+                DesignColor(2, (190, 190, 190), int(np.sum(design_map == 2)), 2, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((40, 52, 3), dtype=np.uint8),
+            detail_mask=(black_line | alias_line).astype(bool),
+            detail_design_ids=(1, 2),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((40, 52), dtype=bool),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        coral = next(layer for layer in layers if layer.thread_uid == threads[0].uid)
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        coral_fill = next(
+            region.mask > 0
+            for region in coral.regions
+            if region.stitch_settings.fill_mode == "scanline"
+        )
+        black_run = next(
+            region.mask > 0
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "run"
+        )
+        self.assertTrue(np.all(coral_fill[black_run]))
+        self.assertTrue(np.all(coral_fill[alias_line > 0]))
+
     def test_recognition_reclassifies_joined_thread_components_by_geometry(self):
         design_map = np.zeros((48, 64), dtype=np.int32)
         design_map[8:22, 12:15] = 1
@@ -313,6 +405,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         threads = [
             ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
             ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="Dark Gray", color_rgb=(64, 64, 64)),
         ]
         recognition = RecognitionResult(
             design_map=design_map,
@@ -388,6 +481,210 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(red.regions[0].stitch_settings.fill_mode, "satin")
         self.assertEqual(red.regions[0].stitch_settings.contour_count, 0)
         self.assertLessEqual(red.regions[0].stitch_settings.row_spacing_mm, 0.18)
+
+    def test_internal_closed_feature_outline_uses_satin_and_open_mark_uses_run(self):
+        design_map = np.zeros((72, 88), dtype=np.int32)
+        left_eye = np.zeros_like(design_map, dtype=np.uint8)
+        right_eye = np.zeros_like(design_map, dtype=np.uint8)
+        mouth = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.circle(left_eye, (28, 27), 11, 1, 2)
+        cv2.circle(right_eye, (48, 27), 11, 1, 2)
+        cv2.ellipse(mouth, (38, 53), (15, 8), 0, 0, 360, 1, 2)
+        feature_outline = (left_eye | right_eye | mouth).astype(bool)
+        design_map[feature_outline] = 1
+        cv2.circle(design_map, (28, 27), 5, 1, -1)
+        cv2.line(design_map, (33, 27), (38, 27), 1, 1)
+        cv2.line(design_map, (60, 18), (76, 12), 1, 2)
+        cv2.line(design_map, (8, 8), (14, 8), 2, 1)
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="Dark Gray", color_rgb=(64, 64, 64)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+                DesignColor(2, (64, 64, 64), int(np.sum(design_map == 2)), 2, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((72, 88, 3), dtype=np.uint8),
+            detail_mask=feature_outline,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((72, 88), dtype=bool),
+            feature_outline_mask=feature_outline,
+            feature_outline_groups=tuple(
+                mask.astype(bool) for mask in (left_eye, right_eye, mouth)
+            ),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        modes = {region.stitch_settings.fill_mode for region in black.regions}
+        self.assertEqual(modes, {"scanline", "satin", "run"})
+        self.assertEqual(
+            sum(region.stitch_settings.fill_mode == "satin" for region in black.regions),
+            3,
+        )
+        self.assertEqual(
+            sorted(
+                int(np.count_nonzero(region.mask))
+                for region in black.regions
+                if region.stitch_settings.fill_mode == "satin"
+            ),
+            sorted(int(np.count_nonzero(mask)) for mask in (left_eye, right_eye, mouth)),
+        )
+        self.assertIs(layers[0], black)
+
+    def test_feature_satin_owns_same_color_antialias_halo(self):
+        design_map = np.zeros((48, 48), dtype=np.int32)
+        eye = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.circle(eye, (24, 24), 11, 1, 2)
+        design_map[eye > 0] = 1
+        design_map[12:15, 17:20] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((48, 48, 3), dtype=np.uint8),
+            detail_mask=design_map == 1,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((48, 48), dtype=bool),
+            feature_outline_mask=eye.astype(bool),
+            feature_outline_groups=(eye.astype(bool),),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        satin_regions = [
+            region
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "satin"
+        ]
+        self.assertEqual(len(satin_regions), 1)
+        np.testing.assert_array_equal(satin_regions[0].mask > 0, eye > 0)
+        alias_only = np.zeros_like(eye, dtype=bool)
+        alias_only[12:15, 17:20] = True
+        alias_only &= ~(eye > 0)
+        self.assertFalse(
+            any(
+                np.any((region.mask > 0) & alias_only)
+                for region in black.regions
+                if region.mask is not None
+            )
+        )
+
+    def test_thick_open_facial_mark_uses_independent_satin(self):
+        design_map = np.zeros((48, 72), dtype=np.int32)
+        cv2.line(design_map, (14, 16), (31, 10), 1, 4)
+        cv2.line(design_map, (45, 14), (62, 9), 1, 1)
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((48, 72, 3), dtype=np.uint8),
+            detail_mask=design_map == 1,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((48, 72), dtype=bool),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        satin = [
+            region
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "satin"
+        ]
+        running = [
+            region
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "run"
+        ]
+        self.assertEqual(len(satin), 1)
+        self.assertEqual(len(running), 1)
+        self.assertTrue(np.any(satin[0].mask[8:20, 10:35]))
+        self.assertTrue(np.any(running[0].mask[7:18, 42:65]))
+
+    def test_compact_eyebrow_uses_satin_without_reclassifying_pupil(self):
+        design_map = np.zeros((64, 64), dtype=np.int32)
+        eye = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(eye, (32, 35), (11, 15), 0, 0, 360, 1, 2)
+        design_map[eye > 0] = 1
+        cv2.circle(design_map, (32, 35), 4, 1, -1)
+        cv2.line(design_map, (27, 13), (36, 9), 1, 4)
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((64, 64, 3), dtype=np.uint8),
+            detail_mask=design_map == 1,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((64, 64), dtype=bool),
+            feature_outline_mask=eye.astype(bool),
+            feature_outline_groups=(eye.astype(bool),),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        satin_masks = [
+            region.mask > 0
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "satin"
+        ]
+        fill_masks = [
+            region.mask > 0
+            for region in black.regions
+            if region.stitch_settings.fill_mode == "scanline"
+        ]
+        self.assertEqual(len(satin_masks), 2)
+        self.assertTrue(any(np.any(mask[7:17, 24:39]) for mask in satin_masks))
+        self.assertTrue(any(np.any(mask[31:40, 28:37]) for mask in fill_masks))
 
     def test_satin_border_owns_adjacent_antialias_detail_pixels(self):
         design_map = np.zeros((24, 64), dtype=np.int32)

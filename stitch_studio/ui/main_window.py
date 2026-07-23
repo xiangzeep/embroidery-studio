@@ -122,7 +122,17 @@ class StitchWorker(QThread):
             mask = region.mask
             shape = tuple(mask.shape) if mask is not None else None
             settings_key = tuple(sorted(region.stitch_settings.to_dict().items()))
-            key = (id(layer), shape, settings_key)
+            separate_outline = region.stitch_settings.fill_mode in (
+                "run",
+                "satin",
+                "contour",
+            )
+            key = (
+                id(layer),
+                shape,
+                settings_key,
+                region.uid if separate_outline else None,
+            )
             groups.setdefault(key, []).append((layer, region))
 
         work_items = []

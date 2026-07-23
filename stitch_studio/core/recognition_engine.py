@@ -39,6 +39,8 @@ class RecognitionResult:
     thread_reconstructed_rgb: Optional[np.ndarray] = None
     thread_metrics: Optional[RecognitionMetrics] = None
     subject_metrics: Optional[RecognitionMetrics] = None
+    feature_outline_mask: Optional[np.ndarray] = None
+    feature_outline_groups: Tuple[np.ndarray, ...] = ()
 
 
 class RecognitionEngine:
@@ -182,10 +184,22 @@ class RecognitionEngine:
                 detail_mask,
                 palette_rgb,
             )
+            (
+                thread_map,
+                feature_outline_mask,
+                feature_outline_groups,
+            ) = cls._restore_subject_features(
+                thread_map,
+                rgb,
+                subject_mask,
+                palette_rgb,
+            )
             assigned = thread_map >= 0
             thread_reconstructed[assigned] = palette_rgb[thread_map[assigned]]
         else:
             thread_map = None
+            feature_outline_mask = np.zeros((height, width), dtype=bool)
+            feature_outline_groups = ()
         thread_metrics = cls.measure_fidelity(
             rgb,
             thread_reconstructed,
@@ -211,7 +225,166 @@ class RecognitionEngine:
             thread_reconstructed_rgb=thread_reconstructed,
             thread_metrics=thread_metrics,
             subject_metrics=subject_metrics,
+            feature_outline_mask=feature_outline_mask,
+            feature_outline_groups=feature_outline_groups,
         )
+
+    @staticmethod
+    def _restore_subject_features(
+        thread_map: np.ndarray,
+        source_image: np.ndarray,
+        subject_mask: np.ndarray,
+        palette_rgb: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, Tuple[np.ndarray, ...]]:
+        """Restore cartoon facial outlines after physical thread reduction."""
+        restored = np.asarray(thread_map, dtype=np.int32).copy()
+        source = np.asarray(source_image, dtype=np.uint8)
+        subject = np.asarray(subject_mask, dtype=bool)
+        palette = np.asarray(palette_rgb, dtype=np.uint8)
+        outlines = np.zeros(restored.shape, dtype=bool)
+        outline_groups = []
+        if (
+            source.shape[:2] != restored.shape
+            or subject.shape != restored.shape
+            or palette.ndim != 2
+            or palette.shape[1] < 3
+        ):
+            return restored, outlines, ()
+
+        selected = np.unique(restored[restored >= 0])
+        if not selected.size:
+            return restored, outlines
+        luminance = (
+            palette[:, 0] * 0.299
+            + palette[:, 1] * 0.587
+            + palette[:, 2] * 0.114
+        )
+        chroma = palette[:, :3].max(axis=1) - palette[:, :3].min(axis=1)
+        darkest = int(np.argmin(luminance))
+        light_candidates = [
+            int(index)
+            for index in selected
+            if luminance[index] >= 235 and chroma[index] <= 28
+        ]
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        image_area = restored.size
+        eye_components = []
+
+        def outer_border(component_mask: np.ndarray) -> np.ndarray:
+            contours, _ = cv2.findContours(
+                component_mask.astype(np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            filled = np.zeros(restored.shape, dtype=np.uint8)
+            if contours:
+                cv2.drawContours(filled, contours, -1, 1, thickness=-1)
+            return cv2.morphologyEx(
+                filled,
+                cv2.MORPH_GRADIENT,
+                kernel,
+            ).astype(bool)
+
+        subject_envelope = np.zeros(restored.shape, dtype=np.uint8)
+        subject_contours, _ = cv2.findContours(
+            subject.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if subject_contours:
+            cv2.drawContours(subject_envelope, subject_contours, -1, 1, thickness=-1)
+        for light_index in light_candidates:
+            light_mask = (restored == light_index).astype(np.uint8)
+            component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                light_mask,
+                connectivity=8,
+            )
+            for component_id in range(1, component_count):
+                x, y, width, height, area = stats[component_id].tolist()
+                if area < max(35, int(image_area * 0.001)):
+                    continue
+                if area > int(image_area * 0.18):
+                    continue
+                component = labels == component_id
+                component_kernel_size = max(
+                    5,
+                    int(round(max(width, height) * 0.70)),
+                )
+                if component_kernel_size % 2 == 0:
+                    component_kernel_size += 1
+                component_envelope = cv2.dilate(
+                    subject_envelope,
+                    cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (component_kernel_size, component_kernel_size),
+                    ),
+                )
+                if np.mean(component_envelope[component]) < 0.78:
+                    continue
+                if x <= 1 or y <= 1 or x + width >= restored.shape[1] - 1:
+                    continue
+                aspect = width / max(1, height)
+                if not 0.35 <= aspect <= 2.4:
+                    continue
+                border = outer_border(component)
+                restored[border] = darkest
+                outlines |= border
+                if np.any(border):
+                    outline_groups.append(border.copy())
+                eye_components.append((x, y, width, height, area, centroids[component_id]))
+
+        gray = cv2.cvtColor(source[:, :, :3], cv2.COLOR_RGB2GRAY)
+        source_dark = ((gray <= 72) & subject).astype(np.uint8)
+        component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            source_dark,
+            connectivity=8,
+        )
+        dark_components = []
+        for component_id in range(1, component_count):
+            x, y, width, height, area = stats[component_id].tolist()
+            if area < 4:
+                continue
+            component = labels == component_id
+            distance = cv2.distanceTransform(
+                component.astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            positive = distance[distance > 0]
+            median_width = float(np.median(positive) * 2) if positive.size else 0.0
+            dark_components.append(
+                (component_id, x, y, width, height, area, median_width, centroids[component_id])
+            )
+            if area <= int(image_area * 0.015) and median_width <= 4.5:
+                restored[component] = darkest
+
+        if eye_components:
+            eye_left = min(item[0] for item in eye_components)
+            eye_right = max(item[0] + item[2] for item in eye_components)
+            eye_bottom = max(item[1] + item[3] for item in eye_components)
+            mouth_candidates = []
+            for item in dark_components:
+                component_id, x, y, width, height, area, median_width, centroid = item
+                overlap = max(0, min(x + width, eye_right) - max(x, eye_left))
+                if area < int(image_area * 0.003):
+                    continue
+                if area > int(image_area * 0.16) or median_width <= 4.5:
+                    continue
+                if overlap < min(width, eye_right - eye_left) * 0.35:
+                    continue
+                if float(centroid[1]) < eye_bottom - max(3, int(restored.shape[0] * 0.03)):
+                    continue
+                mouth_candidates.append(item)
+            if mouth_candidates:
+                component_id = max(mouth_candidates, key=lambda item: item[5])[0]
+                mouth = labels == component_id
+                border = outer_border(mouth)
+                restored[border] = darkest
+                outlines |= border
+                if np.any(border):
+                    outline_groups.append(border.copy())
+
+        return restored, outlines, tuple(outline_groups)
 
     @staticmethod
     def _clean_thread_map(

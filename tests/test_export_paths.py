@@ -1653,6 +1653,21 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(work_items), 2)
 
+    def test_photo_worker_keeps_satin_features_separate(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        layer = project_mod.Layer(thread_uid="black", order=0)
+        first = project_mod.Region(mask=np.ones((8, 8), dtype=np.uint8))
+        second = project_mod.Region(mask=np.ones((8, 8), dtype=np.uint8))
+        first.stitch_settings.fill_mode = "satin"
+        second.stitch_settings.fill_mode = "satin"
+
+        work_items = main_mod.StitchWorker._photo_stitch_work_items(
+            [(layer, first), (layer, second)]
+        )
+
+        self.assertEqual(len(work_items), 2)
+
     def test_stitch_worker_uses_qthread_finished_after_run_returns(self):
         import inspect
 

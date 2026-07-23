@@ -670,8 +670,19 @@ class ImageEngine:
 
         if generation_mode != "cross_stitch":
             subject_mask = getattr(recognition, "subject_mask", None)
+            feature_outline_mask = getattr(recognition, "feature_outline_mask", None)
+            feature_outline_groups = getattr(
+                recognition,
+                "feature_outline_groups",
+                (),
+            )
             for layer in layer_map.values():
-                ImageEngine._reclassify_photo_layer_components(layer, subject_mask)
+                ImageEngine._reclassify_photo_layer_components(
+                    layer,
+                    subject_mask,
+                    feature_outline_mask,
+                    feature_outline_groups,
+                )
             ImageEngine._suppress_satin_border_halos(layer_map.values())
             ImageEngine._underpaint_run_details(layer_map.values())
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
@@ -751,19 +762,25 @@ class ImageEngine:
                 )
 
     @staticmethod
-    def _layer_sort_key(layer: Layer) -> Tuple[int, int]:
+    def _layer_sort_key(layer: Layer) -> Tuple[int, int, int]:
         area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
         is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
         has_run_detail = any(
             region.stitch_settings.fill_mode in ("run", "satin")
             for region in layer.regions
         )
-        return (0 if has_run_detail or is_black_detail else 1, area)
+        return (
+            0 if layer.is_detail_layer else 1,
+            0 if has_run_detail or is_black_detail else 1,
+            area,
+        )
 
     @staticmethod
     def _reclassify_photo_layer_components(
         layer: Layer,
         subject_mask: Optional[np.ndarray] = None,
+        feature_outline_mask: Optional[np.ndarray] = None,
+        feature_outline_groups: Tuple[np.ndarray, ...] = (),
     ):
         """Choose fill or running stitches after merging physical thread shades."""
         masks = [region.mask for region in layer.regions if region.mask is not None]
@@ -798,9 +815,48 @@ class ImageEngine:
                     iterations=1,
                 ).astype(bool)
 
+        feature_outlines = None
+        if feature_outline_mask is not None:
+            candidate = np.asarray(feature_outline_mask, dtype=bool)
+            if candidate.shape == shape:
+                feature_outlines = candidate
+        feature_groups = [
+            np.asarray(group, dtype=bool)
+            for group in feature_outline_groups
+            if np.asarray(group).shape == shape and np.any(group)
+        ]
+        feature_interior = np.zeros(shape, dtype=np.uint8)
+        for group in feature_groups:
+            contours, _ = cv2.findContours(
+                group.astype(np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            if contours:
+                cv2.drawContours(
+                    feature_interior,
+                    contours,
+                    -1,
+                    1,
+                    thickness=-1,
+                )
+        feature_nearby = None
+        if np.any(feature_interior):
+            proximity_radius = max(6, int(round(min(shape) * 0.07)))
+            proximity_size = proximity_radius * 2 + 1
+            feature_nearby = cv2.dilate(
+                feature_interior,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (proximity_size, proximity_size),
+                ),
+                iterations=1,
+            ).astype(bool)
+
         component_count, labels = cv2.connectedComponents(combined, connectivity=8)
         mode_masks = {}
         mode_settings = {}
+        mode_has_feature = {}
         for label in range(1, component_count):
             component = labels == label
             if not np.any(component):
@@ -830,26 +886,62 @@ class ImageEngine:
                 if subject_boundary is not None
                 else 1.0
             )
+            feature_contact = (
+                float(np.count_nonzero(component & feature_outlines)) / component_area
+                if feature_outlines is not None
+                else 0.0
+            )
+            feature_interior_contact = (
+                float(np.count_nonzero(component & (feature_interior > 0)))
+                / component_area
+            )
+            feature_nearby_contact = (
+                float(np.count_nonzero(component & feature_nearby)) / component_area
+                if feature_nearby is not None
+                else 0.0
+            )
             stitch_settings = ImageEngine._default_stitch_settings_for_mask(
                 component_mask,
                 layer.thread_color_rgb,
             )
             is_satin_outline = (
                 ImageEngine._is_dark_thread_rgb(layer.thread_color_rgb)
-                and component_area >= 40
-                and component_long_axis >= 24
-                and component_median_width >= 2.0
                 and component_max_width <= 10.0
                 and (
-                    component_short_axis <= 8
-                    or component_fill_ratio <= 0.25
+                    (
+                        component_area >= 40
+                        and component_long_axis >= 24
+                        and component_median_width >= 2.0
+                        and
+                        (
+                            component_short_axis <= 8
+                            or component_fill_ratio <= 0.25
+                        )
+                        and boundary_contact >= 0.12
+                    )
+                    or feature_contact >= 0.25
+                    or (
+                        component_area >= 24
+                        and component_long_axis >= 10
+                        and component_long_axis >= component_short_axis * 1.6
+                        and component_median_width >= 2.5
+                        and component_fill_ratio <= 0.75
+                    )
+                    or (
+                        24 <= component_area <= 120
+                        and component_long_axis >= 8
+                        and component_median_width >= 2.5
+                        and component_fill_ratio <= 0.70
+                        and feature_interior_contact <= 0.10
+                        and feature_nearby_contact >= 0.05
+                    )
                 )
-                and boundary_contact >= 0.12
             )
             if is_satin_outline:
                 stitch_settings = ImageEngine._satin_outline_stitch_settings()
             elif (
                 ImageEngine._is_dark_thread_rgb(layer.thread_color_rgb)
+                and feature_interior_contact < 0.50
                 and (
                     component_area < 36
                     or (component_area < 180 and component_fill_ratio < 0.62)
@@ -862,7 +954,20 @@ class ImageEngine:
             if mode not in mode_masks:
                 mode_masks[mode] = np.zeros(shape, dtype=np.uint8)
                 mode_settings[mode] = stitch_settings
+                mode_has_feature[mode] = False
             mode_masks[mode][component] = 255
+            mode_has_feature[mode] = mode_has_feature[mode] or feature_contact >= 0.25
+
+        if feature_outlines is not None:
+            feature_owned = (combined > 0) & feature_outlines
+            if np.any(feature_owned):
+                for mode_mask in mode_masks.values():
+                    mode_mask[feature_owned] = 0
+                if "satin" not in mode_masks:
+                    mode_masks["satin"] = np.zeros(shape, dtype=np.uint8)
+                    mode_settings["satin"] = ImageEngine._satin_outline_stitch_settings()
+                mode_masks["satin"][feature_owned] = 255
+                mode_has_feature["satin"] = True
 
         rebuilt_regions = []
         for mode in ("scanline", "satin", "run"):
@@ -870,41 +975,82 @@ class ImageEngine:
             if mask is None or not np.any(mask):
                 continue
 
-            contributors = [
-                region
-                for region in source_regions
-                if np.any((region.mask > 0) & (mask > 0))
-            ]
-            design_ids = {region.design_color_id for region in contributors}
-            design_rgbs = {region.design_color_rgb for region in contributors}
-            deltas = [
-                region.thread_match_delta_e
-                for region in contributors
-                if region.thread_match_delta_e is not None
-            ]
-            is_detail = any(region.is_detail_region for region in contributors)
-            region = Region(
-                name=(
-                    f"{layer.name} fill"
-                    if mode == "scanline"
-                    else (
-                        f"{layer.name} border"
-                        if mode == "satin"
-                        else f"{layer.name} outline"
+            split_masks = [(mask, mode_has_feature.get(mode, False))]
+            if mode == "satin" and feature_groups:
+                split_masks = []
+                feature_union = np.zeros(shape, dtype=bool)
+                for group in feature_groups:
+                    feature_part = (mask > 0) & group
+                    if not np.any(feature_part):
+                        continue
+                    split_masks.append(
+                        (feature_part.astype(np.uint8) * 255, True)
                     )
-                ),
-                mask=mask,
-                design_color_id=(next(iter(design_ids)) if len(design_ids) == 1 else None),
-                design_color_rgb=(next(iter(design_rgbs)) if len(design_rgbs) == 1 else None),
-                thread_match_delta_e=(max(deltas) if deltas else None),
-                is_detail_region=is_detail,
-                stitch_settings=mode_settings[mode],
-            )
-            region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
-            rebuilt_regions.append(region)
+                    feature_union |= feature_part
+                feature_halo = cv2.dilate(
+                    feature_union.astype(np.uint8),
+                    np.ones((3, 3), dtype=np.uint8),
+                    iterations=1,
+                ).astype(bool)
+                remainder = (mask > 0) & ~feature_union
+                component_count, component_labels = cv2.connectedComponents(
+                    remainder.astype(np.uint8),
+                    connectivity=8,
+                )
+                for component_id in range(1, component_count):
+                    component = component_labels == component_id
+                    if not np.any(component) or np.any(component & feature_halo):
+                        continue
+                    split_masks.append(
+                        (component.astype(np.uint8) * 255, False)
+                    )
+
+            for split_index, (region_mask, is_feature_part) in enumerate(split_masks, 1):
+                contributors = [
+                    region
+                    for region in source_regions
+                    if np.any((region.mask > 0) & (region_mask > 0))
+                ]
+                design_ids = {region.design_color_id for region in contributors}
+                design_rgbs = {region.design_color_rgb for region in contributors}
+                deltas = [
+                    region.thread_match_delta_e
+                    for region in contributors
+                    if region.thread_match_delta_e is not None
+                ]
+                is_detail = (
+                    any(region.is_detail_region for region in contributors)
+                    or is_feature_part
+                )
+                region = Region(
+                    name=(
+                        f"{layer.name} fill"
+                        if mode == "scanline"
+                        else (
+                            f"{layer.name} border {split_index}"
+                            if mode == "satin"
+                            else f"{layer.name} outline"
+                        )
+                    ),
+                    mask=region_mask,
+                    design_color_id=(
+                        next(iter(design_ids)) if len(design_ids) == 1 else None
+                    ),
+                    design_color_rgb=(
+                        next(iter(design_rgbs)) if len(design_rgbs) == 1 else None
+                    ),
+                    thread_match_delta_e=(max(deltas) if deltas else None),
+                    is_detail_region=is_detail,
+                    stitch_settings=mode_settings[mode],
+                )
+                region.polygon = GeometryEngine.reconstruct_region_polygon(region_mask)
+                rebuilt_regions.append(region)
 
         if rebuilt_regions:
             layer.regions = rebuilt_regions
+            layer.is_detail_layer = any(
+                region.is_detail_region for region in rebuilt_regions
+            )
 
     @staticmethod
     def _suppress_satin_border_halos(layers):
