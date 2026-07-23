@@ -237,10 +237,16 @@ class QuantizeWorker(QThread):
 
             self.result_ready.emit({
                 "processed": processed,
-                "thread_map": recognition.design_map,
-                "used_indices": [
-                    color.design_id for color in recognition.design_colors
-                ],
+                "thread_map": (
+                    recognition.thread_map
+                    if recognition.thread_map is not None
+                    else recognition.design_map
+                ),
+                "used_indices": sorted({
+                    color.nearest_thread_index
+                    for color in recognition.design_colors
+                    if color.nearest_thread_index is not None
+                }),
                 "regions": regions,
                 "layers": layers,
                 "recognition": recognition,
@@ -808,15 +814,19 @@ class MainWindow(QMainWindow):
                 regions=len(regions),
                 layers=len(layers),
                 color_fidelity=(
-                    recognition.metrics.perceptual_similarity * 100.0
+                    recognition.thread_metrics.perceptual_similarity * 100.0
                     if recognition is not None else 0.0
                 ),
                 edge_fidelity=(
-                    recognition.metrics.boundary_recall * 100.0
+                    recognition.thread_metrics.boundary_recall * 100.0
                     if recognition is not None else 0.0
                 ),
                 detail_fidelity=(
-                    recognition.metrics.detail_recall * 100.0
+                    recognition.thread_metrics.detail_recall * 100.0
+                    if recognition is not None else 0.0
+                ),
+                subject_fidelity=(
+                    recognition.subject_metrics.perceptual_similarity * 100.0
                     if recognition is not None else 0.0
                 ),
             )

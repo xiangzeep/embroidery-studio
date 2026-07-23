@@ -6,6 +6,7 @@ segmentation into regions, and flow field computation.
 
 import numpy as np
 import cv2
+from types import SimpleNamespace
 from typing import List, Tuple, Optional, Dict
 from PIL import Image, ImageEnhance, ImageFilter
 from scipy.ndimage import gaussian_filter
@@ -547,13 +548,46 @@ class ImageEngine:
         """Build editable layers by design color, not physical thread index."""
         settings = quant_settings or QuantizationSettings()
         design_map = np.asarray(recognition.design_map)
+        design_colors = recognition.design_colors
+        detail_design_ids = set(recognition.detail_design_ids)
+        thread_map = getattr(recognition, "thread_map", None)
+        if thread_map is not None:
+            candidate_map = np.asarray(thread_map)
+            if candidate_map.shape == design_map.shape:
+                design_map = candidate_map
+                design_colors = []
+                detail_design_ids = set()
+                detail_pixels = np.asarray(recognition.detail_mask, dtype=bool)
+                for thread_index in sorted(int(value) for value in np.unique(design_map)):
+                    if thread_index < 0 or thread_index >= len(physical_threads):
+                        continue
+                    mask = design_map == thread_index
+                    if not np.any(mask):
+                        continue
+                    if source_image is not None and source_image.shape[:2] == mask.shape:
+                        representative = np.median(
+                            source_image[mask, :3].astype(np.float64),
+                            axis=0,
+                        )
+                        exact_rgb = tuple(int(round(value)) for value in representative)
+                    else:
+                        exact_rgb = tuple(physical_threads[thread_index].color_rgb)
+                    design_colors.append(SimpleNamespace(
+                        design_id=thread_index,
+                        color_rgb=exact_rgb,
+                        pixel_count=int(np.count_nonzero(mask)),
+                        nearest_thread_index=thread_index,
+                        nearest_thread_delta_e=0.0,
+                    ))
+                    if np.mean(detail_pixels[mask]) >= 0.5:
+                        detail_design_ids.add(thread_index)
         foreground = np.ones(design_map.shape, dtype=bool)
         if source_image is not None and not settings.include_background:
             foreground = ~ImageEngine._detect_background_mask(source_image)
 
         layer_map = {}
         detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
-        for design_color in recognition.design_colors:
+        for design_color in design_colors:
             binary = (
                 (design_map == design_color.design_id) & foreground
             ).astype(np.uint8)
@@ -570,7 +604,7 @@ class ImageEngine:
                 / max(1, np.count_nonzero(binary))
             )
             is_detail_layer = (
-                design_color.design_id in recognition.detail_design_ids
+                design_color.design_id in detail_design_ids
                 or detail_ratio >= 0.5
             )
             key = (
@@ -635,8 +669,9 @@ class ImageEngine:
             layer.add_region(region)
 
         if generation_mode != "cross_stitch":
+            subject_mask = getattr(recognition, "subject_mask", None)
             for layer in layer_map.values():
-                ImageEngine._reclassify_photo_layer_components(layer)
+                ImageEngine._reclassify_photo_layer_components(layer, subject_mask)
             ImageEngine._suppress_satin_border_halos(layer_map.values())
             ImageEngine._underpaint_run_details(layer_map.values())
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
@@ -726,7 +761,10 @@ class ImageEngine:
         return (0 if has_run_detail or is_black_detail else 1, area)
 
     @staticmethod
-    def _reclassify_photo_layer_components(layer: Layer):
+    def _reclassify_photo_layer_components(
+        layer: Layer,
+        subject_mask: Optional[np.ndarray] = None,
+    ):
         """Choose fill or running stitches after merging physical thread shades."""
         masks = [region.mask for region in layer.regions if region.mask is not None]
         if not masks:
@@ -744,6 +782,21 @@ class ImageEngine:
         combined = np.zeros(shape, dtype=np.uint8)
         for region in source_regions:
             combined[region.mask > 0] = 1
+
+        subject_boundary = None
+        if subject_mask is not None:
+            subject = np.asarray(subject_mask, dtype=np.uint8)
+            if subject.shape == shape and np.any(subject):
+                subject_boundary = cv2.morphologyEx(
+                    subject,
+                    cv2.MORPH_GRADIENT,
+                    np.ones((3, 3), dtype=np.uint8),
+                )
+                subject_boundary = cv2.dilate(
+                    subject_boundary,
+                    np.ones((3, 3), dtype=np.uint8),
+                    iterations=1,
+                ).astype(bool)
 
         component_count, labels = cv2.connectedComponents(combined, connectivity=8)
         mode_masks = {}
@@ -772,6 +825,11 @@ class ImageEngine:
                 else 0.0
             )
             component_max_width = float(distance.max() * 2)
+            boundary_contact = (
+                float(np.count_nonzero(component & subject_boundary)) / component_area
+                if subject_boundary is not None
+                else 1.0
+            )
             stitch_settings = ImageEngine._default_stitch_settings_for_mask(
                 component_mask,
                 layer.thread_color_rgb,
@@ -786,6 +844,7 @@ class ImageEngine:
                     component_short_axis <= 8
                     or component_fill_ratio <= 0.25
                 )
+                and boundary_contact >= 0.12
             )
             if is_satin_outline:
                 stitch_settings = ImageEngine._satin_outline_stitch_settings()

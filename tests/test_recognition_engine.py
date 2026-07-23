@@ -126,6 +126,79 @@ class DetailRecognitionTests(unittest.TestCase):
 
 
 class ThreadSuggestionTests(unittest.TestCase):
+    def test_thread_map_removes_isolated_subject_speckles_but_keeps_detail(self):
+        thread_map = np.full((9, 9), 2, dtype=np.int32)
+        thread_map[4, 4] = 0
+        thread_map[2, 2] = 3
+        detail = np.zeros((9, 9), dtype=bool)
+        detail[2, 2] = True
+        subject = np.ones((9, 9), dtype=bool)
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            subject,
+            detail,
+        )
+
+        self.assertEqual(cleaned[4, 4], 2)
+        self.assertEqual(cleaned[2, 2], 3)
+
+    def test_thread_map_removes_neutral_antialias_from_subject_silhouette(self):
+        subject = np.zeros((15, 15), dtype=bool)
+        subject[2:13, 2:13] = True
+        thread_map = np.zeros((15, 15), dtype=np.int32)
+        thread_map[subject] = 1
+        thread_map[2, 6:9] = 2
+        detail = np.zeros((15, 15), dtype=bool)
+        detail[2, 6:9] = True
+        palette = np.array(
+            [
+                (40, 90, 180),
+                (255, 127, 80),
+                (128, 128, 128),
+            ],
+            dtype=np.uint8,
+        )
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            subject,
+            detail,
+            palette,
+        )
+
+        self.assertTrue(np.all(cleaned[2, 6:9] == 1))
+
+    def test_thread_budget_prioritizes_subject_over_broad_background(self):
+        design_colors = np.array(
+            [
+                (20, 55, 130),
+                (100, 190, 245),
+                (255, 125, 100),
+                (10, 10, 10),
+            ],
+            dtype=np.uint8,
+        )
+        threads = [
+            ThreadColor(name="Dark blue", color_rgb=(20, 55, 130)),
+            ThreadColor(name="Light blue", color_rgb=(100, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(255, 125, 100)),
+            ThreadColor(name="Black", color_rgb=(10, 10, 10)),
+        ]
+        palette_lab = RecognitionEngine._physical_palette_lab(threads)
+
+        matches = RecognitionEngine._match_threads_with_budget(
+            design_colors,
+            np.array([8000, 6000, 1800, 250]),
+            (3,),
+            palette_lab,
+            2,
+            subject_pixel_counts=np.array([0, 0, 1800, 250]),
+        )
+
+        selected = {match[0] for match in matches}
+        self.assertEqual(selected, {2, 3})
+
     def test_physical_thread_matches_respect_requested_color_limit(self):
         colors = [
             (12, 18, 24),
@@ -426,6 +499,90 @@ class PatrickRegressionTests(unittest.TestCase):
         "/var/folders/dr/g_jjd1vj4356dmv095y1l4jc0000gn/T/"
         "codex-clipboard-8db3b55f-c71c-497e-9c3e-45a029756fe6.png"
     )
+
+    def test_primary_subject_mask_prefers_center_character(self):
+        if not os.path.exists(self.SOURCE_PATH):
+            self.skipTest("Supplied Patrick regression image is not available")
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+
+        subject = RecognitionEngine.detect_primary_subject(image)
+
+        self.assertEqual(subject.shape, image.shape[:2])
+        self.assertTrue(subject[105, 160])
+        self.assertTrue(subject[170, 160])
+        self.assertFalse(subject[35, 20])
+        self.assertFalse(subject[170, 20])
+        self.assertGreater(np.mean(subject), 0.20)
+        self.assertLess(np.mean(subject), 0.60)
+
+    def test_reports_fidelity_for_final_physical_threads(self):
+        if not os.path.exists(self.SOURCE_PATH):
+            self.skipTest("Supplied Patrick regression image is not available")
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 120, 210)),
+            ThreadColor(name="Coral", color_rgb=(255, 125, 100)),
+            ThreadColor(name="Red", color_rgb=(210, 35, 25)),
+            ThreadColor(name="Green", color_rgb=(130, 160, 110)),
+        ]
+
+        result = RecognitionEngine.recognize(
+            image,
+            threads,
+            QuantizationSettings(n_colors=6, include_background=True),
+        )
+
+        self.assertIsNotNone(result.thread_reconstructed_rgb)
+        self.assertIsNotNone(result.thread_metrics)
+        self.assertIsNotNone(result.subject_metrics)
+        self.assertEqual(result.thread_reconstructed_rgb.shape, image.shape)
+        self.assertLessEqual(
+            result.thread_metrics.perceptual_similarity,
+            result.metrics.perceptual_similarity,
+        )
+        self.assertGreater(result.subject_metrics.pixel_coverage, 0.20)
+
+    def test_subject_boundary_uses_satin_but_internal_mark_uses_run(self):
+        height, width = 80, 80
+        subject = np.zeros((height, width), dtype=bool)
+        cv2.circle(subject, (40, 40), 25, 1, -1)
+        design_map = np.zeros((height, width), dtype=np.int32)
+        boundary = cv2.morphologyEx(
+            subject.astype(np.uint8),
+            cv2.MORPH_GRADIENT,
+            np.ones((3, 3), dtype=np.uint8),
+        ).astype(bool)
+        design_map[boundary] = 1
+        design_map[38:41, 25:55] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((height, width, 3), dtype=np.uint8),
+            detail_mask=design_map == 1,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        modes = {region.stitch_settings.fill_mode for region in black.regions}
+        self.assertEqual(modes, {"satin", "run"})
 
     def test_supplied_image_meets_high_fidelity_gates(self):
         if not os.path.exists(self.SOURCE_PATH):

@@ -34,6 +34,11 @@ class RecognitionResult:
     detail_mask: np.ndarray
     detail_design_ids: Tuple[int, ...]
     metrics: RecognitionMetrics
+    subject_mask: Optional[np.ndarray] = None
+    thread_map: Optional[np.ndarray] = None
+    thread_reconstructed_rgb: Optional[np.ndarray] = None
+    thread_metrics: Optional[RecognitionMetrics] = None
+    subject_metrics: Optional[RecognitionMetrics] = None
 
 
 class RecognitionEngine:
@@ -58,6 +63,7 @@ class RecognitionEngine:
             if settings.preserve_details
             else np.zeros((height, width), dtype=bool)
         )
+        subject_mask = cls.detect_primary_subject(rgb)
         flat_detail = detail_mask.reshape(-1)
         budget = cls._design_color_budget(rgb, settings)
         packed = (
@@ -130,12 +136,17 @@ class RecognitionEngine:
             design_map.reshape(-1),
             minlength=len(centers_rgb),
         )
+        subject_pixel_counts = np.bincount(
+            design_map[subject_mask].reshape(-1),
+            minlength=len(centers_rgb),
+        )
         thread_matches = cls._match_threads_with_budget(
             centers_rgb,
             pixel_counts,
             detail_design_ids,
             palette_lab,
             int(getattr(settings, "n_colors", len(physical_threads))),
+            subject_pixel_counts=subject_pixel_counts,
         )
         design_colors = []
         for design_id, color in enumerate(centers_rgb):
@@ -154,6 +165,40 @@ class RecognitionEngine:
             source_detail_mask=detail_mask,
             recognized_detail_mask=detail_mask,
         )
+        matched_indices = np.asarray(
+            [match[0] if match[0] is not None else -1 for match in thread_matches],
+            dtype=np.int32,
+        )
+        palette_rgb = (
+            np.asarray([thread.color_rgb for thread in physical_threads], dtype=np.uint8)
+            if physical_threads
+            else np.empty((0, 3), dtype=np.uint8)
+        )
+        thread_reconstructed = reconstructed.copy()
+        if physical_threads:
+            thread_map = cls._clean_thread_map(
+                matched_indices[design_map],
+                subject_mask,
+                detail_mask,
+                palette_rgb,
+            )
+            assigned = thread_map >= 0
+            thread_reconstructed[assigned] = palette_rgb[thread_map[assigned]]
+        else:
+            thread_map = None
+        thread_metrics = cls.measure_fidelity(
+            rgb,
+            thread_reconstructed,
+            source_detail_mask=detail_mask,
+            recognized_detail_mask=detail_mask,
+        )
+        subject_metrics = cls.measure_fidelity(
+            rgb,
+            thread_reconstructed,
+            assigned_mask=subject_mask,
+            source_detail_mask=detail_mask & subject_mask,
+            recognized_detail_mask=detail_mask & subject_mask,
+        )
         return RecognitionResult(
             design_map=design_map,
             design_colors=design_colors,
@@ -161,7 +206,216 @@ class RecognitionEngine:
             detail_mask=detail_mask,
             detail_design_ids=detail_design_ids,
             metrics=metrics,
+            subject_mask=subject_mask,
+            thread_map=thread_map,
+            thread_reconstructed_rgb=thread_reconstructed,
+            thread_metrics=thread_metrics,
+            subject_metrics=subject_metrics,
         )
+
+    @staticmethod
+    def _clean_thread_map(
+        thread_map: np.ndarray,
+        subject_mask: np.ndarray,
+        detail_mask: np.ndarray,
+        palette_rgb: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Merge isolated subject flecks into their surrounding thread color."""
+        cleaned = np.asarray(thread_map, dtype=np.int32).copy()
+        subject = np.asarray(subject_mask, dtype=bool)
+        detail = np.asarray(detail_mask, dtype=bool)
+        if cleaned.shape != subject.shape or cleaned.shape != detail.shape:
+            return cleaned
+
+        max_speck_area = max(4, int(round(cleaned.size * 0.00015)))
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        for thread_index in np.unique(cleaned[subject]):
+            if thread_index < 0:
+                continue
+            label_mask = ((cleaned == thread_index) & subject).astype(np.uint8)
+            component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                label_mask,
+                connectivity=8,
+            )
+            for component_id in range(1, component_count):
+                area = int(stats[component_id, cv2.CC_STAT_AREA])
+                if area > max_speck_area:
+                    continue
+                component = labels == component_id
+                if np.mean(detail[component]) >= 0.5:
+                    continue
+                ring = cv2.dilate(component.astype(np.uint8), kernel, iterations=1).astype(bool)
+                ring &= ~component
+                ring &= subject
+                neighbors = cleaned[ring]
+                neighbors = neighbors[neighbors >= 0]
+                if not neighbors.size:
+                    continue
+                values, counts = np.unique(neighbors, return_counts=True)
+                replacement = int(values[int(np.argmax(counts))])
+                if replacement != thread_index:
+                    cleaned[component] = replacement
+
+        palette = np.asarray(palette_rgb) if palette_rgb is not None else None
+        if palette is None or palette.ndim != 2 or palette.shape[1] < 3:
+            return cleaned
+
+        eroded_subject = cv2.erode(
+            subject.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        dilated_subject = cv2.dilate(
+            subject.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        silhouette = dilated_subject & ~eroded_subject
+        luminance = (
+            palette[:, 0] * 0.299
+            + palette[:, 1] * 0.587
+            + palette[:, 2] * 0.114
+        )
+        chroma = palette[:, :3].max(axis=1) - palette[:, :3].min(axis=1)
+        neutral_indices = np.flatnonzero(
+            (chroma <= 28) & (luminance >= 40) & (luminance <= 225)
+        )
+        neutral_lookup = set(int(index) for index in neutral_indices)
+        wide_kernel = np.ones((5, 5), dtype=np.uint8)
+        for thread_index in neutral_indices:
+            candidate = silhouette & (cleaned == int(thread_index))
+            if not np.any(candidate):
+                continue
+            component_count, labels = cv2.connectedComponents(
+                candidate.astype(np.uint8),
+                connectivity=8,
+            )
+            for component_id in range(1, component_count):
+                component = labels == component_id
+                ring = cv2.dilate(
+                    component.astype(np.uint8),
+                    wide_kernel,
+                    iterations=1,
+                ).astype(bool)
+                ring &= subject
+                ring &= ~component
+                neighbors = cleaned[ring]
+                neighbors = np.asarray(
+                    [value for value in neighbors if int(value) not in neutral_lookup and value >= 0],
+                    dtype=np.int32,
+                )
+                if not neighbors.size:
+                    continue
+                values, counts = np.unique(neighbors, return_counts=True)
+                cleaned[component] = int(values[int(np.argmax(counts))])
+        return cleaned
+
+    @staticmethod
+    def detect_primary_subject(image: np.ndarray) -> np.ndarray:
+        """Estimate the main centered subject without depending on a model."""
+        rgb = np.asarray(image)
+        if rgb.ndim != 3 or rgb.shape[2] < 3 or min(rgb.shape[:2]) < 16:
+            return np.ones(rgb.shape[:2], dtype=bool)
+
+        height, width = rgb.shape[:2]
+        scale = min(1.0, 512.0 / max(height, width))
+        if scale < 1.0:
+            work = cv2.resize(
+                rgb[:, :, :3],
+                (max(16, int(round(width * scale))), max(16, int(round(height * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            work = np.ascontiguousarray(rgb[:, :, :3], dtype=np.uint8)
+
+        work_h, work_w = work.shape[:2]
+        margin = max(1, int(round(min(work_h, work_w) * 0.01)))
+        mask = np.full((work_h, work_w), cv2.GC_PR_BGD, dtype=np.uint8)
+        mask[:margin, :] = cv2.GC_BGD
+        mask[-margin:, :] = cv2.GC_BGD
+        mask[:, :margin] = cv2.GC_BGD
+        mask[:, -margin:] = cv2.GC_BGD
+
+        x0, x1 = int(work_w * 0.18), int(work_w * 0.82)
+        y0, y1 = int(work_h * 0.02), work_h - margin
+        mask[y0:y1, x0:x1] = cv2.GC_PR_FGD
+        cv2.ellipse(
+            mask,
+            (work_w // 2, int(work_h * 0.65)),
+            (max(2, int(work_w * 0.04)), max(2, int(work_h * 0.04))),
+            0,
+            0,
+            360,
+            cv2.GC_FGD,
+            -1,
+        )
+
+        background_model = np.zeros((1, 65), dtype=np.float64)
+        foreground_model = np.zeros((1, 65), dtype=np.float64)
+        try:
+            cv2.setRNGSeed(42)
+            cv2.grabCut(
+                cv2.cvtColor(work, cv2.COLOR_RGB2BGR),
+                mask,
+                None,
+                background_model,
+                foreground_model,
+                5,
+                cv2.GC_INIT_WITH_MASK,
+            )
+            subject = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8)
+        except cv2.error:
+            subject = np.zeros((work_h, work_w), dtype=np.uint8)
+            cv2.ellipse(
+                subject,
+                (work_w // 2, int(work_h * 0.60)),
+                (max(1, int(work_w * 0.28)), max(1, int(work_h * 0.46))),
+                0,
+                0,
+                360,
+                1,
+                -1,
+            )
+
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            subject,
+            connectivity=8,
+        )
+        if component_count > 1:
+            center_x, center_y = work_w * 0.5, work_h * 0.58
+            candidates = []
+            for label in range(1, component_count):
+                area = int(stats[label, cv2.CC_STAT_AREA])
+                ys, xs = np.where(labels == label)
+                if not area:
+                    continue
+                distance = ((float(xs.mean()) - center_x) / work_w) ** 2
+                distance += ((float(ys.mean()) - center_y) / work_h) ** 2
+                candidates.append((area / (1.0 + distance * 4.0), label))
+            if candidates:
+                subject = (labels == max(candidates)[1]).astype(np.uint8)
+
+        subject = cv2.morphologyEx(
+            subject,
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+        if subject.shape != (height, width):
+            subject = cv2.resize(subject, (width, height), interpolation=cv2.INTER_NEAREST)
+        coverage = float(np.mean(subject > 0))
+        if coverage < 0.05 or coverage > 0.80:
+            subject = np.zeros((height, width), dtype=np.uint8)
+            cv2.ellipse(
+                subject,
+                (width // 2, int(height * 0.60)),
+                (max(1, int(width * 0.28)), max(1, int(height * 0.46))),
+                0,
+                0,
+                360,
+                1,
+                -1,
+            )
+        return subject.astype(bool)
 
     @classmethod
     def _fit_design_centers(
@@ -291,6 +545,7 @@ class RecognitionEngine:
         detail_design_ids,
         palette_lab: np.ndarray,
         color_limit: int,
+        subject_pixel_counts: Optional[np.ndarray] = None,
     ):
         """Limit physical spools while retaining high-resolution design colors."""
         if palette_lab.size == 0:
@@ -313,6 +568,72 @@ class RecognitionEngine:
             ]
 
         detail_ids = set(int(index) for index in detail_design_ids)
+        subject_counts = (
+            np.asarray(subject_pixel_counts, dtype=np.float64)
+            if subject_pixel_counts is not None
+            else np.zeros_like(pixel_counts, dtype=np.float64)
+        )
+        has_subject = bool(np.any(subject_counts > 0))
+        if has_subject:
+            background_counts = np.maximum(
+                np.asarray(pixel_counts, dtype=np.float64) - subject_counts,
+                0.0,
+            )
+            weighted_counts = subject_counts * 4.0 + background_counts * 0.35
+            for design_id in detail_ids:
+                weighted_counts[design_id] *= 2.0
+
+            subject_ids = np.flatnonzero(subject_counts > 0)
+            luminance = (
+                design_colors[:, 0] * 0.299
+                + design_colors[:, 1] * 0.587
+                + design_colors[:, 2] * 0.114
+            )
+            required = [
+                int(nearest[int(np.argmin(luminance))]),
+                int(nearest[subject_ids[np.argmin(luminance[subject_ids])]]),
+                int(nearest[subject_ids[np.argmax(luminance[subject_ids])]]),
+            ]
+            selected = []
+            for index in required:
+                if index not in selected:
+                    selected.append(index)
+                if len(selected) >= limit:
+                    break
+
+            best_distance = (
+                np.min(distances[:, np.asarray(selected, dtype=np.int32)], axis=1)
+                if selected
+                else np.full(len(design_colors), np.inf, dtype=np.float64)
+            )
+            while len(selected) < limit:
+                best_candidate = None
+                best_cost = np.inf
+                for candidate in range(palette_lab.shape[0]):
+                    if candidate in selected:
+                        continue
+                    cost = float(
+                        np.sum(weighted_counts * np.minimum(best_distance, distances[:, candidate]))
+                    )
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_candidate = candidate
+                if best_candidate is None:
+                    break
+                selected.append(int(best_candidate))
+                best_distance = np.minimum(best_distance, distances[:, best_candidate])
+
+            selected_array = np.asarray(selected, dtype=np.int32)
+            selected_distances = distances[:, selected_array]
+            selected_positions = np.argmin(selected_distances, axis=1)
+            return [
+                (
+                    int(selected_array[position]),
+                    float(selected_distances[design_id, position]),
+                )
+                for design_id, position in enumerate(selected_positions)
+            ]
+
         scores = {}
         for design_id, thread_index in enumerate(nearest):
             weight = float(pixel_counts[design_id])
