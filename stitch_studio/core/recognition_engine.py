@@ -266,9 +266,15 @@ class RecognitionEngine:
             for index in selected
             if luminance[index] >= 235 and chroma[index] <= 28
         ]
+        highlight_thread = (
+            max(light_candidates, key=lambda index: luminance[index])
+            if light_candidates
+            else None
+        )
         kernel = np.ones((3, 3), dtype=np.uint8)
         image_area = restored.size
         eye_components = []
+        eye_masks = []
 
         def outer_border(component_mask: np.ndarray) -> np.ndarray:
             contours, _ = cv2.findContours(
@@ -332,6 +338,7 @@ class RecognitionEngine:
                 if np.any(border):
                     outline_groups.append(border.copy())
                 eye_components.append((x, y, width, height, area, centroids[component_id]))
+                eye_masks.append(component.copy())
 
         gray = cv2.cvtColor(source[:, :, :3], cv2.COLOR_RGB2GRAY)
         source_dark = ((gray <= 72) & subject).astype(np.uint8)
@@ -358,6 +365,67 @@ class RecognitionEngine:
             if area <= int(image_area * 0.015) and median_width <= 4.5:
                 restored[component] = darkest
 
+        if highlight_thread is not None and eye_masks:
+            source_luminance = (
+                source[:, :, 0].astype(np.float32) * 0.299
+                + source[:, :, 1].astype(np.float32) * 0.587
+                + source[:, :, 2].astype(np.float32) * 0.114
+            )
+            eye_union = np.zeros(restored.shape, dtype=np.uint8)
+            for eye_mask in eye_masks:
+                eye_contours, _ = cv2.findContours(
+                    eye_mask.astype(np.uint8),
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                if eye_contours:
+                    cv2.drawContours(
+                        eye_union,
+                        eye_contours,
+                        -1,
+                        1,
+                        thickness=-1,
+                    )
+            eye_interior = cv2.erode(
+                eye_union,
+                kernel,
+                iterations=1,
+            ).astype(bool)
+            for item in dark_components:
+                component_id, _, _, _, _, area, _, _ = item
+                if area < 12 or area > int(image_area * 0.04):
+                    continue
+                component = labels == component_id
+                if np.mean(eye_interior[component]) < 0.72:
+                    continue
+                contours, _ = cv2.findContours(
+                    component.astype(np.uint8),
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                envelope = np.zeros(restored.shape, dtype=np.uint8)
+                if contours:
+                    cv2.drawContours(envelope, contours, -1, 1, thickness=-1)
+                enclosed = cv2.erode(envelope, kernel, iterations=1).astype(bool)
+                highlights = (
+                    enclosed
+                    & ~component
+                    & eye_interior
+                    & (source_luminance >= 242)
+                )
+                highlight_count, highlight_labels, highlight_stats, _ = (
+                    cv2.connectedComponentsWithStats(
+                        highlights.astype(np.uint8),
+                        connectivity=8,
+                    )
+                )
+                for highlight_id in range(1, highlight_count):
+                    highlight_area = int(
+                        highlight_stats[highlight_id, cv2.CC_STAT_AREA]
+                    )
+                    if 1 <= highlight_area <= max(6, int(round(area * 0.18))):
+                        restored[highlight_labels == highlight_id] = highlight_thread
+
         if eye_components:
             eye_left = min(item[0] for item in eye_components)
             eye_right = max(item[0] + item[2] for item in eye_components)
@@ -383,6 +451,79 @@ class RecognitionEngine:
                 outlines |= border
                 if np.any(border):
                     outline_groups.append(border.copy())
+
+        source_pixels = source[:, :, :3].astype(np.float32)
+        palette_pixels = palette[:, :3].astype(np.float32)
+        nearest = np.zeros(restored.shape, dtype=np.int32)
+        best_distance_sq = np.full(restored.shape, np.inf, dtype=np.float32)
+        for palette_index, color in enumerate(palette_pixels):
+            red = source_pixels[:, :, 0] - color[0]
+            green = source_pixels[:, :, 1] - color[1]
+            blue = source_pixels[:, :, 2] - color[2]
+            distance_sq = red * red + green * green + blue * blue
+            improved = distance_sq < best_distance_sq
+            best_distance_sq[improved] = distance_sq[improved]
+            nearest[improved] = palette_index
+        best_distance = np.sqrt(best_distance_sq)
+        current_colors = palette_pixels[
+            np.clip(restored, 0, len(palette_pixels) - 1)
+        ]
+        current_distance = np.linalg.norm(
+            source_pixels - current_colors,
+            axis=2,
+        )
+        max_detail_area = max(32, int(round(image_area * 0.0015)))
+        for target_index in np.unique(nearest[subject]):
+            target_index = int(target_index)
+            if target_index in light_candidates:
+                continue
+            palette_separation = np.linalg.norm(
+                current_colors - palette_pixels[target_index],
+                axis=2,
+            )
+            candidate = (
+                subject
+                & (nearest == target_index)
+                & (restored != target_index)
+                & (best_distance <= 32.0)
+                & (best_distance + 18.0 < current_distance)
+                & (palette_separation >= 35.0)
+            )
+            candidate_count, candidate_labels, candidate_stats, _ = (
+                cv2.connectedComponentsWithStats(
+                    candidate.astype(np.uint8),
+                    connectivity=8,
+                )
+            )
+            for candidate_id in range(1, candidate_count):
+                x, y, width, height, area = candidate_stats[candidate_id].tolist()
+                if area < 2 or area > max_detail_area:
+                    continue
+                long_axis = max(width, height)
+                fill_ratio = area / max(1, width * height)
+                if long_axis < 3 and area < 4:
+                    continue
+                if fill_ratio < 0.12:
+                    continue
+                component = candidate_labels == candidate_id
+                ring = cv2.dilate(
+                    component.astype(np.uint8),
+                    kernel,
+                    iterations=1,
+                ).astype(bool) & ~component
+                ring &= subject
+                if not np.any(ring):
+                    continue
+                component_mean = np.mean(source_pixels[component], axis=0)
+                ring_median = np.median(source_pixels[ring], axis=0)
+                local_contrast = float(
+                    np.linalg.norm(component_mean - ring_median)
+                )
+                elongated = long_axis / max(1, min(width, height)) >= 1.4
+                compact_dot = area >= 4 and fill_ratio >= 0.45
+                if local_contrast < 24.0 or not (elongated or compact_dot):
+                    continue
+                restored[component] = target_index
 
         return restored, outlines, tuple(outline_groups)
 

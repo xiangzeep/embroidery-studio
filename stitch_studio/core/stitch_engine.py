@@ -696,11 +696,18 @@ class StitchEngine:
         """Generate single-centerline run stitch paths for thin strokes."""
         from skimage.morphology import skeletonize
 
+        if getattr(settings, "run_trace_contour", False):
+            return self._generate_closed_contour_run(mask, settings)
+
         mask = self._restore_line_art_run_mask(mask, image, source_color)
         loop_paths, loop_exclusion = self._extract_closed_run_loops(mask)
 
         skeleton = skeletonize(mask > 0).astype(np.uint8)
         skeleton[loop_exclusion > 0] = 0
+        skeleton = self._prune_short_skeleton_branches(
+            skeleton,
+            min_branch_px=max(1.5, 0.7 * self.px_per_mm),
+        )
         n_labels, labels = cv2.connectedComponents(skeleton, connectivity=8)
         stitch_len_px = settings.stitch_length_mm * self.px_per_mm
         min_len_px = max(1.5, 0.45 * self.px_per_mm)
@@ -746,9 +753,96 @@ class StitchEngine:
                 resampled = self._ensure_closed_path(resampled)
 
             if len(resampled) >= 2:
-                paths.append(resampled)
+                pass_count = max(1, int(getattr(settings, "run_passes", 1)))
+                repeated = list(resampled)
+                forward = list(resampled)
+                for pass_index in range(1, pass_count):
+                    traversal = (
+                        list(reversed(forward))
+                        if pass_index % 2 == 1
+                        else forward
+                    )
+                    repeated.extend(traversal[1:])
+                paths.append(repeated)
 
         return paths
+
+    def _generate_closed_contour_run(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Trace a confirmed facial outline as one smooth reinforced loop."""
+        binary = (mask > 0).astype(np.uint8)
+        binary = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        )
+        contours, _ = cv2.findContours(
+            binary,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_NONE,
+        )
+        if not contours:
+            return []
+
+        preserve_corners = bool(
+            getattr(settings, "run_preserve_corners", False)
+        )
+        points = []
+        if preserve_corners:
+            from skimage.morphology import thin
+
+            thinned = thin(binary > 0)
+            loop_paths = [
+                path
+                for path in self._trace_skeleton_component(thinned)
+                if len(path) >= 4 and path[0] == path[-1]
+            ]
+            if loop_paths:
+                points = max(loop_paths, key=self._polyline_length)
+        if not points:
+            contour = max(contours, key=lambda item: cv2.arcLength(item, True))
+            if len(contour) < 4:
+                return []
+            points = [
+                (float(point[0][0]), float(point[0][1]))
+                for point in contour
+            ]
+        points = self._ensure_closed_path(points)
+        points = self._simplify_run_path(points, closed=True)
+        stitch_length = max(
+            1.0,
+            settings.stitch_length_mm * self.px_per_mm,
+        )
+        if preserve_corners:
+            points = self._resample_polyline_preserving_vertices(
+                points,
+                stitch_length,
+                closed=True,
+            )
+        else:
+            points = self._chaikin_smooth(points, closed=True, iterations=2)
+            points = self._resample_run_path(
+                points,
+                stitch_length,
+                closed=True,
+            )
+        if len(points) < 2:
+            return []
+
+        pass_count = max(1, int(getattr(settings, "run_passes", 1)))
+        repeated = list(points)
+        for pass_index in range(1, pass_count):
+            traversal = (
+                list(reversed(points))
+                if pass_index % 2 == 1
+                else points
+            )
+            repeated.extend(traversal[1:])
+        return [repeated]
 
     def _restore_line_art_run_mask(
         self,
@@ -804,6 +898,90 @@ class StitchEngine:
         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, close_kernel, iterations=1)
         return combined
+
+    @staticmethod
+    def _prune_short_skeleton_branches(
+        skeleton: np.ndarray,
+        min_branch_px: float,
+    ) -> np.ndarray:
+        """Remove short endpoint spurs while retaining the main centerline."""
+        clean = (np.asarray(skeleton) > 0).astype(np.uint8)
+        if np.count_nonzero(clean) < 3:
+            return clean
+
+        for _ in range(8):
+            ys, xs = np.where(clean > 0)
+            pixels = {(int(x), int(y)) for x, y in zip(xs, ys)}
+            if not pixels:
+                break
+
+            def neighbors(pixel):
+                x, y = pixel
+                return [
+                    (x + dx, y + dy)
+                    for dy in (-1, 0, 1)
+                    for dx in (-1, 0, 1)
+                    if (dx or dy) and (x + dx, y + dy) in pixels
+                ]
+
+            degree = {pixel: len(neighbors(pixel)) for pixel in pixels}
+            removed = set()
+            for endpoint in sorted(pixel for pixel, value in degree.items() if value == 1):
+                path = [endpoint]
+                previous = None
+                current = endpoint
+                length = 0.0
+                while True:
+                    options = [
+                        item
+                        for item in neighbors(current)
+                        if item != previous
+                    ]
+                    if not options:
+                        break
+                    next_pixel = options[0]
+                    length += float(
+                        np.hypot(
+                            next_pixel[0] - current[0],
+                            next_pixel[1] - current[1],
+                        )
+                    )
+                    path.append(next_pixel)
+                    previous, current = current, next_pixel
+                    if degree.get(current, 0) != 2:
+                        break
+                if (
+                    degree.get(current, 0) >= 3
+                    and length < min_branch_px
+                ):
+                    removed.update(path[:-1])
+                    remaining_neighbors = [
+                        item
+                        for item in neighbors(current)
+                        if item != previous
+                    ]
+                    if len(remaining_neighbors) >= 2:
+                        connected = {remaining_neighbors[0]}
+                        frontier = [remaining_neighbors[0]]
+                        while frontier:
+                            item = frontier.pop()
+                            for candidate in remaining_neighbors:
+                                if candidate in connected:
+                                    continue
+                                if max(
+                                    abs(candidate[0] - item[0]),
+                                    abs(candidate[1] - item[1]),
+                                ) <= 1:
+                                    connected.add(candidate)
+                                    frontier.append(candidate)
+                        if len(connected) == len(remaining_neighbors):
+                            removed.add(current)
+
+            if not removed:
+                break
+            for x, y in removed:
+                clean[y, x] = 0
+        return clean
 
     def _extract_closed_run_loops(
         self,
@@ -865,6 +1043,32 @@ class StitchEngine:
         if closed:
             resampled = self._ensure_closed_path(resampled)
         return resampled
+
+    def _resample_polyline_preserving_vertices(
+        self,
+        points: List[Tuple[float, float]],
+        stitch_len: float,
+        closed: bool,
+    ) -> List[Tuple[float, float]]:
+        """Resample each edge independently so simplified corners remain exact."""
+        source = self._ensure_closed_path(points) if closed else list(points)
+        if len(source) < 2:
+            return source
+        result = [source[0]]
+        for start, end in zip(source, source[1:]):
+            distance = float(
+                np.hypot(end[0] - start[0], end[1] - start[1])
+            )
+            count = max(1, int(np.ceil(distance / max(1.0, stitch_len))))
+            for index in range(1, count + 1):
+                ratio = index / count
+                result.append(
+                    (
+                        start[0] + (end[0] - start[0]) * ratio,
+                        start[1] + (end[1] - start[1]) * ratio,
+                    )
+                )
+        return self._ensure_closed_path(result) if closed else result
 
     # ========== RADIAL FILL ==========
 
@@ -1425,7 +1629,7 @@ class StitchEngine:
         if not kept:
             return []
 
-        merged = self._merge_close_run_paths(
+        merged = self._merge_directional_run_paths(
             kept,
             max_gap_px=2.6 * self.px_per_mm,
             support_mask=mask,
@@ -1499,6 +1703,65 @@ class StitchEngine:
             del paths[j]
             changed = True
         return paths
+
+    def _merge_directional_run_paths(
+        self,
+        paths: List[List[Tuple[float, float]]],
+        max_gap_px: float,
+        support_mask: Optional[np.ndarray] = None,
+    ) -> List[List[Tuple[float, float]]]:
+        """Join aligned endpoints while leaving unrelated marks as jump paths."""
+        paths = [path[:] for path in paths if len(path) >= 2]
+        max_turn = np.deg2rad(58.0)
+        near_touch = 0.25 * self.px_per_mm
+        while True:
+            best = None
+            for i in range(len(paths)):
+                for j in range(i + 1, len(paths)):
+                    match = self._best_endpoint_match(
+                        paths[i],
+                        paths[j],
+                        max_gap_px,
+                    )
+                    if match is None:
+                        continue
+                    gap, endpoint_a, endpoint_b, turn = match
+                    if turn > max_turn and gap > near_touch:
+                        continue
+                    point_a = (
+                        paths[i][-1] if endpoint_a == 1 else paths[i][0]
+                    )
+                    point_b = (
+                        paths[j][0] if endpoint_b == 0 else paths[j][-1]
+                    )
+                    if (
+                        support_mask is not None
+                        and not self._run_connector_has_mask_support(
+                            point_a,
+                            point_b,
+                            support_mask,
+                        )
+                    ):
+                        continue
+                    score = gap + turn * self.px_per_mm
+                    if best is None or score < best[0]:
+                        best = (
+                            score,
+                            i,
+                            j,
+                            endpoint_a,
+                            endpoint_b,
+                        )
+            if best is None:
+                return paths
+            _, i, j, endpoint_a, endpoint_b = best
+            paths[i] = self._join_paths(
+                paths[i],
+                paths[j],
+                endpoint_a,
+                endpoint_b,
+            )
+            del paths[j]
 
     @staticmethod
     def _run_connector_has_mask_support(

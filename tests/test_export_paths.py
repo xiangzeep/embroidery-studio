@@ -4,6 +4,8 @@ import sys
 import tempfile
 import types
 import unittest
+
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -551,6 +553,98 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0][0], paths[0][-1])
+
+    def test_feature_contour_preserves_sharp_asymmetric_corners(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((64, 64), dtype=np.uint8)
+        corners = np.asarray(
+            [(6, 32), (30, 5), (55, 31), (43, 50), (16, 48)],
+            dtype=np.int32,
+        )
+        cv2.polylines(mask, [corners], True, 255, 3)
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.7,
+            underlay=False,
+            run_trace_contour=True,
+            run_preserve_corners=True,
+        )
+
+        paths = engine._generate_closed_contour_run(mask, settings)
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0][0], paths[0][-1])
+        for corner_x, corner_y in corners:
+            distance = min(
+                np.hypot(x - corner_x, y - corner_y)
+                for x, y in paths[0]
+            )
+            self.assertLessEqual(distance, 1.5)
+
+    def test_short_skeleton_spur_is_pruned_from_open_detail(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        skeleton = np.zeros((32, 64), dtype=np.uint8)
+        skeleton[16, 5:58] = 1
+        skeleton[12:17, 31] = 1
+
+        cleaned = engine._prune_short_skeleton_branches(
+            skeleton,
+            min_branch_px=6.0,
+        )
+
+        self.assertTrue(np.all(cleaned[16, 5:58] > 0))
+        self.assertEqual(int(np.count_nonzero(cleaned[12:16, 31])), 0)
+
+    def test_directional_gap_bridge_keeps_unrelated_marks_separate(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        horizontal = [
+            [(5.0, 12.0), (20.0, 12.0)],
+            [(23.0, 12.0), (38.0, 12.0)],
+        ]
+        # This perpendicular mark is within the merge radius. Distance alone
+        # must not turn it into a dirty connector.
+        unrelated = [(20.5, 13.5), (20.5, 23.0)]
+
+        merged = engine._merge_directional_run_paths(
+            horizontal + [unrelated],
+            max_gap_px=5.0,
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertTrue(
+            any(
+                min(x for x, _ in path) <= 5
+                and max(x for x, _ in path) >= 38
+                for path in merged
+            )
+        )
+
+    def test_run_corner_settings_round_trip_and_old_default(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            run_passes=3,
+            run_trace_contour=True,
+            run_preserve_corners=True,
+        )
+
+        restored = project_mod.StitchSettings.from_dict(settings.to_dict())
+        legacy = project_mod.StitchSettings.from_dict({"fill_mode": "run"})
+
+        self.assertEqual(restored.run_passes, 3)
+        self.assertTrue(restored.run_trace_contour)
+        self.assertTrue(restored.run_preserve_corners)
+        self.assertEqual(legacy.run_passes, 1)
+        self.assertFalse(legacy.run_trace_contour)
+        self.assertFalse(legacy.run_preserve_corners)
 
     def test_disconnected_run_strokes_remain_separate_jump_paths(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -2234,6 +2328,67 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(paths), 2)
         self.assertTrue(all(len(path) >= 4 for path in paths))
+
+    def test_triple_run_retraces_one_continuous_centerline(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((30, 70), dtype=np.uint8)
+        region.mask[14:17, 8:62] = 255
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=1.5,
+            run_passes=3,
+            underlay=False,
+            contour_count=0,
+        )
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 1)
+        total_length = sum(
+            np.hypot(b[0] - a[0], b[1] - a[1])
+            for a, b in zip(paths[0], paths[0][1:])
+        )
+        direct_length = np.hypot(
+            paths[0][-1][0] - paths[0][0][0],
+            paths[0][-1][1] - paths[0][0][1],
+        )
+        self.assertGreater(total_length, direct_length * 2.5)
+        self.assertLess(
+            max(
+                np.hypot(b[0] - a[0], b[1] - a[1])
+                for a, b in zip(paths[0], paths[0][1:])
+            ),
+            20.0,
+        )
+
+    def test_feature_contour_run_turns_branched_ring_into_one_closed_path(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        region = project_mod.Region()
+        region.mask = np.zeros((64, 64), dtype=np.uint8)
+        cv2.circle(region.mask, (32, 32), 18, 255, 3)
+        cv2.line(region.mask, (32, 14), (32, 28), 255, 2)
+        cv2.line(region.mask, (50, 32), (36, 32), 255, 2)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=1.5,
+            run_passes=3,
+            underlay=False,
+            contour_count=0,
+        )
+        region.stitch_settings.run_trace_contour = True
+
+        paths = engine.generate_region_paths(region)
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0][0], paths[0][-1])
+        self.assertGreater(len(paths[0]), 24)
 
     def test_satin_stitch_length_controls_border_density(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

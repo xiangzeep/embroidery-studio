@@ -963,11 +963,54 @@ class ImageEngine:
             if np.any(feature_owned):
                 for mode_mask in mode_masks.values():
                     mode_mask[feature_owned] = 0
-                if "satin" not in mode_masks:
-                    mode_masks["satin"] = np.zeros(shape, dtype=np.uint8)
-                    mode_settings["satin"] = ImageEngine._satin_outline_stitch_settings()
-                mode_masks["satin"][feature_owned] = 255
-                mode_has_feature["satin"] = True
+                if "run" not in mode_masks:
+                    mode_masks["run"] = np.zeros(shape, dtype=np.uint8)
+                    mode_settings["run"] = ImageEngine._running_stitch_settings()
+                mode_masks["run"][feature_owned] = 255
+                mode_has_feature["run"] = bool(feature_groups)
+
+        if np.any(feature_interior):
+            feature_fill_core = feature_interior.astype(bool)
+            if feature_outlines is not None:
+                feature_fill_core &= ~feature_outlines
+            promoted_fill = np.zeros(shape, dtype=np.uint8)
+            for source_mode in ("satin", "run"):
+                source_mask = mode_masks.get(source_mode)
+                if source_mask is None or not np.any(source_mask):
+                    continue
+                count, component_labels = cv2.connectedComponents(
+                    ((source_mask > 0) & feature_fill_core).astype(np.uint8),
+                    connectivity=8,
+                )
+                for component_id in range(1, count):
+                    component = component_labels == component_id
+                    area = int(np.count_nonzero(component))
+                    if area < 20:
+                        continue
+                    ys, xs = np.where(component)
+                    bbox_area = max(
+                        1,
+                        int(xs.max() - xs.min() + 1)
+                        * int(ys.max() - ys.min() + 1),
+                    )
+                    if area / bbox_area < 0.38:
+                        continue
+                    source_mask[component] = 0
+                    promoted_fill[component] = 255
+            if np.any(promoted_fill):
+                if "scanline" not in mode_masks:
+                    mode_masks["scanline"] = np.zeros(shape, dtype=np.uint8)
+                    mode_settings["scanline"] = StitchSettings(
+                        fill_mode="scanline",
+                        stitch_length_mm=2.0,
+                        row_spacing_mm=0.18,
+                        density=1.45,
+                        underlay=False,
+                        contour_count=0,
+                        pull_compensation_mm=0.12,
+                    )
+                    mode_has_feature["scanline"] = False
+                mode_masks["scanline"][promoted_fill > 0] = 255
 
         rebuilt_regions = []
         for mode in ("scanline", "satin", "run"):
@@ -975,8 +1018,10 @@ class ImageEngine:
             if mask is None or not np.any(mask):
                 continue
 
-            split_masks = [(mask, mode_has_feature.get(mode, False))]
-            if mode == "satin" and feature_groups:
+            split_masks = [
+                (mask, mode == "run" and mode_has_feature.get(mode, False))
+            ]
+            if feature_groups:
                 split_masks = []
                 feature_union = np.zeros(shape, dtype=bool)
                 for group in feature_groups:
@@ -987,8 +1032,9 @@ class ImageEngine:
                         (feature_part.astype(np.uint8) * 255, True)
                     )
                     feature_union |= feature_part
+                known_feature_union = np.logical_or.reduce(feature_groups)
                 feature_halo = cv2.dilate(
-                    feature_union.astype(np.uint8),
+                    known_feature_union.astype(np.uint8),
                     np.ones((3, 3), dtype=np.uint8),
                     iterations=1,
                 ).astype(bool)
@@ -999,8 +1045,20 @@ class ImageEngine:
                 )
                 for component_id in range(1, component_count):
                     component = component_labels == component_id
-                    if not np.any(component) or np.any(component & feature_halo):
+                    if not np.any(component):
                         continue
+                    if np.any(component & feature_halo):
+                        ys, xs = np.where(component)
+                        long_axis = max(
+                            int(xs.max() - xs.min() + 1),
+                            int(ys.max() - ys.min() + 1),
+                        )
+                        is_tiny_halo_fragment = (
+                            int(np.count_nonzero(component)) <= 18
+                            and long_axis <= 7
+                        )
+                        if is_tiny_halo_fragment:
+                            continue
                     split_masks.append(
                         (component.astype(np.uint8) * 255, False)
                     )
@@ -1041,7 +1099,11 @@ class ImageEngine:
                     ),
                     thread_match_delta_e=(max(deltas) if deltas else None),
                     is_detail_region=is_detail,
-                    stitch_settings=mode_settings[mode],
+                    stitch_settings=(
+                        ImageEngine._feature_outline_stitch_settings()
+                        if mode == "run" and is_feature_part
+                        else mode_settings[mode]
+                    ),
                 )
                 region.polygon = GeometryEngine.reconstruct_region_polygon(region_mask)
                 rebuilt_regions.append(region)
@@ -1089,6 +1151,7 @@ class ImageEngine:
                     region.mask is None
                     or region.mask.shape != shape
                     or region.stitch_settings.fill_mode != "run"
+                    or region.stitch_settings.run_passes > 1
                 ):
                     kept_regions.append(region)
                     continue
@@ -1312,6 +1375,23 @@ class ImageEngine:
             underlay=False,
             contour_count=0,
             pull_compensation_mm=0.0,
+        )
+
+    @staticmethod
+    def _feature_outline_stitch_settings() -> StitchSettings:
+        return StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=1.5,
+            stitch_length_min_mm=0.8,
+            stitch_length_max_mm=2.0,
+            row_spacing_mm=0.4,
+            density=1.0,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.0,
+            run_passes=3,
+            run_trace_contour=True,
+            run_preserve_corners=True,
         )
 
     @staticmethod
