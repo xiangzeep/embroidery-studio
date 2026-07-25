@@ -584,6 +584,44 @@ class ExportPathTests(unittest.TestCase):
             )
             self.assertLessEqual(distance, 1.5)
 
+    def test_smooth_feature_contour_reduces_pixel_stair_step_turns(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        cv2.ellipse(mask, (40, 40), (18, 25), 0, 0, 360, 255, 3)
+        sharp = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.55,
+            underlay=False,
+            run_trace_contour=True,
+            run_preserve_corners=True,
+        )
+        smooth = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.55,
+            underlay=False,
+            run_trace_contour=True,
+            run_preserve_corners=False,
+        )
+
+        sharp_path = engine._generate_closed_contour_run(mask, sharp)[0]
+        smooth_path = engine._generate_closed_contour_run(mask, smooth)[0]
+
+        def high_frequency_turn_energy(path):
+            points = np.asarray(path, dtype=np.float64)
+            vectors = np.diff(points, axis=0)
+            angles = np.unwrap(np.arctan2(vectors[:, 1], vectors[:, 0]))
+            turns = np.diff(angles)
+            return float(np.sum(np.abs(np.diff(turns))))
+
+        self.assertEqual(smooth_path[0], smooth_path[-1])
+        self.assertLess(
+            high_frequency_turn_energy(smooth_path),
+            high_frequency_turn_energy(sharp_path) * 0.72,
+        )
+
     def test_short_skeleton_spur_is_pruned_from_open_detail(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 

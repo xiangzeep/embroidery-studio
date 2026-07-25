@@ -1100,7 +1100,13 @@ class ImageEngine:
                     thread_match_delta_e=(max(deltas) if deltas else None),
                     is_detail_region=is_detail,
                     stitch_settings=(
-                        ImageEngine._feature_outline_stitch_settings()
+                        ImageEngine._feature_outline_stitch_settings(
+                            preserve_corners=(
+                                ImageEngine._feature_outline_preserves_corners(
+                                    region_mask
+                                )
+                            )
+                        )
                         if mode == "run" and is_feature_part
                         else mode_settings[mode]
                     ),
@@ -1378,7 +1384,40 @@ class ImageEngine:
         )
 
     @staticmethod
-    def _feature_outline_stitch_settings() -> StitchSettings:
+    def _feature_outline_preserves_corners(mask: np.ndarray) -> bool:
+        """Keep deliberate angular tips, but smooth convex rounded features."""
+        binary = (np.asarray(mask) > 0).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            binary,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_NONE,
+        )
+        if not contours:
+            return True
+        contour = max(contours, key=cv2.contourArea)
+        area = float(cv2.contourArea(contour))
+        perimeter = float(cv2.arcLength(contour, True))
+        if area <= 0.0 or perimeter <= 0.0:
+            return True
+        hull_area = float(cv2.contourArea(cv2.convexHull(contour)))
+        solidity = area / max(hull_area, 1.0)
+        circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+        approximation = cv2.approxPolyDP(
+            contour,
+            0.025 * perimeter,
+            True,
+        )
+        is_smooth_convex_feature = (
+            solidity >= 0.90
+            and circularity >= 0.62
+            and len(approximation) >= 6
+        )
+        return not is_smooth_convex_feature
+
+    @staticmethod
+    def _feature_outline_stitch_settings(
+        preserve_corners: bool = True,
+    ) -> StitchSettings:
         return StitchSettings(
             fill_mode="run",
             stitch_length_mm=1.5,
@@ -1391,7 +1430,7 @@ class ImageEngine:
             pull_compensation_mm=0.0,
             run_passes=3,
             run_trace_contour=True,
-            run_preserve_corners=True,
+            run_preserve_corners=preserve_corners,
         )
 
     @staticmethod

@@ -716,6 +716,66 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
         self.assertIs(layers[0], black)
 
+    def test_feature_outline_profile_smooths_eyes_and_preserves_mouth_corners(self):
+        design_map = np.zeros((88, 112), dtype=np.int32)
+        eye = np.zeros_like(design_map, dtype=np.uint8)
+        mouth = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(eye, (34, 34), (14, 19), 0, 0, 360, 1, 3)
+        mouth_points = np.asarray(
+            [(60, 25), (100, 33), (88, 45), (100, 63), (60, 70), (72, 47)],
+            dtype=np.int32,
+        )
+        cv2.polylines(mouth, [mouth_points], True, 1, 3)
+        feature_outline = (eye | mouth).astype(bool)
+        design_map[feature_outline] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (0, 0, 0), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((88, 112, 3), dtype=np.uint8),
+            detail_mask=feature_outline,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((88, 112), dtype=bool),
+            feature_outline_mask=feature_outline,
+            feature_outline_groups=(eye.astype(bool), mouth.astype(bool)),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        black = next(layer for layer in layers if layer.thread_uid == threads[1].uid)
+        feature_regions = [
+            region
+            for region in black.regions
+            if region.stitch_settings.run_trace_contour
+        ]
+        eye_region = next(
+            region
+            for region in feature_regions
+            if np.count_nonzero((region.mask > 0) & (eye > 0))
+        )
+        mouth_region = next(
+            region
+            for region in feature_regions
+            if np.count_nonzero((region.mask > 0) & (mouth > 0))
+        )
+
+        self.assertFalse(eye_region.stitch_settings.run_preserve_corners)
+        self.assertTrue(mouth_region.stitch_settings.run_preserve_corners)
+        self.assertEqual(eye_region.stitch_settings.run_passes, 3)
+        self.assertEqual(mouth_region.stitch_settings.run_passes, 3)
+
     def test_feature_run_owns_same_color_antialias_halo(self):
         design_map = np.zeros((48, 48), dtype=np.int32)
         eye = np.zeros_like(design_map, dtype=np.uint8)
