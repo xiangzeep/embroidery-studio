@@ -97,6 +97,13 @@ class DesignPaletteTests(unittest.TestCase):
 
 
 class DetailRecognitionTests(unittest.TestCase):
+    def test_feature_outline_uses_adaptive_local_corners(self):
+        settings = ImageEngine._feature_outline_stitch_settings()
+
+        self.assertEqual(settings.fill_mode, "run")
+        self.assertTrue(settings.run_trace_contour)
+        self.assertEqual(settings.run_corner_mode, "adaptive")
+
     def test_detects_dark_colored_and_curved_fine_lines(self):
         image = np.full((72, 72, 3), 245, dtype=np.uint8)
         expected = np.zeros((72, 72), dtype=np.uint8)
@@ -716,7 +723,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
         self.assertIs(layers[0], black)
 
-    def test_feature_outline_profile_smooths_eyes_and_preserves_mouth_corners(self):
+    def test_feature_outline_profile_uses_adaptive_mode_for_each_local_group(self):
         design_map = np.zeros((88, 112), dtype=np.int32)
         eye = np.zeros_like(design_map, dtype=np.uint8)
         mouth = np.zeros_like(design_map, dtype=np.uint8)
@@ -771,8 +778,8 @@ class ThreadSuggestionTests(unittest.TestCase):
             if np.count_nonzero((region.mask > 0) & (mouth > 0))
         )
 
-        self.assertFalse(eye_region.stitch_settings.run_preserve_corners)
-        self.assertTrue(mouth_region.stitch_settings.run_preserve_corners)
+        self.assertEqual(eye_region.stitch_settings.run_corner_mode, "adaptive")
+        self.assertEqual(mouth_region.stitch_settings.run_corner_mode, "adaptive")
         self.assertEqual(eye_region.stitch_settings.run_passes, 3)
         self.assertEqual(mouth_region.stitch_settings.run_passes, 3)
 

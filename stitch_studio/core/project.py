@@ -56,6 +56,7 @@ class StitchSettings:
     run_passes: int = 1  # odd pass counts retrace a run without changing its endpoint
     run_trace_contour: bool = False  # trace one closed contour instead of a branched skeleton
     run_preserve_corners: bool = False  # retain high-curvature vertices in closed runs
+    run_corner_mode: str = "legacy"  # legacy, smooth, preserve, or adaptive
     flow_strength: float = 1.0  # how much flow field influences direction
     flow_smoothing: float = 3.0  # gaussian sigma for flow field smoothing
     cross_method: str = "auto"

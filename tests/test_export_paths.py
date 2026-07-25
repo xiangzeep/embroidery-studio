@@ -684,6 +684,20 @@ class ExportPathTests(unittest.TestCase):
         self.assertFalse(legacy.run_trace_contour)
         self.assertFalse(legacy.run_preserve_corners)
 
+    def test_run_corner_mode_round_trip_and_legacy_default(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            run_corner_mode="adaptive",
+            run_preserve_corners=True,
+        )
+        restored = project_mod.StitchSettings.from_dict(settings.to_dict())
+        legacy = project_mod.StitchSettings.from_dict({"fill_mode": "run"})
+
+        self.assertEqual(restored.run_corner_mode, "adaptive")
+        self.assertEqual(legacy.run_corner_mode, "legacy")
+
     def test_disconnected_run_strokes_remain_separate_jump_paths(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
