@@ -16,12 +16,19 @@ class CrossStitchCell:
     method_override: Optional[str] = None
 
 
-def choose_boundary_half_method(cell_mask: np.ndarray) -> str:
+def choose_boundary_half_method(
+    cell_mask: np.ndarray,
+    *,
+    grid_row: Optional[int] = None,
+    grid_col: Optional[int] = None,
+) -> str:
     """Return the half-stitch diagonal nearest to the mask boundary.
 
     ``half`` follows the top-left to bottom-right diagonal and
-    ``half_flipped`` follows the opposing diagonal.  Only binary occupancy is
-    considered, so the result is independent of color or canvas position.
+    ``half_flipped`` follows the opposing diagonal. Only binary occupancy is
+    considered, so the scored result is independent of color or canvas
+    position. Equal scores require both grid coordinates; their checkerboard
+    parity prevents a systematic preference for one half-stitch direction.
     """
 
     binary = np.asarray(cell_mask, dtype=np.uint8) > 0
@@ -50,13 +57,20 @@ def choose_boundary_half_method(cell_mask: np.ndarray) -> str:
     ).astype(int)
     normal_score = float(np.mean(distance[normal[:, 0], normal[:, 1]]))
     flipped_score = float(np.mean(distance[flipped[:, 0], flipped[:, 1]]))
-    return "half" if normal_score <= flipped_score else "half_flipped"
+    if not np.isclose(normal_score, flipped_score, rtol=0.0, atol=1e-9):
+        return "half" if normal_score < flipped_score else "half_flipped"
+    if grid_row is None or grid_col is None:
+        raise ValueError("tied boundary scores require grid_row and grid_col")
+    return "half" if (grid_row + grid_col) % 2 == 0 else "half_flipped"
 
 
 def classify_cross_stitch_cell(
     cell_mask: np.ndarray,
     coverage_threshold: float,
     full_threshold: float = 0.82,
+    *,
+    grid_row: Optional[int] = None,
+    grid_col: Optional[int] = None,
 ) -> Optional[str]:
     """Classify a cell as rejected, full, or one directional half stitch."""
 
@@ -71,4 +85,8 @@ def classify_cross_stitch_cell(
         return "reject"
     if coverage >= full_threshold:
         return None
-    return choose_boundary_half_method(binary)
+    return choose_boundary_half_method(
+        binary,
+        grid_row=grid_row,
+        grid_col=grid_col,
+    )

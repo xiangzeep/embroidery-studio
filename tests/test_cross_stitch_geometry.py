@@ -44,6 +44,69 @@ class CrossStitchBoundaryGeometryTests(unittest.TestCase):
 
         self.assertEqual(choose_boundary_half_method(mirrored), "half")
 
+    def test_horizontal_tie_cells_alternate_by_grid_parity(self):
+        mask = np.vstack(
+            [
+                np.full((6, 12), 255, dtype=np.uint8),
+                np.zeros((6, 12), dtype=np.uint8),
+            ]
+        )
+
+        self.assertEqual(
+            classify_cross_stitch_cell(mask, 0.5, grid_row=4, grid_col=6),
+            "half",
+        )
+        self.assertEqual(
+            classify_cross_stitch_cell(mask, 0.5, grid_row=4, grid_col=7),
+            "half_flipped",
+        )
+        self.assertEqual(
+            classify_cross_stitch_cell(mask, 0.5, grid_row=4, grid_col=7),
+            "half_flipped",
+        )
+
+    def test_vertical_tie_cells_alternate_by_grid_parity(self):
+        mask = np.hstack(
+            [
+                np.full((12, 6), 255, dtype=np.uint8),
+                np.zeros((12, 6), dtype=np.uint8),
+            ]
+        )
+
+        self.assertEqual(
+            classify_cross_stitch_cell(mask, 0.5, grid_row=3, grid_col=8),
+            "half_flipped",
+        )
+        self.assertEqual(
+            classify_cross_stitch_cell(mask, 0.5, grid_row=4, grid_col=8),
+            "half",
+        )
+
+    def test_symmetric_patch_and_its_mirror_and_rotation_share_tie_break(self):
+        mask = np.zeros((12, 12), dtype=np.uint8)
+        mask[3:9, 3:9] = 255
+        variants = (mask, np.fliplr(mask), np.rot90(mask))
+
+        methods = [
+            choose_boundary_half_method(variant, grid_row=5, grid_col=4)
+            for variant in variants
+        ]
+
+        self.assertEqual(methods, ["half_flipped", "half_flipped", "half_flipped"])
+
+    def test_tie_break_does_not_override_scored_diagonal_direction(self):
+        descending = np.tri(12, 12, k=0, dtype=np.uint8) * 255
+        ascending = np.fliplr(descending)
+
+        self.assertEqual(
+            choose_boundary_half_method(descending, grid_row=0, grid_col=1),
+            "half",
+        )
+        self.assertEqual(
+            choose_boundary_half_method(ascending, grid_row=0, grid_col=0),
+            "half_flipped",
+        )
+
     def test_full_cell_keeps_configured_full_method(self):
         mask = np.full((12, 12), 255, dtype=np.uint8)
 
