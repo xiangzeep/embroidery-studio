@@ -12,6 +12,10 @@
   eyes and highlights use white; pupils, brows, pointed mouth corners, and the
   continuous line below the mouth use black. Both required color groups must
   contain paths and raster pixels. Highlights may be satisfied by white fill.
+- Each fixture semantic is structured as `{mask, expected_rgb, minimum_recall}`.
+  The same local RGB variable draws the source feature, creates its oracle, and
+  populates the thread palette; tests do not reconstruct identity from roles or
+  fixed palette indices.
 - Kept cross-stitch ownership unique, fill regions before same-thread overlays,
   colors/layers bounded, background fills moderately simplified, and the
   identical synthetic source healthy in photo-stitch mode.
@@ -56,6 +60,11 @@
 10. GREEN: fidelity now groups every final fill and overlay path by physical
     thread identity/color. The baseline patches the overlay builder to a no-op
     around `build_layers_from_recognition`; the enhanced path remains unchanged.
+11. RED: the new oracle mutation test initially failed with
+    `KeyError: ground_truth` because the fixture exposed only bare masks.
+12. GREEN: the fixture now owns color-aware structured truth. Changing only the
+    under-mouth line's expected RGB from black to the fixture's white RGB changes
+    its recall from `1.0` to `0.0`, and the unchanged `0.95` gate rejects it.
 
 ## Fidelity And Complexity
 
@@ -72,6 +81,7 @@ tolerance. Per-class values use only the expected physical thread/color.
 | White final paths / raster pixels | 23 / 156 | both non-empty |
 | Black final paths / raster pixels | 41 / 472 | both non-empty |
 | Final overlay regions / paths | 12 / 21 | both non-empty |
+| Wrong-color mutation, under-mouth line | 0.000 | fails 0.95 gate |
 | Drawable physical colors / layers | 5 / 5 | each <= 8 |
 | Shared ownership overlap max | 1 | exactly 1 |
 | Boundary methods | 211 full, 10 half, 4 half-flipped | half present |
@@ -128,12 +138,12 @@ and has no absolute runtime threshold.
 QT_QPA_PLATFORM=offscreen LOKY_MAX_CPU_COUNT=8 ../../.venv/bin/python \
   -m unittest tests.test_cross_stitch_geometry \
   tests.test_recognition_engine tests.test_export_paths -v
-Ran 249 tests in 10.028s
+Ran 250 tests in 8.410s
 OK (skipped=3)
 
 QT_QPA_PLATFORM=offscreen LOKY_MAX_CPU_COUNT=8 ../../.venv/bin/python \
   -m unittest discover -s tests -v
-Ran 255 tests in 8.842s
+Ran 256 tests in 8.434s
 OK (skipped=3)
 ```
 
@@ -144,6 +154,12 @@ not present in this worktree.
 
 - The fidelity rasters use all final worker geometry, not masks or pre-worker
   polygons. A wrong-color path cannot satisfy a semantic class.
+- Expected thread identity originates beside each fixture drawing operation.
+  The assertion code resolves it through exact palette RGB matching and never
+  uses a semantic-role-to-thread table or fixed thread index.
+- The wrong-color mutation traverses the same palette lookup, bucket validation,
+  raster recall, and gate code as the positive regression, demonstrating that
+  the oracle distinguishes physical colors.
 - White highlights are intentionally not required to be overlays; the final
   white fill paths satisfy them completely.
 - The contour-overlay adjustment is generic and scoped to cross overlays. A

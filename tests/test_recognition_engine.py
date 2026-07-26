@@ -23,61 +23,69 @@ from stitch_studio.core.thread_db import ThreadColor
 
 
 def synthetic_face_fixture(scale=1):
-    """Return the deterministic Task 5 face and semantic detail masks."""
-    image = np.full((96, 96, 3), (60, 130, 210), dtype=np.uint8)
-    image[48:, :] = (42, 88, 168)
-    subject = np.array([[24, 88], [48, 8], [72, 88]], dtype=np.int32)
-    cv2.fillPoly(image, [subject], (245, 120, 102))
+    """Return the deterministic Task 5 face and color-aware semantic truth."""
+    blue_rgb = (60, 130, 210)
+    navy_rgb = (42, 88, 168)
+    coral_rgb = (245, 120, 102)
+    white_rgb = (248, 248, 248)
+    black_rgb = (22, 22, 22)
 
-    expected = {
-        name: np.zeros(image.shape[:2], dtype=np.uint8)
-        for name in (
-            "left_eye",
-            "right_eye",
-            "left_pupil",
-            "right_pupil",
-            "left_highlight",
-            "right_highlight",
-            "left_brow",
-            "right_brow",
-            "left_mouth_corner",
-            "right_mouth_corner",
-            "under_mouth_line",
-        )
-    }
+    image = np.full((96, 96, 3), blue_rgb, dtype=np.uint8)
+    image[48:, :] = navy_rgb
+    subject = np.array([[24, 88], [48, 8], [72, 88]], dtype=np.int32)
+    cv2.fillPoly(image, [subject], coral_rgb)
+
+    ground_truth = {}
+
+    def semantic_mask(name, expected_rgb, minimum_recall):
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        ground_truth[name] = {
+            "mask": mask,
+            "expected_rgb": expected_rgb,
+            "minimum_recall": minimum_recall,
+        }
+        return mask
+
     for name, center in (("left_eye", (42, 40)), ("right_eye", (58, 40))):
-        cv2.ellipse(image, center, (10, 14), 0, 0, 360, (248, 248, 248), -1)
-        cv2.ellipse(expected[name], center, (10, 14), 0, 0, 360, 1, 2)
+        mask = semantic_mask(name, white_rgb, 0.75)
+        cv2.ellipse(image, center, (10, 14), 0, 0, 360, white_rgb, -1)
+        cv2.ellipse(mask, center, (10, 14), 0, 0, 360, 1, 2)
     for name, center in (("left_pupil", (43, 42)), ("right_pupil", (59, 42))):
-        cv2.circle(image, center, 4, (20, 20, 20), -1)
-        cv2.circle(expected[name], center, 4, 1, -1)
+        mask = semantic_mask(name, black_rgb, 0.95)
+        cv2.circle(image, center, 4, black_rgb, -1)
+        cv2.circle(mask, center, 4, 1, -1)
     for name, center in (
         ("left_highlight", (44, 40)),
         ("right_highlight", (60, 40)),
     ):
-        cv2.circle(image, center, 1, (248, 248, 248), -1)
-        cv2.circle(expected[name], center, 1, 1, -1)
+        mask = semantic_mask(name, white_rgb, 1.0)
+        cv2.circle(image, center, 1, white_rgb, -1)
+        cv2.circle(mask, center, 1, 1, -1)
 
     mouth = np.array([[36, 54], [50, 62], [66, 54]], dtype=np.int32)
-    cv2.polylines(image, [mouth], False, (22, 22, 22), 2)
-    cv2.circle(expected["left_mouth_corner"], (36, 54), 2, 1, -1)
-    cv2.circle(expected["right_mouth_corner"], (66, 54), 2, 1, -1)
-    cv2.line(image, (41, 68), (61, 68), (22, 22, 22), 1)
-    cv2.line(expected["under_mouth_line"], (41, 68), (61, 68), 1, 1)
+    cv2.polylines(image, [mouth], False, black_rgb, 2)
+    left_corner = semantic_mask("left_mouth_corner", black_rgb, 0.95)
+    right_corner = semantic_mask("right_mouth_corner", black_rgb, 0.95)
+    cv2.circle(left_corner, (36, 54), 2, 1, -1)
+    cv2.circle(right_corner, (66, 54), 2, 1, -1)
+    under_mouth = semantic_mask("under_mouth_line", black_rgb, 0.95)
+    cv2.line(image, (41, 68), (61, 68), black_rgb, 1)
+    cv2.line(under_mouth, (41, 68), (61, 68), 1, 1)
 
     for name, start, end in (
         ("left_brow", (35, 23), (43, 20)),
         ("right_brow", (55, 20), (63, 23)),
     ):
-        cv2.line(image, start, end, (22, 22, 22), 2)
-        cv2.line(expected[name], start, end, 1, 2)
+        mask = semantic_mask(name, black_rgb, 0.95)
+        cv2.line(image, start, end, black_rgb, 2)
+        cv2.line(mask, start, end, 1, 2)
 
     threads = [
-        ThreadColor(name="Blue", color_rgb=(60, 130, 210)),
-        ThreadColor(name="Navy", color_rgb=(42, 88, 168)),
-        ThreadColor(name="Coral", color_rgb=(245, 120, 102)),
-        ThreadColor(name="White", color_rgb=(248, 248, 248)),
-        ThreadColor(name="Black", color_rgb=(22, 22, 22)),
+        ThreadColor(name="Blue", color_rgb=blue_rgb),
+        ThreadColor(name="Navy", color_rgb=navy_rgb),
+        ThreadColor(name="Coral", color_rgb=coral_rgb),
+        ThreadColor(name="White", color_rgb=white_rgb),
+        ThreadColor(name="Black", color_rgb=black_rgb),
     ]
     settings = QuantizationSettings(
         n_colors=8,
@@ -87,11 +95,18 @@ def synthetic_face_fixture(scale=1):
     if scale != 1:
         target = (image.shape[1] * scale, image.shape[0] * scale)
         image = cv2.resize(image, target, interpolation=cv2.INTER_NEAREST)
-        expected = {
-            name: cv2.resize(mask, target, interpolation=cv2.INTER_NEAREST)
-            for name, mask in expected.items()
+        ground_truth = {
+            name: {
+                **semantic,
+                "mask": cv2.resize(
+                    semantic["mask"],
+                    target,
+                    interpolation=cv2.INTER_NEAREST,
+                ),
+            }
+            for name, semantic in ground_truth.items()
         }
-    return image, threads, settings, expected
+    return image, threads, settings, ground_truth
 
 
 def build_synthetic_face_pipeline(
@@ -104,7 +119,7 @@ def build_synthetic_face_pipeline(
     from stitch_studio.core.stitch_engine import StitchEngine
     from stitch_studio.ui.main_window import StitchWorker
 
-    image, threads, settings, expected = synthetic_face_fixture(scale)
+    image, threads, settings, ground_truth = synthetic_face_fixture(scale)
     recognition = RecognitionEngine.recognize(image, threads, settings)
     overlay_builder_mock_calls = 0
     if full_cross_baseline:
@@ -150,7 +165,7 @@ def build_synthetic_face_pipeline(
         "image": image,
         "threads": threads,
         "settings": settings,
-        "expected": expected,
+        "ground_truth": ground_truth,
         "recognition": recognition,
         "layers": layers,
         "project": project,
@@ -214,6 +229,50 @@ def rasterize_worker_paths_by_physical_thread(layers, shape, px_per_mm):
         )
         rasters[key]["path_count"] += layer_path_count
     return rasters
+
+
+def physical_thread_for_expected_rgb(threads, expected_rgb):
+    matches = [
+        (index, thread)
+        for index, thread in enumerate(threads)
+        if tuple(thread.color_rgb) == tuple(expected_rgb)
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"Expected one physical thread for RGB {tuple(expected_rgb)}, "
+            f"found {len(matches)}"
+        )
+    return matches[0]
+
+
+def semantic_recalls_by_expected_color(ground_truth, threads, thread_rasters):
+    recalls = {}
+    for name, semantic in ground_truth.items():
+        _, thread = physical_thread_for_expected_rgb(
+            threads,
+            semantic["expected_rgb"],
+        )
+        key = (thread.uid, tuple(thread.color_rgb))
+        if key not in thread_rasters:
+            raise AssertionError(f"{name} physical thread has no final paths")
+        bucket = thread_rasters[key]
+        if bucket["path_count"] <= 0:
+            raise AssertionError(f"{name} physical thread path bucket is empty")
+        if not np.any(bucket["raster"]):
+            raise AssertionError(f"{name} physical thread raster is empty")
+        recalls[name] = semantic_mask_recall(
+            bucket["raster"],
+            semantic["mask"],
+        )
+    return recalls
+
+
+def semantic_recall_gate_failures(recalls, ground_truth):
+    return {
+        name: (recalls[name], semantic["minimum_recall"])
+        for name, semantic in ground_truth.items()
+        if recalls[name] < semantic["minimum_recall"]
+    }
 
 
 class RecognitionMetricTests(unittest.TestCase):
@@ -325,42 +384,11 @@ class DetailRecognitionTests(unittest.TestCase):
             result["image"].shape[:2],
             result["engine"].px_per_mm,
         )
-        white_key = (
-            result["threads"][3].uid,
-            result["threads"][3].color_rgb,
+        recalls = semantic_recalls_by_expected_color(
+            result["ground_truth"],
+            result["threads"],
+            thread_rasters,
         )
-        black_key = (
-            result["threads"][4].uid,
-            result["threads"][4].color_rgb,
-        )
-        for key in (white_key, black_key):
-            self.assertIn(key, thread_rasters)
-            self.assertGreater(thread_rasters[key]["path_count"], 0)
-            self.assertGreater(
-                int(np.count_nonzero(thread_rasters[key]["raster"])),
-                0,
-            )
-
-        expected_thread_keys = {
-            "left_eye": white_key,
-            "right_eye": white_key,
-            "left_pupil": black_key,
-            "right_pupil": black_key,
-            "left_highlight": white_key,
-            "right_highlight": white_key,
-            "left_brow": black_key,
-            "right_brow": black_key,
-            "left_mouth_corner": black_key,
-            "right_mouth_corner": black_key,
-            "under_mouth_line": black_key,
-        }
-        recalls = {
-            name: semantic_mask_recall(
-                thread_rasters[expected_thread_keys[name]]["raster"],
-                mask,
-            )
-            for name, mask in result["expected"].items()
-        }
         stitch_raster = np.logical_or.reduce(
             [entry["raster"] > 0 for entry in thread_rasters.values()]
         ).astype(np.uint8)
@@ -372,28 +400,23 @@ class DetailRecognitionTests(unittest.TestCase):
         self.assertGreater(overlay_path_count, 0)
         self.assertGreater(int(np.count_nonzero(stitch_raster)), 0)
         protected = np.logical_or.reduce(
-            [mask > 0 for mask in result["expected"].values()]
+            [
+                semantic["mask"] > 0
+                for semantic in result["ground_truth"].values()
+            ]
         )
         self.assertGreaterEqual(
             semantic_mask_recall(stitch_raster, protected),
             0.95,
             recalls,
         )
-        minimum_recalls = {
-            "left_eye": 0.75,
-            "right_eye": 0.75,
-            "left_pupil": 0.95,
-            "right_pupil": 0.95,
-            "left_highlight": 1.0,
-            "right_highlight": 1.0,
-            "left_brow": 0.95,
-            "right_brow": 0.95,
-            "left_mouth_corner": 0.95,
-            "right_mouth_corner": 0.95,
-            "under_mouth_line": 0.95,
-        }
-        for name, minimum in minimum_recalls.items():
-            self.assertGreaterEqual(recalls[name], minimum, (name, recalls))
+        self.assertFalse(
+            semantic_recall_gate_failures(
+                recalls,
+                result["ground_truth"],
+            ),
+            recalls,
+        )
 
         drawable_layers = [
             layer
@@ -488,25 +511,15 @@ class DetailRecognitionTests(unittest.TestCase):
         result = build_synthetic_face_pipeline(generation_mode="photo_stitch")
         recognition = result["recognition"]
         thread_map = recognition.thread_map
-        expected = result["expected"]
 
-        expected_thread = {
-            "left_eye": 4,
-            "right_eye": 4,
-            "left_pupil": 4,
-            "right_pupil": 4,
-            "left_highlight": 3,
-            "right_highlight": 3,
-            "left_brow": 4,
-            "right_brow": 4,
-            "left_mouth_corner": 4,
-            "right_mouth_corner": 4,
-            "under_mouth_line": 4,
-        }
-        for name, thread_index in expected_thread.items():
+        for name, semantic in result["ground_truth"].items():
+            thread_index, _ = physical_thread_for_expected_rgb(
+                result["threads"],
+                semantic["expected_rgb"],
+            )
             recall = semantic_mask_recall(
                 thread_map == thread_index,
-                expected[name],
+                semantic["mask"],
             )
             self.assertGreaterEqual(recall, 0.75, (name, recall))
 
@@ -525,6 +538,41 @@ class DetailRecognitionTests(unittest.TestCase):
                 for path in region.stitch_paths
             ),
             0,
+        )
+
+    def test_synthetic_face_color_oracle_rejects_wrong_expected_color(self):
+        result = build_synthetic_face_pipeline()
+        thread_rasters = rasterize_worker_paths_by_physical_thread(
+            result["layers"],
+            result["image"].shape[:2],
+            result["engine"].px_per_mm,
+        )
+        ground_truth = {
+            name: dict(semantic)
+            for name, semantic in result["ground_truth"].items()
+        }
+
+        correct_recalls = semantic_recalls_by_expected_color(
+            ground_truth,
+            result["threads"],
+            thread_rasters,
+        )
+        self.assertFalse(
+            semantic_recall_gate_failures(correct_recalls, ground_truth)
+        )
+
+        ground_truth["under_mouth_line"]["expected_rgb"] = (
+            ground_truth["left_eye"]["expected_rgb"]
+        )
+        mutated_recalls = semantic_recalls_by_expected_color(
+            ground_truth,
+            result["threads"],
+            thread_rasters,
+        )
+
+        self.assertIn(
+            "under_mouth_line",
+            semantic_recall_gate_failures(mutated_recalls, ground_truth),
         )
 
     def test_large_synthetic_face_generation_has_stable_relative_performance(
