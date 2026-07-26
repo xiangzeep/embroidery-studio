@@ -33,3 +33,11 @@ The three skipped tests require a supplied external regression image that is not
 ## Residual Risk
 
 Compact non-line details intentionally require a nearby semantic outline. This avoids promoting isolated noise, but a valid isolated freckle-like mark far from any recovered feature group will remain cross-stitch fill only.
+
+## Review Follow-up
+
+- Replaced layer-wide color-mask overlay extraction with candidate collection per contributing fill region. Overlay metadata now inherits that region's `design_color_id`, `design_color_rgb`, and thread-match delta.
+- Added a protected bright-seed path inside filled semantic outline groups, so real recognition-to-layers processing preserves compact pupil highlights even when the broader white fill is a much larger component.
+- Added subject-gated semantic/local-contrast checks for generic thin lines. Background marks outside the subject mask and subject-contained, zero-contrast non-semantic lines are rejected.
+- Added image-area-scaled total and per-design-color overlay budgets. Candidates are selected by semantic priority, then area, local contrast, and proximity to the subject center.
+- Added offscreen regressions for a complete 96x96 synthetic face with two highlights, 484 thin-mark candidates, shared physical thread design identity, and unsupported/background thin lines.

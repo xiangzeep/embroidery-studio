@@ -672,6 +672,7 @@ class ImageEngine:
             ImageEngine._append_cross_stitch_detail_overlays(
                 layer_map,
                 recognition,
+                source_image,
             )
         else:
             subject_mask = getattr(recognition, "subject_mask", None)
@@ -696,7 +697,11 @@ class ImageEngine:
         return layers
 
     @staticmethod
-    def _append_cross_stitch_detail_overlays(layer_map, recognition) -> None:
+    def _append_cross_stitch_detail_overlays(
+        layer_map,
+        recognition,
+        source_image: Optional[np.ndarray] = None,
+    ) -> None:
         """Append protected semantic detail runs after their same-color fills."""
         detail_mask = getattr(recognition, "detail_mask", None)
         subject_mask = getattr(recognition, "subject_mask", None)
@@ -707,22 +712,74 @@ class ImageEngine:
         subject = np.asarray(subject_mask, dtype=bool)
         if detail.shape != subject.shape:
             return
-        protected = detail & subject
-        if not np.any(protected):
-            return
-
         feature_groups = []
         for group in getattr(recognition, "feature_outline_groups", ()):
             group_mask = np.asarray(group, dtype=bool)
-            if group_mask.shape != protected.shape:
+            if group_mask.shape != detail.shape:
                 continue
-            group_mask &= protected
+            group_mask &= subject
             if np.any(group_mask):
                 feature_groups.append(group_mask)
         feature_union = (
             np.logical_or.reduce(feature_groups)
-            if feature_groups else np.zeros(protected.shape, dtype=bool)
+            if feature_groups else np.zeros(detail.shape, dtype=bool)
         )
+        feature_support = ImageEngine._feature_outline_support_mask(
+            feature_groups,
+            detail.shape,
+        )
+        source_luminance = None
+        highlight_seed = np.zeros(detail.shape, dtype=bool)
+        if source_image is not None and source_image.shape[:2] == detail.shape:
+            source = np.asarray(source_image[:, :, :3], dtype=np.uint8)
+            source_luminance = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY).astype(np.float32)
+            local_luminance = cv2.GaussianBlur(source_luminance, (0, 0), 1.2)
+            highlight_seed = (
+                (source_luminance >= 242.0)
+                & ((source_luminance - local_luminance) >= 6.0)
+                & feature_support
+                & subject
+            )
+        protected = (detail | highlight_seed) & subject
+        if not np.any(protected):
+            return
+
+        candidates = []
+        subject_y, subject_x = np.where(subject)
+        subject_center = (
+            float(np.mean(subject_x)) if subject_x.size else detail.shape[1] / 2.0,
+            float(np.mean(subject_y)) if subject_y.size else detail.shape[0] / 2.0,
+        )
+        image_diagonal = max(1.0, float(np.hypot(*detail.shape)))
+
+        def candidate_score(mask: np.ndarray, contrast: float) -> float:
+            ys, xs = np.where(mask)
+            center_x = float(np.mean(xs))
+            center_y = float(np.mean(ys))
+            distance = np.hypot(center_x - subject_center[0], center_y - subject_center[1])
+            centrality = max(0.0, 1.0 - distance / image_diagonal)
+            return float(np.count_nonzero(mask)) * 32.0 + contrast * 8.0 + centrality
+
+        def append_candidate(
+            layer: Layer,
+            contributor: Region,
+            mask: np.ndarray,
+            name: str,
+            stitch_settings: StitchSettings,
+            priority: int,
+            contrast: float,
+        ):
+            if not np.any(mask):
+                return
+            candidates.append((
+                priority,
+                candidate_score(mask, contrast),
+                layer,
+                contributor,
+                mask,
+                name,
+                stitch_settings,
+            ))
 
         for layer in layer_map.values():
             fills = [
@@ -736,84 +793,154 @@ class ImageEngine:
             ]
             if not fills:
                 continue
-            color_mask = np.zeros(protected.shape, dtype=bool)
-            for region in fills:
-                color_mask |= region.mask > 0
 
-            for index, group in enumerate(feature_groups, 1):
-                overlay_mask = group & color_mask
-                if np.any(overlay_mask):
-                    ImageEngine._append_cross_stitch_detail_overlay(
+            for region_index, contributor in enumerate(fills, 1):
+                fill_mask = contributor.mask > 0
+                for group_index, group in enumerate(feature_groups, 1):
+                    overlay_mask = group & fill_mask
+                    append_candidate(
                         layer,
+                        contributor,
                         overlay_mask,
-                        f"{layer.name} cross detail {index}",
+                        f"{layer.name} cross detail {group_index}-{region_index}",
                         ImageEngine._feature_outline_stitch_settings(),
+                        3,
+                        100.0,
                     )
 
-            remaining = protected & color_mask & ~feature_union
-            component_count, labels = cv2.connectedComponents(
-                remaining.astype(np.uint8),
-                connectivity=8,
-            )
-            for component_id in range(1, component_count):
-                component = labels == component_id
-                area = int(np.count_nonzero(component))
-                if area < 3:
-                    continue
-                ys, xs = np.where(component)
-                width = int(xs.max() - xs.min() + 1)
-                height = int(ys.max() - ys.min() + 1)
-                long_axis = max(width, height)
-                short_axis = min(width, height)
-                stroke_width = float(
-                    cv2.distanceTransform(
-                        component.astype(np.uint8),
-                        cv2.DIST_L2,
-                        3,
-                    ).max() * 2.0
+                compact_seed = highlight_seed & fill_mask & ~feature_union
+                compact_count, compact_labels = cv2.connectedComponents(
+                    compact_seed.astype(np.uint8),
+                    connectivity=8,
                 )
-                is_thin_line = long_axis >= 4 and stroke_width <= 5.0
-                has_contrast_boundary = np.any(
-                    cv2.dilate(
+                for component_id in range(1, compact_count):
+                    component = compact_labels == component_id
+                    if int(np.count_nonzero(component)) > max(24, int(detail.size * 0.006)):
+                        continue
+                    append_candidate(
+                        layer,
+                        contributor,
+                        component,
+                        f"{layer.name} cross highlight {component_id}-{region_index}",
+                        ImageEngine._feature_outline_stitch_settings(),
+                        2,
+                        80.0,
+                    )
+
+                remaining = protected & fill_mask & ~feature_union & ~highlight_seed
+                component_count, labels = cv2.connectedComponents(
+                    remaining.astype(np.uint8),
+                    connectivity=8,
+                )
+                for component_id in range(1, component_count):
+                    component = labels == component_id
+                    area = int(np.count_nonzero(component))
+                    if area < 3:
+                        continue
+                    ys, xs = np.where(component)
+                    width = int(xs.max() - xs.min() + 1)
+                    height = int(ys.max() - ys.min() + 1)
+                    long_axis = max(width, height)
+                    short_axis = min(width, height)
+                    stroke_width = float(
+                        cv2.distanceTransform(
+                            component.astype(np.uint8), cv2.DIST_L2, 3
+                        ).max() * 2.0
+                    )
+                    is_thin_line = long_axis >= 4 and stroke_width <= 5.0
+                    semantic_contact = np.any(
+                        component
+                        & cv2.dilate(
+                            feature_union.astype(np.uint8),
+                            np.ones((13, 13), dtype=np.uint8),
+                            iterations=1,
+                        ).astype(bool)
+                    )
+                    border = cv2.dilate(
                         component.astype(np.uint8),
                         np.ones((3, 3), dtype=np.uint8),
                         iterations=1,
-                    ).astype(bool)
-                    & ~component
-                    & ~color_mask
-                    & subject
-                )
-                near_semantic_outline = np.any(
-                    component
-                    & cv2.dilate(
-                        feature_union.astype(np.uint8),
-                        np.ones((13, 13), dtype=np.uint8),
-                        iterations=1,
-                    ).astype(bool)
-                )
-                is_supported_compact_detail = (
-                    long_axis <= 14
-                    and short_axis >= 2
-                    and area / max(1, width * height) >= 0.35
-                    and has_contrast_boundary
-                    and near_semantic_outline
-                )
-                if not (is_thin_line or is_supported_compact_detail):
-                    continue
-                settings = ImageEngine._running_stitch_settings()
-                settings.run_corner_mode = "adaptive"
-                if is_supported_compact_detail:
-                    settings = ImageEngine._feature_outline_stitch_settings()
-                ImageEngine._append_cross_stitch_detail_overlay(
-                    layer,
-                    component,
-                    f"{layer.name} cross line {component_id}",
-                    settings,
-                )
+                    ).astype(bool) & ~component & subject
+                    if source_luminance is not None and np.any(border):
+                        contrast = abs(
+                            float(np.median(source_luminance[component]))
+                            - float(np.median(source_luminance[border]))
+                        )
+                    else:
+                        contrast = 24.0 if np.any(border & ~fill_mask) else 0.0
+                    is_supported_compact_detail = (
+                        long_axis <= 14
+                        and short_axis >= 2
+                        and area / max(1, width * height) >= 0.35
+                        and contrast >= 8.0
+                        and semantic_contact
+                    )
+                    if not (
+                        (is_thin_line and (semantic_contact or contrast >= 12.0))
+                        or is_supported_compact_detail
+                    ):
+                        continue
+                    settings = ImageEngine._running_stitch_settings()
+                    settings.run_corner_mode = "adaptive"
+                    if is_supported_compact_detail:
+                        settings = ImageEngine._feature_outline_stitch_settings()
+                    append_candidate(
+                        layer,
+                        contributor,
+                        component,
+                        f"{layer.name} cross line {component_id}-{region_index}",
+                        settings,
+                        1,
+                        contrast,
+                    )
+
+        total_budget = max(12, int(np.ceil(detail.size / 1024.0)))
+        per_color_budget = max(6, int(np.ceil(total_budget / 2.0)))
+        selected = 0
+        selected_by_color = {}
+        for _, _, layer, contributor, mask, name, stitch_settings in sorted(
+            candidates,
+            key=lambda candidate: (-candidate[0], -candidate[1]),
+        ):
+            color_key = (
+                contributor.design_color_id,
+                contributor.design_color_rgb,
+                layer.thread_uid,
+            )
+            if selected >= total_budget:
+                break
+            if selected_by_color.get(color_key, 0) >= per_color_budget:
+                continue
+            ImageEngine._append_cross_stitch_detail_overlay(
+                layer,
+                contributor,
+                mask,
+                name,
+                stitch_settings,
+            )
+            selected += 1
+            selected_by_color[color_key] = selected_by_color.get(color_key, 0) + 1
+
+    @staticmethod
+    def _feature_outline_support_mask(
+        feature_groups: List[np.ndarray],
+        shape: Tuple[int, int],
+    ) -> np.ndarray:
+        support = np.zeros(shape, dtype=np.uint8)
+        for group in feature_groups:
+            contours, _ = cv2.findContours(
+                group.astype(np.uint8),
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            if contours:
+                cv2.drawContours(support, contours, -1, 1, thickness=-1)
+        return support.astype(bool)
 
     @staticmethod
     def _append_cross_stitch_detail_overlay(
         layer: Layer,
+        contributor: Region,
         mask: np.ndarray,
         name: str,
         stitch_settings: StitchSettings,
@@ -824,9 +951,9 @@ class ImageEngine:
         region = Region(
             name=name,
             mask=overlay_mask.astype(np.uint8) * 255,
-            design_color_id=layer.design_color_id,
-            design_color_rgb=layer.design_color_rgb,
-            thread_match_delta_e=layer.thread_match_delta_e,
+            design_color_id=contributor.design_color_id,
+            design_color_rgb=contributor.design_color_rgb,
+            thread_match_delta_e=contributor.thread_match_delta_e,
             is_detail_region=True,
             is_cross_stitch_overlay=True,
             stitch_settings=stitch_settings,

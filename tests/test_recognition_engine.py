@@ -105,6 +105,207 @@ class DetailRecognitionTests(unittest.TestCase):
         self.assertTrue(settings.run_trace_contour)
         self.assertEqual(settings.run_corner_mode, "adaptive")
 
+    def test_cross_stitch_real_recognition_preserves_two_pupil_highlights(self):
+        image = np.full((96, 96, 3), (45, 174, 205), dtype=np.uint8)
+        cv2.circle(image, (48, 53), 38, (250, 142, 118), -1)
+        for center in ((34, 42), (62, 42)):
+            cv2.ellipse(image, center, (10, 14), 0, 0, 360, (235, 235, 235), -1)
+            cv2.circle(image, center, 5, (8, 8, 8), -1)
+        expected_highlights = np.zeros(image.shape[:2], dtype=np.uint8)
+        for center in ((36, 40), (64, 40)):
+            cv2.circle(image, center, 2, (255, 255, 255), -1)
+            cv2.circle(expected_highlights, center, 2, 255, -1)
+        cv2.polylines(
+            image,
+            [np.asarray([(31, 68), (48, 75), (66, 68)], dtype=np.int32)],
+            False,
+            (8, 8, 8),
+            2,
+        )
+        threads = [
+            ThreadColor(name="Water", color_rgb=(45, 174, 205)),
+            ThreadColor(name="Skin", color_rgb=(250, 142, 118)),
+            ThreadColor(name="Ink", color_rgb=(8, 8, 8)),
+            ThreadColor(name="White", color_rgb=(252, 252, 252)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=4,
+            design_color_budget=4,
+            auto_design_colors=False,
+            preserve_details=True,
+            include_background=False,
+        )
+
+        recognition = RecognitionEngine.recognize(image, threads, settings)
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            image,
+            "cross_stitch",
+            settings,
+        )
+
+        overlays = [
+            region.mask > 0
+            for layer in layers
+            for region in layer.regions
+            if region.is_cross_stitch_overlay
+        ]
+        self.assertTrue(overlays)
+        overlay_union = np.logical_or.reduce(overlays)
+        for center in ((36, 40), (64, 40)):
+            expected = np.zeros(image.shape[:2], dtype=np.uint8)
+            cv2.circle(expected, center, 2, 255, -1)
+            recall = np.count_nonzero(overlay_union & (expected > 0)) / np.count_nonzero(expected)
+            self.assertGreaterEqual(recall, 0.75)
+
+    def test_cross_stitch_overlay_budget_rejects_mark_explosion_but_keeps_feature(self):
+        height = width = 220
+        design_map = np.zeros((height, width), dtype=np.int32)
+        subject = np.zeros_like(design_map, dtype=bool)
+        subject[12:208, 12:208] = True
+        detail = np.zeros_like(subject)
+        marks = np.zeros_like(design_map, dtype=np.uint8)
+        for y in range(14, 212, 9):
+            for x in range(14, 212, 9):
+                cv2.line(marks, (x, y), (x + 4, y), 1, 1)
+        self.assertEqual(int(np.count_nonzero(marks)), 22 * 22 * 5)
+        eye = np.zeros_like(marks)
+        cv2.ellipse(eye, (110, 110), (18, 24), 0, 0, 360, 1, 2)
+        design_map[marks > 0] = 1
+        design_map[eye > 0] = 1
+        detail |= marks > 0
+        detail |= eye > 0
+        threads = [
+            ThreadColor(name="Skin", color_rgb=(250, 142, 118)),
+            ThreadColor(name="Ink", color_rgb=(8, 8, 8)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 142, 118), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (8, 8, 8), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((height, width, 3), dtype=np.uint8),
+            detail_mask=detail,
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+            feature_outline_mask=eye.astype(bool),
+            feature_outline_groups=(eye.astype(bool),),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="cross_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        overlays = [
+            region for layer in layers for region in layer.regions
+            if region.is_cross_stitch_overlay
+        ]
+        self.assertLessEqual(len(overlays), 64)
+        self.assertTrue(any(np.any((region.mask > 0) & (eye > 0)) for region in overlays))
+
+    def test_cross_stitch_overlay_uses_contributing_region_design_identity(self):
+        design_map = np.zeros((64, 80), dtype=np.int32)
+        left = np.zeros_like(design_map, dtype=np.uint8)
+        right = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(left, (24, 30), (10, 14), 0, 0, 360, 1, 2)
+        cv2.ellipse(right, (56, 30), (10, 14), 0, 0, 360, 1, 2)
+        design_map[left > 0] = 1
+        design_map[right > 0] = 2
+        threads = [
+            ThreadColor(name="Skin", color_rgb=(250, 142, 118)),
+            ThreadColor(name="Shared Ink", color_rgb=(8, 8, 8)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 142, 118), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (90, 20, 20), int(np.sum(design_map == 1)), 1, 0.1),
+                DesignColor(2, (20, 70, 30), int(np.sum(design_map == 2)), 1, 0.2),
+            ],
+            reconstructed_rgb=np.zeros((64, 80, 3), dtype=np.uint8),
+            detail_mask=(left | right).astype(bool),
+            detail_design_ids=(1, 2),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((64, 80), dtype=bool),
+            feature_outline_mask=(left | right).astype(bool),
+            feature_outline_groups=(left.astype(bool), right.astype(bool)),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="cross_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        overlays = [
+            region for layer in layers for region in layer.regions
+            if region.is_cross_stitch_overlay
+        ]
+        self.assertEqual(len(overlays), 2)
+        left_overlay = next(region for region in overlays if np.any((region.mask > 0) & (left > 0)))
+        right_overlay = next(region for region in overlays if np.any((region.mask > 0) & (right > 0)))
+        self.assertEqual((left_overlay.design_color_id, left_overlay.design_color_rgb), (1, (90, 20, 20)))
+        self.assertEqual((right_overlay.design_color_id, right_overlay.design_color_rgb), (2, (20, 70, 30)))
+
+    def test_cross_stitch_overlay_requires_subject_and_detail_support_for_thin_lines(self):
+        image = np.full((96, 96, 3), (250, 142, 118), dtype=np.uint8)
+        design_map = np.zeros((96, 96), dtype=np.int32)
+        subject = np.zeros_like(design_map, dtype=bool)
+        subject[16:84, 18:78] = True
+        eye = np.zeros_like(design_map, dtype=np.uint8)
+        unsupported = np.zeros_like(design_map, dtype=np.uint8)
+        background_line = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(eye, (48, 42), (12, 16), 0, 0, 360, 1, 2)
+        cv2.line(unsupported, (30, 70), (48, 70), 1, 1)
+        cv2.line(background_line, (4, 6), (30, 6), 1, 1)
+        design_map[eye > 0] = 1
+        design_map[background_line > 0] = 1
+        image[eye > 0] = (8, 8, 8)
+        image[background_line > 0] = (8, 8, 8)
+        threads = [
+            ThreadColor(name="Skin", color_rgb=(250, 142, 118)),
+            ThreadColor(name="Ink", color_rgb=(8, 8, 8)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 142, 118), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (8, 8, 8), int(np.sum(design_map == 1)), 1, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((96, 96, 3), dtype=np.uint8),
+            detail_mask=(eye | unsupported | background_line).astype(bool),
+            detail_design_ids=(1,),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+            feature_outline_mask=eye.astype(bool),
+            feature_outline_groups=(eye.astype(bool),),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            image,
+            "cross_stitch",
+            QuantizationSettings(include_background=True),
+        )
+
+        overlay_union = np.logical_or.reduce([
+            region.mask > 0
+            for layer in layers
+            for region in layer.regions
+            if region.is_cross_stitch_overlay
+        ])
+        self.assertTrue(np.any(overlay_union & (eye > 0)))
+        self.assertFalse(np.any(overlay_union & (unsupported > 0)))
+        self.assertFalse(np.any(overlay_union & (background_line > 0)))
+
     def test_cross_stitch_builds_fill_and_protected_run_overlay(self):
         height, width = 80, 112
         design_map = np.zeros((height, width), dtype=np.int32)
