@@ -668,7 +668,12 @@ class ImageEngine:
                 )
             layer.add_region(region)
 
-        if generation_mode != "cross_stitch":
+        if generation_mode == "cross_stitch":
+            ImageEngine._append_cross_stitch_detail_overlays(
+                layer_map,
+                recognition,
+            )
+        else:
             subject_mask = getattr(recognition, "subject_mask", None)
             feature_outline_mask = getattr(recognition, "feature_outline_mask", None)
             feature_outline_groups = getattr(
@@ -689,6 +694,145 @@ class ImageEngine:
         for order, layer in enumerate(layers):
             layer.order = order
         return layers
+
+    @staticmethod
+    def _append_cross_stitch_detail_overlays(layer_map, recognition) -> None:
+        """Append protected semantic detail runs after their same-color fills."""
+        detail_mask = getattr(recognition, "detail_mask", None)
+        subject_mask = getattr(recognition, "subject_mask", None)
+        if detail_mask is None or subject_mask is None:
+            return
+
+        detail = np.asarray(detail_mask, dtype=bool)
+        subject = np.asarray(subject_mask, dtype=bool)
+        if detail.shape != subject.shape:
+            return
+        protected = detail & subject
+        if not np.any(protected):
+            return
+
+        feature_groups = []
+        for group in getattr(recognition, "feature_outline_groups", ()):
+            group_mask = np.asarray(group, dtype=bool)
+            if group_mask.shape != protected.shape:
+                continue
+            group_mask &= protected
+            if np.any(group_mask):
+                feature_groups.append(group_mask)
+        feature_union = (
+            np.logical_or.reduce(feature_groups)
+            if feature_groups else np.zeros(protected.shape, dtype=bool)
+        )
+
+        for layer in layer_map.values():
+            fills = [
+                region
+                for region in layer.regions
+                if (
+                    region.mask is not None
+                    and region.mask.shape == protected.shape
+                    and not region.is_cross_stitch_overlay
+                )
+            ]
+            if not fills:
+                continue
+            color_mask = np.zeros(protected.shape, dtype=bool)
+            for region in fills:
+                color_mask |= region.mask > 0
+
+            for index, group in enumerate(feature_groups, 1):
+                overlay_mask = group & color_mask
+                if np.any(overlay_mask):
+                    ImageEngine._append_cross_stitch_detail_overlay(
+                        layer,
+                        overlay_mask,
+                        f"{layer.name} cross detail {index}",
+                        ImageEngine._feature_outline_stitch_settings(),
+                    )
+
+            remaining = protected & color_mask & ~feature_union
+            component_count, labels = cv2.connectedComponents(
+                remaining.astype(np.uint8),
+                connectivity=8,
+            )
+            for component_id in range(1, component_count):
+                component = labels == component_id
+                area = int(np.count_nonzero(component))
+                if area < 3:
+                    continue
+                ys, xs = np.where(component)
+                width = int(xs.max() - xs.min() + 1)
+                height = int(ys.max() - ys.min() + 1)
+                long_axis = max(width, height)
+                short_axis = min(width, height)
+                stroke_width = float(
+                    cv2.distanceTransform(
+                        component.astype(np.uint8),
+                        cv2.DIST_L2,
+                        3,
+                    ).max() * 2.0
+                )
+                is_thin_line = long_axis >= 4 and stroke_width <= 5.0
+                has_contrast_boundary = np.any(
+                    cv2.dilate(
+                        component.astype(np.uint8),
+                        np.ones((3, 3), dtype=np.uint8),
+                        iterations=1,
+                    ).astype(bool)
+                    & ~component
+                    & ~color_mask
+                    & subject
+                )
+                near_semantic_outline = np.any(
+                    component
+                    & cv2.dilate(
+                        feature_union.astype(np.uint8),
+                        np.ones((13, 13), dtype=np.uint8),
+                        iterations=1,
+                    ).astype(bool)
+                )
+                is_supported_compact_detail = (
+                    long_axis <= 14
+                    and short_axis >= 2
+                    and area / max(1, width * height) >= 0.35
+                    and has_contrast_boundary
+                    and near_semantic_outline
+                )
+                if not (is_thin_line or is_supported_compact_detail):
+                    continue
+                settings = ImageEngine._running_stitch_settings()
+                settings.run_corner_mode = "adaptive"
+                if is_supported_compact_detail:
+                    settings = ImageEngine._feature_outline_stitch_settings()
+                ImageEngine._append_cross_stitch_detail_overlay(
+                    layer,
+                    component,
+                    f"{layer.name} cross line {component_id}",
+                    settings,
+                )
+
+    @staticmethod
+    def _append_cross_stitch_detail_overlay(
+        layer: Layer,
+        mask: np.ndarray,
+        name: str,
+        stitch_settings: StitchSettings,
+    ) -> None:
+        overlay_mask = np.asarray(mask, dtype=bool)
+        if not np.any(overlay_mask):
+            return
+        region = Region(
+            name=name,
+            mask=overlay_mask.astype(np.uint8) * 255,
+            design_color_id=layer.design_color_id,
+            design_color_rgb=layer.design_color_rgb,
+            thread_match_delta_e=layer.thread_match_delta_e,
+            is_detail_region=True,
+            is_cross_stitch_overlay=True,
+            stitch_settings=stitch_settings,
+        )
+        region.polygon = GeometryEngine.reconstruct_region_polygon(region.mask)
+        layer.add_region(region)
 
     @staticmethod
     def _layer_min_area_for_region(

@@ -56,6 +56,14 @@ def install_fake_pyembroidery():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_cross_stitch_overlay_role_round_trips(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        region = project_mod.Region(is_cross_stitch_overlay=True)
+        restored = project_mod.Region.from_dict(region.to_dict())
+
+        self.assertTrue(restored.is_cross_stitch_overlay)
+
     def test_export_end_command_stays_at_last_needle_position(self):
         pyembroidery = install_fake_pyembroidery()
         project_mod = importlib.import_module("stitch_studio.core.project")

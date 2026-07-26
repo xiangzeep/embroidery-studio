@@ -93,6 +93,7 @@ class Region:
     design_color_rgb: Optional[Tuple[int, int, int]] = None
     thread_match_delta_e: Optional[float] = None
     is_detail_region: bool = False
+    is_cross_stitch_overlay: bool = False
     # Generated stitch data (populated by engine)
     stitch_points: Optional[List[Tuple[float, float]]] = None
     stitch_paths: Optional[List[List[Tuple[float, float]]]] = None
@@ -178,6 +179,7 @@ class Region:
             ),
             'thread_match_delta_e': self.thread_match_delta_e,
             'is_detail_region': self.is_detail_region,
+            'is_cross_stitch_overlay': self.is_cross_stitch_overlay,
         }
         if self.mask is not None:
             # Store mask as RLE-encoded base64
@@ -204,6 +206,7 @@ class Region:
             ),
             thread_match_delta_e=d.get('thread_match_delta_e'),
             is_detail_region=d.get('is_detail_region', False),
+            is_cross_stitch_overlay=d.get('is_cross_stitch_overlay', False),
         )
         if mask_rle and mask_shape:
             r.mask = _rle_decode(mask_rle, tuple(mask_shape))

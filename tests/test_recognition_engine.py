@@ -105,6 +105,104 @@ class DetailRecognitionTests(unittest.TestCase):
         self.assertTrue(settings.run_trace_contour)
         self.assertEqual(settings.run_corner_mode, "adaptive")
 
+    def test_cross_stitch_builds_fill_and_protected_run_overlay(self):
+        height, width = 80, 112
+        design_map = np.zeros((height, width), dtype=np.int32)
+        subject = np.zeros_like(design_map, dtype=bool)
+        subject[8:74, 16:96] = True
+        detail = np.zeros_like(subject)
+        left_eye = np.zeros_like(design_map, dtype=np.uint8)
+        right_eye = np.zeros_like(design_map, dtype=np.uint8)
+        mouth = np.zeros_like(design_map, dtype=np.uint8)
+        eyebrow = np.zeros_like(design_map, dtype=np.uint8)
+        pupil = np.zeros_like(design_map, dtype=np.uint8)
+        highlight = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(left_eye, (42, 32), (11, 15), 0, 0, 360, 1, 2)
+        cv2.ellipse(right_eye, (70, 32), (11, 15), 0, 0, 360, 1, 2)
+        cv2.polylines(
+            mouth,
+            [np.asarray([(38, 56), (56, 63), (76, 56)], dtype=np.int32)],
+            False,
+            1,
+            2,
+        )
+        cv2.line(eyebrow, (30, 18), (48, 14), 1, 2)
+        cv2.circle(pupil, (42, 32), 4, 1, -1)
+        cv2.circle(highlight, (45, 31), 1, 1, -1)
+        feature_outline = (left_eye | right_eye | mouth).astype(bool)
+        dark_detail = (feature_outline | (eyebrow > 0) | (pupil > 0)).astype(bool)
+        design_map[dark_detail] = 1
+        design_map[highlight > 0] = 2
+        detail |= dark_detail | (highlight > 0)
+        detail[60:62, 84:86] = True  # Subject-contained isolated sensor noise.
+        design_map[60:62, 84:86] = 1
+        detail[3, 4] = True  # Background noise must never become an overlay.
+        design_map[3, 4] = 1
+        threads = [
+            ThreadColor(name="Coral", color_rgb=(250, 140, 119)),
+            ThreadColor(name="Ink", color_rgb=(8, 8, 8)),
+            ThreadColor(name="White", color_rgb=(252, 252, 252)),
+        ]
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (250, 140, 119), int(np.sum(design_map == 0)), 0, 0.0),
+                DesignColor(1, (8, 8, 8), int(np.sum(design_map == 1)), 1, 0.0),
+                DesignColor(2, (252, 252, 252), int(np.sum(design_map == 2)), 2, 0.0),
+            ],
+            reconstructed_rgb=np.zeros((height, width, 3), dtype=np.uint8),
+            detail_mask=detail,
+            detail_design_ids=(1, 2),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+            feature_outline_mask=feature_outline,
+            feature_outline_groups=(
+                left_eye.astype(bool),
+                right_eye.astype(bool),
+                mouth.astype(bool),
+            ),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="cross_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        fills = [
+            region for layer in layers for region in layer.regions
+            if region.stitch_settings.fill_mode == "cross_stitch"
+        ]
+        overlays = [
+            region for layer in layers for region in layer.regions
+            if getattr(region, "is_cross_stitch_overlay", False)
+        ]
+        self.assertTrue(fills)
+        self.assertTrue(overlays)
+        self.assertTrue(all(region.stitch_settings.fill_mode == "run" for region in overlays))
+        self.assertTrue(all(region.stitch_settings.run_corner_mode == "adaptive" for region in overlays))
+        self.assertTrue(all(region.is_detail_region for region in overlays))
+        overlay_union = np.logical_or.reduce([region.mask > 0 for region in overlays])
+        protected = detail & subject
+        self.assertEqual(int(np.count_nonzero(overlay_union & ~protected)), 0)
+        self.assertFalse(np.any(overlay_union[60:62, 84:86]))
+        self.assertFalse(overlay_union[3, 4])
+        self.assertTrue(np.any(overlay_union & (highlight > 0)))
+        self.assertTrue(np.any(overlay_union & (pupil > 0)))
+        self.assertTrue(np.any(overlay_union & (eyebrow > 0)))
+        for layer in layers:
+            fill_indices = [
+                index for index, region in enumerate(layer.regions)
+                if region.stitch_settings.fill_mode == "cross_stitch"
+            ]
+            overlay_indices = [
+                index for index, region in enumerate(layer.regions)
+                if getattr(region, "is_cross_stitch_overlay", False)
+            ]
+            if fill_indices and overlay_indices:
+                self.assertGreater(min(overlay_indices), max(fill_indices))
+
     def test_detects_dark_colored_and_curved_fine_lines(self):
         image = np.full((72, 72, 3), 245, dtype=np.uint8)
         expected = np.zeros((72, 72), dtype=np.uint8)
