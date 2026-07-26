@@ -8,6 +8,8 @@
   `half_flipped` only at boundaries.
 - Preserve configured region methods for source-full cells.
 - Keep the legacy `_cross_stitch_cells(mask, settings)` bounds API available.
+- Carry explicit shared-ownership context instead of inferring it from mask
+  contents, and allocate dense shifted-grid cells globally.
 
 ## TDD Evidence
 
@@ -16,6 +18,8 @@ run failed because `_cross_stitch_cell_specs` did not exist and generated paths
 still emitted a complete cross. A second red/green cycle caught isolated-source
 noise being restored as a full cross. A third cycle caught tie-break parity
 being calculated from region-local rather than global aligned-grid coordinates.
+A review-fix cycle added explicit ownership context, dense shifted-grid
+ownership, unaligned offset-origin, Worker propagation, and final-path tests.
 
 ## Implementation
 
@@ -30,6 +34,16 @@ being calculated from region-local rather than global aligned-grid coordinates.
 - Limited low-coverage fallback to genuinely shared ownership. The legacy
   single-mask path continues to filter isolated noise and honor the configured
   coverage threshold.
+- Replaced prepared/raw full-image mask comparison with the explicit
+  `cross_ownership_override` context propagated by `StitchWorker`.
+- Added `dense_mask_override`, built once from the globally shifted grid in
+`StitchWorker`. Dense secondary upright paths use this unique allocation and
+only source-full-classified cells, so they cannot duplicate an adjacent color
+or cancel a boundary half stitch.
+- Kept unaligned-grid offsets relative to the mask origin and covered the
+  single-application contract with an exact cell-origin test.
+- Verified connected one-pixel detail and isolated noise through
+  `generate_region_paths`, not only ownership-mask inspection.
 
 ## Verification
 
@@ -38,11 +52,12 @@ being calculated from region-local rather than global aligned-grid coordinates.
 QT_QPA_PLATFORM=offscreen ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Result: 217 tests passed; 3 skipped. The suite retains pre-existing Qt mouse
+Result: 225 tests passed; 3 skipped. The suite retains pre-existing Qt mouse
 event deprecation, font-alias, and joblib physical-core discovery warnings.
 
 ## Residual Risk
 
-`dense_upright` keeps its established offset pass. The primary owned boundary
-cell now uses its half-stitch override, while the existing dense offset behavior
-remains unchanged.
+Dense shifted ownership is generated only when all cross-stitch regions can
+share a compatible grid, matching the existing ownership-mask contract. Mixed
+grid settings continue to use the legacy per-region path rather than claiming
+shared-cell exclusivity.

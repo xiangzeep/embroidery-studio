@@ -46,6 +46,8 @@ class StitchEngine:
         image: Optional[np.ndarray] = None,
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         mask_override: Optional[np.ndarray] = None,
+        cross_ownership_override: bool = False,
+        dense_mask_override: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate separated stitch paths for preview and export."""
         original_mask = region.mask
@@ -85,6 +87,8 @@ class StitchEngine:
             getattr(region, "polygon", None),
             getattr(region, "design_color_rgb", None),
             cross_source_mask=original_mask,
+            cross_ownership_override=cross_ownership_override,
+            dense_mask_override=dense_mask_override,
         )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
@@ -212,6 +216,8 @@ class StitchEngine:
         polygon: Optional[Polygon] = None,
         source_color: Optional[Tuple[int, int, int]] = None,
         cross_source_mask: Optional[np.ndarray] = None,
+        cross_ownership_override: bool = False,
+        dense_mask_override: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
@@ -236,6 +242,8 @@ class StitchEngine:
                 settings,
                 image,
                 source_mask=cross_source_mask,
+                ownership_override=cross_ownership_override,
+                dense_mask_override=dense_mask_override,
             )
         if mode == "none":
             return []
@@ -1202,6 +1210,7 @@ class StitchEngine:
     def build_cross_stitch_ownership_masks(
         self,
         region_priorities: List[Tuple[Region, float]],
+        grid_offset_shift_mm: Tuple[float, float] = (0.0, 0.0),
     ) -> dict:
         """Assign every shared grid cell to one dominant design color."""
         entries = [
@@ -1226,8 +1235,9 @@ class StitchEngine:
 
         height, width = shape
         cell_size = max(1.0, reference.cross_pattern_size_mm * self.px_per_mm)
-        offset_x = reference.cross_grid_offset_x_mm * self.px_per_mm
-        offset_y = reference.cross_grid_offset_y_mm * self.px_per_mm
+        shift_x_mm, shift_y_mm = grid_offset_shift_mm
+        offset_x = (reference.cross_grid_offset_x_mm + shift_x_mm) * self.px_per_mm
+        offset_y = (reference.cross_grid_offset_y_mm + shift_y_mm) * self.px_per_mm
         start_x = offset_x + np.floor((0.0 - offset_x) / cell_size) * cell_size
         start_y = offset_y + np.floor((0.0 - offset_y) / cell_size) * cell_size
         assigned = {region.uid: np.zeros(shape, dtype=np.uint8) for region, _ in entries}
@@ -1377,13 +1387,10 @@ class StitchEngine:
         ownership_mask: np.ndarray,
         source_mask: Optional[np.ndarray],
         settings: StitchSettings,
+        ownership_override: bool = False,
     ) -> List[CrossStitchCell]:
         """Describe owned cells using source occupancy to fit boundary stitches."""
         specs: List[CrossStitchCell] = []
-        shared_ownership = (
-            source_mask is not None
-            and not np.array_equal(ownership_mask > 0, source_mask > 0)
-        )
         for cell, slices, grid_row, grid_col in self._iter_cross_grid_cells(
             ownership_mask,
             settings,
@@ -1398,7 +1405,7 @@ class StitchEngine:
             )
             coverage = float(np.count_nonzero(source_patch)) / max(1, source_patch.size)
             if (
-                not shared_ownership
+                not ownership_override
                 and coverage + 1e-9 < float(settings.cross_coverage)
             ):
                 continue
@@ -1412,7 +1419,7 @@ class StitchEngine:
             # full-cell assignment keeps connected one-pixel details stitchable.
             if (
                 override == "reject"
-                and shared_ownership
+                and ownership_override
                 and np.count_nonzero(ownership_patch)
             ):
                 override = None
@@ -1499,13 +1506,20 @@ class StitchEngine:
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
         source_mask: Optional[np.ndarray] = None,
+        ownership_override: bool = False,
+        dense_mask_override: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         occupancy_mask = source_mask if source_mask is not None else mask
         method = settings.cross_method
         if method == "auto":
             method = self._choose_cross_stitch_method(occupancy_mask, settings, image)
         max_segment_px = settings.stitch_length_max_mm * self.px_per_mm
-        cell_specs = self._cross_stitch_cell_specs(mask, occupancy_mask, settings)
+        cell_specs = self._cross_stitch_cell_specs(
+            mask,
+            occupancy_mask,
+            settings,
+            ownership_override=ownership_override,
+        )
         paths: List[List[Tuple[float, float]]] = []
 
         rows = {}
@@ -1534,8 +1548,28 @@ class StitchEngine:
             dense_settings.cross_grid_offset_x_mm += half / self.px_per_mm
             dense_settings.cross_grid_offset_y_mm += half / self.px_per_mm
             dense_method = "upright_flipped" if "flipped" in method else "upright"
-            for cell in self._cross_stitch_cells(mask, dense_settings):
-                paths.extend(self._cross_stitch_cell_paths(cell, dense_method, max_segment_px))
+            dense_ownership_mask = (
+                dense_mask_override if dense_mask_override is not None else mask
+            )
+            dense_specs = self._cross_stitch_cell_specs(
+                dense_ownership_mask,
+                occupancy_mask,
+                dense_settings,
+                ownership_override=ownership_override,
+            )
+            for spec in dense_specs:
+                # A shifted upright overlay can only reinforce cells fully
+                # occupied by this source color; otherwise it would erase a
+                # boundary half stitch or duplicate a neighboring color cell.
+                if spec.coverage + 1e-9 < 0.85:
+                    continue
+                paths.extend(
+                    self._cross_stitch_cell_paths(
+                        spec.bounds,
+                        dense_method,
+                        max_segment_px,
+                    )
+                )
 
         return [path for path in paths if len(path) >= 2]
 
@@ -1545,6 +1579,8 @@ class StitchEngine:
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
         source_mask: Optional[np.ndarray] = None,
+        ownership_override: bool = False,
+        dense_mask_override: Optional[np.ndarray] = None,
     ) -> List[Tuple[float, float]]:
         return [
             pt
@@ -1552,7 +1588,9 @@ class StitchEngine:
                 mask,
                 settings,
                 image,
-                source_mask,
+                source_mask=source_mask,
+                ownership_override=ownership_override,
+                dense_mask_override=dense_mask_override,
             )
             for pt in path
         ]

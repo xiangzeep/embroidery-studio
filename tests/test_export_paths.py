@@ -2470,10 +2470,274 @@ class ExportPathTests(unittest.TestCase):
             underlay=False,
         )
 
-        paths = engine.generate_region_paths(region, mask_override=ownership)
+        paths = engine.generate_region_paths(
+            region,
+            mask_override=ownership,
+            cross_ownership_override=True,
+        )
 
         self.assertEqual(len(paths), 1)
         self.assertEqual(paths[0], [(0.0, 0.0), (10.0, 10.0)])
+
+    def test_mask_override_without_ownership_context_rejects_low_source_coverage(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        source = np.zeros((10, 10), dtype=np.uint8)
+        source[:5, :5] = 255
+        ownership = np.full((10, 10), 255, dtype=np.uint8)
+        region = project_mod.Region(mask=source)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(
+            region,
+            mask_override=ownership,
+            cross_ownership_override=False,
+        )
+
+        self.assertEqual(paths, [])
+
+    def test_ownership_context_keeps_low_coverage_owned_detail_stitchable(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        source = np.zeros((10, 10), dtype=np.uint8)
+        source[:5, :5] = 255
+        ownership = np.full((10, 10), 255, dtype=np.uint8)
+        region = project_mod.Region(mask=source)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(
+            region,
+            mask_override=ownership,
+            cross_ownership_override=True,
+        )
+
+        self.assertEqual(len(paths), 2)
+
+    def test_unaligned_cross_grid_applies_offset_once_to_cell_origin(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        mask = np.zeros((30, 30), dtype=np.uint8)
+        mask[10:20, 10:20] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            cross_align_grid=False,
+            cross_grid_offset_x_mm=0.2,
+            cross_grid_offset_y_mm=0.3,
+        )
+
+        cells = engine._cross_stitch_cells(mask, settings)
+
+        self.assertEqual(cells, [(12.0, 13.0, 10.0, 10.0)])
+
+    def test_dense_owned_boundary_skips_shifted_full_upright(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        left_mask = np.zeros((20, 20), dtype=np.uint8)
+        right_mask = np.zeros((20, 20), dtype=np.uint8)
+        left_mask[:, :10] = 255
+        right_mask[:, 10:] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="dense_upright",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        left = project_mod.Region(mask=left_mask, stitch_settings=settings)
+        right = project_mod.Region(
+            mask=right_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        base_ownership = engine.build_cross_stitch_ownership_masks(
+            [(left, 1.0), (right, 1.0)]
+        )
+        dense_ownership = engine.build_cross_stitch_ownership_masks(
+            [(left, 1.0), (right, 1.0)],
+            grid_offset_shift_mm=(0.5, 0.5),
+        )
+
+        paths = []
+        for region in (left, right):
+            paths.extend(
+                engine.generate_region_paths(
+                    region,
+                    mask_override=base_ownership[region.uid],
+                    cross_ownership_override=True,
+                    dense_mask_override=dense_ownership[region.uid],
+                )
+            )
+
+        centered_horizontal = [(5.0, 10.0), (15.0, 10.0)]
+        centered_vertical = [(10.0, 5.0), (10.0, 15.0)]
+        self.assertNotIn(centered_horizontal, paths)
+        self.assertNotIn(centered_vertical, paths)
+        self.assertIn([(-5.0, 0.0), (5.0, 0.0)], paths)
+
+    def test_connected_one_pixel_detail_has_final_cross_stitch_paths(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        base_mask = np.full((6, 6), 255, dtype=np.uint8)
+        detail_mask = np.zeros((6, 6), dtype=np.uint8)
+        detail_mask[1, :] = 255
+        base_mask[1, :] = 0
+        base = project_mod.Region(mask=base_mask)
+        detail = project_mod.Region(mask=detail_mask)
+        for region in (base, detail):
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_method="cross",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+                underlay=False,
+            )
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(base, 1.0), (detail, 5.0)]
+        )
+        paths = engine.generate_region_paths(
+            detail,
+            mask_override=assigned[detail.uid],
+            cross_ownership_override=True,
+        )
+
+        self.assertTrue(paths)
+
+    def test_isolated_one_pixel_noise_has_no_final_cross_stitch_paths(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        base_mask = np.full((6, 6), 255, dtype=np.uint8)
+        detail_mask = np.zeros((6, 6), dtype=np.uint8)
+        detail_mask[2, 2] = 255
+        base_mask[2, 2] = 0
+        base = project_mod.Region(mask=base_mask)
+        detail = project_mod.Region(mask=detail_mask)
+        for region in (base, detail):
+            region.stitch_settings = project_mod.StitchSettings(
+                fill_mode="cross_stitch",
+                cross_method="cross",
+                cross_pattern_size_mm=2.0,
+                cross_coverage=0.5,
+                underlay=False,
+            )
+
+        assigned = engine.build_cross_stitch_ownership_masks(
+            [(base, 1.0), (detail, 5.0)]
+        )
+        paths = engine.generate_region_paths(
+            detail,
+            mask_override=assigned[detail.uid],
+            cross_ownership_override=True,
+        )
+
+        self.assertEqual(paths, [])
+
+    def test_cross_stitch_worker_passes_explicit_ownership_context(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        class RecordingEngine:
+            def __init__(self):
+                self.calls = []
+
+            def build_cross_stitch_ownership_masks(
+                self,
+                region_priorities,
+                grid_offset_shift_mm=(0.0, 0.0),
+            ):
+                return {
+                    region.uid: np.full(region.mask.shape, 255, dtype=np.uint8)
+                    for region, _ in region_priorities
+                }
+
+            def generate_region_paths(
+                self,
+                region,
+                image,
+                flow_field,
+                mask_override,
+                cross_ownership_override=False,
+                dense_mask_override=None,
+            ):
+                self.calls.append((
+                    region.uid,
+                    cross_ownership_override,
+                    dense_mask_override,
+                ))
+                return []
+
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        region = project_mod.Region(mask=np.full((10, 10), 255, dtype=np.uint8))
+        region.stitch_settings = project_mod.StitchSettings(fill_mode="cross_stitch")
+        layer.regions = [region]
+        project.layers = [layer]
+        engine = RecordingEngine()
+
+        main_mod.StitchWorker(project, engine).run()
+
+        self.assertEqual(engine.calls, [(region.uid, True, None)])
+
+    def test_cross_stitch_worker_disables_context_without_shared_ownership(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        class RecordingEngine:
+            def __init__(self):
+                self.calls = []
+
+            def build_cross_stitch_ownership_masks(self, *args, **kwargs):
+                return {}
+
+            def generate_region_paths(
+                self,
+                region,
+                image,
+                flow_field,
+                mask_override,
+                cross_ownership_override=False,
+                dense_mask_override=None,
+            ):
+                self.calls.append(cross_ownership_override)
+                return []
+
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        region = project_mod.Region(mask=np.full((10, 10), 255, dtype=np.uint8))
+        region.stitch_settings = project_mod.StitchSettings(fill_mode="cross_stitch")
+        layer.regions = [region]
+        project.layers = [layer]
+        engine = RecordingEngine()
+
+        main_mod.StitchWorker(project, engine).run()
+
+        self.assertEqual(engine.calls, [False])
 
     def test_cross_stitch_cells_keep_filtering_isolated_source_noise(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
