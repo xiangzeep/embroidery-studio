@@ -5,11 +5,13 @@
 - Added one deterministic 96x96 synthetic face and drove the same source through
   recognition, layer construction, the real `StitchWorker`, pattern build, PES
   and DST export, and real pyembroidery decode.
-- Rasterized Worker-final overlay `stitch_paths` from 0.1 mm units back to source
-  pixels with `source_px = stitch_unit * px_per_mm / 10`. Empty path and empty
-  raster assertions prevent a vacuous recall pass.
-- Gated overall and per-class recall for both eyes, pupils, highlights, brows,
-  pointed mouth corners, and the continuous line below the mouth.
+- Rasterized all Worker-final fill and overlay `stitch_paths` from 0.1 mm units
+  back to source pixels with `source_px = stitch_unit * px_per_mm / 10`, grouped
+  by `(physical thread UID, physical thread RGB)`.
+- Gated every semantic class against only its expected physical-color raster:
+  eyes and highlights use white; pupils, brows, pointed mouth corners, and the
+  continuous line below the mouth use black. Both required color groups must
+  contain paths and raster pixels. Highlights may be satisfied by white fill.
 - Kept cross-stitch ownership unique, fill regions before same-thread overlays,
   colors/layers bounded, background fills moderately simplified, and the
   identical synthetic source healthy in photo-stitch mode.
@@ -21,7 +23,8 @@
   `auto` retains dense decoration independent of region area.
 - Replaced the 15-second absolute performance check with a 384x384 relative
   benchmark: warm-ups, alternating order, five samples per variant, and median
-  ratio <= 1.50. Python-managed peak memory remains capped at 256 MiB.
+  ratio <= 1.50. The baseline now mocks overlay construction during layer
+  building instead of constructing and deleting overlays afterward.
 
 ## TDD Evidence
 
@@ -45,19 +48,30 @@
 7. The revised performance test was added before considering optimization. Its
    measured ratio was already below 1.50, so no ownership/overlay hot-path change
    was justified.
+8. RED: the physical-color regression showed that the previous color-blind
+   overlay union credited neighboring black paths to white eyes. Correct white
+   final-path recall is `0.78241 / 0.82870`; both white highlights are `1.0`.
+9. RED: the baseline harness had no evidence that overlay construction was
+   disabled and failed the new assertion for `overlay_builder_mock_calls`.
+10. GREEN: fidelity now groups every final fill and overlay path by physical
+    thread identity/color. The baseline patches the overlay builder to a no-op
+    around `build_layers_from_recognition`; the enhanced path remains unchanged.
 
 ## Fidelity And Complexity
 
-All recall values below come only from non-empty final overlay `stitch_paths`,
-with a two-source-pixel tolerance.
+All recall values below use final Worker paths with a two-source-pixel
+tolerance. Per-class values use only the expected physical thread/color.
 
 | Metric | Result | Gate |
 | --- | ---: | ---: |
-| Overall protected-detail recall | 0.91104 | >= 0.90 |
-| Eye recall, left / right | 0.82407 / 0.90278 | each >= 0.75 |
-| Pupil recall, left / right | 0.97959 / 0.97959 | each >= 0.75 |
-| Highlights, brows, mouth corners, under-mouth line | 1.000 each | each >= 0.75 |
-| Final overlay regions / paths / raster pixels | 12 / 21 / 471 | all non-empty |
+| All-color union recall | 1.00000 | >= 0.95 |
+| White eye recall, left / right | 0.78241 / 0.82870 | each >= 0.75 |
+| White highlight recall, left / right | 1.000 / 1.000 | each = 1.00 |
+| Black pupil recall, left / right | 1.000 / 1.000 | each >= 0.95 |
+| Black brows, mouth corners, under-mouth line | 1.000 each | each >= 0.95 |
+| White final paths / raster pixels | 23 / 156 | both non-empty |
+| Black final paths / raster pixels | 41 / 472 | both non-empty |
+| Final overlay regions / paths | 12 / 21 | both non-empty |
 | Drawable physical colors / layers | 5 / 5 | each <= 8 |
 | Shared ownership overlap max | 1 | exactly 1 |
 | Boundary methods | 211 full, 10 half, 4 half-flipped | half present |
@@ -94,15 +108,19 @@ decoded thread counts exactly match their five-thread source patterns.
 
 ## Performance
 
-Final 384x384 offscreen sampling, after enhanced and baseline warm-ups:
+Final 384x384 offscreen sampling, after enhanced and true no-overlay baseline
+warm-ups:
 
-- Enhanced median over five runs: `0.50698s`
-- Full-cross baseline median over five runs: `0.43704s`
-- Median ratio: `1.160x` (gate: <= `1.50x`)
-- Warm-up peak Python-managed memory: `50.78 MiB` (gate: < `256 MiB`)
+- Enhanced median over five runs: `0.55788s`
+- Full-cross baseline median over five runs: `0.45870s`
+- Median ratio: `1.216x` (gate: <= `1.50x`)
+- Warm-up peak Python-managed memory: `50.92 MiB` (gate: < `256 MiB`)
+- Enhanced / baseline overlay regions: `12 / 0`
+- Baseline overlay-builder mock calls: `1`
 
-The test alternates run order to reduce thermal/scheduling bias and has no
-absolute runtime threshold.
+Each timed helper call covers fixture setup, recognition, layer building, and
+the real worker. The test alternates run order to reduce thermal/scheduling bias
+and has no absolute runtime threshold.
 
 ## Verification
 
@@ -110,12 +128,12 @@ absolute runtime threshold.
 QT_QPA_PLATFORM=offscreen LOKY_MAX_CPU_COUNT=8 ../../.venv/bin/python \
   -m unittest tests.test_cross_stitch_geometry \
   tests.test_recognition_engine tests.test_export_paths -v
-Ran 248 tests in 9.554s
+Ran 249 tests in 10.028s
 OK (skipped=3)
 
 QT_QPA_PLATFORM=offscreen LOKY_MAX_CPU_COUNT=8 ../../.venv/bin/python \
   -m unittest discover -s tests -v
-Ran 254 tests in 9.756s
+Ran 255 tests in 8.842s
 OK (skipped=3)
 ```
 
@@ -124,8 +142,10 @@ not present in this worktree.
 
 ## Self Review
 
-- The fidelity raster uses final worker geometry, not masks or pre-worker
-  polygons, and its unit conversion is explicit.
+- The fidelity rasters use all final worker geometry, not masks or pre-worker
+  polygons. A wrong-color path cannot satisfy a semantic class.
+- White highlights are intentionally not required to be overlays; the final
+  white fill paths satisfy them completely.
 - The contour-overlay adjustment is generic and scoped to cross overlays. A
   copied `StitchSettings` prevents accidental mutation of contributor settings.
 - The export integration runs in a fresh interpreter, so fake pyembroidery state
@@ -133,8 +153,12 @@ not present in this worktree.
 - No semantic background role exists in the current region model. The generated
   mode therefore uses an explicit standard-cross setting instead of guessing
   background from area or color; manual `auto` remains decoration-sensitive.
-- The relative performance gate passed with sufficient margin, so production
-  hot paths were left untouched.
+- The relative performance baseline disables the overlay builder at the layer
+  construction call. It does not pay overlay construction cost and delete the
+  result later.
+- Both review findings were verification-harness defects. The corrected
+  assertions passed without a production change, so production geometry and hot
+  paths were left untouched.
 
 ## Residual Risk
 
@@ -142,6 +166,8 @@ not present in this worktree.
   pyembroidery allocations.
 - Synthetic raster recall cannot model fabric, tension, needle, or
   machine-specific compensation.
+- Sparse white cross fill recalls the eye outlines at `0.782 / 0.829`; this is
+  above the planned per-class gate but has less margin than the other classes.
 - PES decoding adds format-level commands and sits closest to the jump budget
   (73 versus a limit of 75); the decoded comparison will catch future drift.
 - The explicit generated `cross` strategy favors predictable stitch budgets over

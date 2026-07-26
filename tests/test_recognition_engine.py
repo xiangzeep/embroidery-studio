@@ -106,20 +106,30 @@ def build_synthetic_face_pipeline(
 
     image, threads, settings, expected = synthetic_face_fixture(scale)
     recognition = RecognitionEngine.recognize(image, threads, settings)
-    layers = ImageEngine.build_layers_from_recognition(
-        recognition,
-        threads,
-        image,
-        generation_mode=generation_mode,
-        quant_settings=settings,
-    )
+    overlay_builder_mock_calls = 0
+    if full_cross_baseline:
+        with mock.patch.object(
+            ImageEngine,
+            "_append_cross_stitch_detail_overlays",
+        ) as overlay_builder:
+            layers = ImageEngine.build_layers_from_recognition(
+                recognition,
+                threads,
+                image,
+                generation_mode=generation_mode,
+                quant_settings=settings,
+            )
+            overlay_builder_mock_calls = overlay_builder.call_count
+    else:
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            image,
+            generation_mode=generation_mode,
+            quant_settings=settings,
+        )
     if full_cross_baseline:
         for layer in layers:
-            layer.regions = [
-                region
-                for region in layer.regions
-                if not region.is_cross_stitch_overlay
-            ]
             for region in layer.regions:
                 if region.stitch_settings.fill_mode == "cross_stitch":
                     region.stitch_settings.cross_method = "cross"
@@ -145,6 +155,7 @@ def build_synthetic_face_pipeline(
         "layers": layers,
         "project": project,
         "engine": engine,
+        "overlay_builder_mock_calls": overlay_builder_mock_calls,
     }
 
 
@@ -178,6 +189,31 @@ def rasterize_worker_stitch_paths(regions, shape, px_per_mm):
             cv2.polylines(raster, [points], False, 1, 1)
             path_count += 1
     return raster, path_count
+
+
+def rasterize_worker_paths_by_physical_thread(layers, shape, px_per_mm):
+    """Rasterize all final paths, grouped by physical thread identity and RGB."""
+    rasters = {}
+    for layer in layers:
+        key = (layer.thread_uid, tuple(layer.thread_color_rgb))
+        layer_raster, layer_path_count = rasterize_worker_stitch_paths(
+            layer.regions,
+            shape,
+            px_per_mm,
+        )
+        if layer_path_count <= 0:
+            continue
+        if key not in rasters:
+            rasters[key] = {
+                "raster": np.zeros(shape, dtype=np.uint8),
+                "path_count": 0,
+            }
+        rasters[key]["raster"] = np.maximum(
+            rasters[key]["raster"],
+            layer_raster,
+        )
+        rasters[key]["path_count"] += layer_path_count
+    return rasters
 
 
 class RecognitionMetricTests(unittest.TestCase):
@@ -284,39 +320,80 @@ class DetailRecognitionTests(unittest.TestCase):
         )
 
         self.assertTrue(overlays)
-        stitch_raster, overlay_path_count = rasterize_worker_stitch_paths(
+        thread_rasters = rasterize_worker_paths_by_physical_thread(
+            layers,
+            result["image"].shape[:2],
+            result["engine"].px_per_mm,
+        )
+        white_key = (
+            result["threads"][3].uid,
+            result["threads"][3].color_rgb,
+        )
+        black_key = (
+            result["threads"][4].uid,
+            result["threads"][4].color_rgb,
+        )
+        for key in (white_key, black_key):
+            self.assertIn(key, thread_rasters)
+            self.assertGreater(thread_rasters[key]["path_count"], 0)
+            self.assertGreater(
+                int(np.count_nonzero(thread_rasters[key]["raster"])),
+                0,
+            )
+
+        expected_thread_keys = {
+            "left_eye": white_key,
+            "right_eye": white_key,
+            "left_pupil": black_key,
+            "right_pupil": black_key,
+            "left_highlight": white_key,
+            "right_highlight": white_key,
+            "left_brow": black_key,
+            "right_brow": black_key,
+            "left_mouth_corner": black_key,
+            "right_mouth_corner": black_key,
+            "under_mouth_line": black_key,
+        }
+        recalls = {
+            name: semantic_mask_recall(
+                thread_rasters[expected_thread_keys[name]]["raster"],
+                mask,
+            )
+            for name, mask in result["expected"].items()
+        }
+        stitch_raster = np.logical_or.reduce(
+            [entry["raster"] > 0 for entry in thread_rasters.values()]
+        ).astype(np.uint8)
+        _, overlay_path_count = rasterize_worker_stitch_paths(
             overlays,
             result["image"].shape[:2],
             result["engine"].px_per_mm,
         )
         self.assertGreater(overlay_path_count, 0)
         self.assertGreater(int(np.count_nonzero(stitch_raster)), 0)
-        recalls = {
-            name: semantic_mask_recall(stitch_raster, mask)
-            for name, mask in result["expected"].items()
-        }
         protected = np.logical_or.reduce(
             [mask > 0 for mask in result["expected"].values()]
         )
         self.assertGreaterEqual(
             semantic_mask_recall(stitch_raster, protected),
-            0.90,
+            0.95,
             recalls,
         )
-        for name in (
-            "left_eye",
-            "right_eye",
-            "left_pupil",
-            "right_pupil",
-            "left_highlight",
-            "right_highlight",
-            "left_brow",
-            "right_brow",
-            "left_mouth_corner",
-            "right_mouth_corner",
-            "under_mouth_line",
-        ):
-            self.assertGreaterEqual(recalls[name], 0.75, (name, recalls))
+        minimum_recalls = {
+            "left_eye": 0.75,
+            "right_eye": 0.75,
+            "left_pupil": 0.95,
+            "right_pupil": 0.95,
+            "left_highlight": 1.0,
+            "right_highlight": 1.0,
+            "left_brow": 0.95,
+            "right_brow": 0.95,
+            "left_mouth_corner": 0.95,
+            "right_mouth_corner": 0.95,
+            "under_mouth_line": 0.95,
+        }
+        for name, minimum in minimum_recalls.items():
+            self.assertGreaterEqual(recalls[name], minimum, (name, recalls))
 
         drawable_layers = [
             layer
@@ -459,7 +536,10 @@ class DetailRecognitionTests(unittest.TestCase):
             _, peak_bytes = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
-        build_synthetic_face_pipeline(scale=4, full_cross_baseline=True)
+        baseline_warmup = build_synthetic_face_pipeline(
+            scale=4,
+            full_cross_baseline=True,
+        )
 
         enhanced_times = []
         baseline_times = []
@@ -488,8 +568,43 @@ class DetailRecognitionTests(unittest.TestCase):
                 for region in layer.regions
             )
         )
+        self.assertTrue(
+            any(
+                region.is_cross_stitch_overlay
+                for layer in memory_result["layers"]
+                for region in layer.regions
+            )
+        )
+        self.assertEqual(baseline_warmup["overlay_builder_mock_calls"], 1)
+        self.assertFalse(
+            any(
+                region.is_cross_stitch_overlay
+                for layer in baseline_warmup["layers"]
+                for region in layer.regions
+            )
+        )
         self.assertLess(peak_bytes, 256 * 1024 * 1024)
         self.assertLessEqual(enhanced_median, baseline_median * 1.5)
+
+    def test_full_cross_baseline_disables_overlay_builder_during_layer_build(self):
+        enhanced = build_synthetic_face_pipeline()
+        baseline = build_synthetic_face_pipeline(full_cross_baseline=True)
+
+        self.assertTrue(
+            any(
+                region.is_cross_stitch_overlay
+                for layer in enhanced["layers"]
+                for region in layer.regions
+            )
+        )
+        self.assertEqual(baseline["overlay_builder_mock_calls"], 1)
+        self.assertFalse(
+            any(
+                region.is_cross_stitch_overlay
+                for layer in baseline["layers"]
+                for region in layer.regions
+            )
+        )
 
     def test_feature_outline_uses_adaptive_local_corners(self):
         settings = ImageEngine._feature_outline_stitch_settings()
