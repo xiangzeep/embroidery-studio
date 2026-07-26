@@ -65,6 +65,13 @@ class ExportEngine:
 
         last_x, last_y = None, None
         for layer_idx, (layer, region_paths) in enumerate(drawable_layers):
+            region_paths = sorted(
+                region_paths,
+                key=lambda item: (
+                    bool(getattr(item[0], "is_cross_stitch_overlay", False)),
+                    bool(item[0].is_detail_region),
+                ),
+            )
             # Add thread for this layer
             thread = self._thread_for_layer(layer, layer_idx)
             pattern.add_thread(thread)

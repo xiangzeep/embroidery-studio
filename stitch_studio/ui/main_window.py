@@ -58,37 +58,52 @@ class StitchWorker(QThread):
                 for region in layer.regions
                 if region.visible
             ]
-            ownership_contexts = self._build_cross_stitch_ownership_contexts(
-                self.engine,
-                region_jobs,
-            )
             cross_jobs = [
                 (layer, region)
                 for layer, region in region_jobs
-                if region.stitch_settings.fill_mode == "cross_stitch"
+                if (
+                    region.stitch_settings.fill_mode == "cross_stitch"
+                    and not getattr(region, "is_cross_stitch_overlay", False)
+                )
             ]
             other_jobs = [
                 (layer, region)
                 for layer, region in region_jobs
-                if region.stitch_settings.fill_mode != "cross_stitch"
+                if (
+                    region.stitch_settings.fill_mode != "cross_stitch"
+                    or getattr(region, "is_cross_stitch_overlay", False)
+                )
             ]
-            work_items = [
-                (layer, region, [region], region, None)
-                for layer, region in cross_jobs
-            ]
-            work_items.extend(self._photo_stitch_work_items(other_jobs))
+            ownership_contexts = {}
+            if cross_jobs and all(
+                getattr(region, "is_cross_stitch_overlay", False)
+                for _, region in other_jobs
+            ):
+                work_items = self._cross_stitch_work_items(region_jobs, self.engine)
+            else:
+                ownership_contexts = self._build_cross_stitch_ownership_contexts(
+                    self.engine,
+                    cross_jobs,
+                )
+                work_items = [
+                    (layer, region, [region], region, None)
+                    for layer, region in cross_jobs
+                ]
+                work_items.extend(self._photo_stitch_work_items(other_jobs))
 
             done = total_regions - sum(len(item[2]) for item in work_items)
 
             worker_count = self._generation_worker_count(len(work_items))
             if worker_count <= 1:
-                for _, target, members, working_region, mask_override in work_items:
+                for _, target, members, working_region, ownership_context in work_items:
                     paths = self.engine.generate_region_paths(
                         working_region,
                         self.image,
                         self.flow_field,
-                        mask_override,
-                        ownership_context=ownership_contexts.get(working_region.uid),
+                        ownership_context=(
+                            ownership_context
+                            or ownership_contexts.get(working_region.uid)
+                        ),
                     )
                     self._store_group_paths(target, members, paths)
                     done += len(members)
@@ -101,10 +116,12 @@ class StitchWorker(QThread):
                             working_region,
                             self.image,
                             self.flow_field,
-                            mask_override,
-                            ownership_context=ownership_contexts.get(working_region.uid),
+                            ownership_context=(
+                                ownership_context
+                                or ownership_contexts.get(working_region.uid)
+                            ),
                         ): (target, members)
-                        for _, target, members, working_region, mask_override in work_items
+                        for _, target, members, working_region, ownership_context in work_items
                     }
                     for future in as_completed(future_to_item):
                         target, members = future_to_item[future]
@@ -159,6 +176,33 @@ class StitchWorker(QThread):
                 working_region.polygon = None
             work_items.append((layer, target, members, working_region, None))
         return work_items
+
+    @classmethod
+    def _cross_stitch_work_items(cls, region_jobs, engine):
+        """Keep shared cross-fill ownership separate from run-detail overlays."""
+        fills = [
+            (layer, region)
+            for layer, region in region_jobs
+            if (
+                region.stitch_settings.fill_mode == "cross_stitch"
+                and not getattr(region, "is_cross_stitch_overlay", False)
+            )
+        ]
+        overlays = [
+            (layer, region)
+            for layer, region in region_jobs
+            if getattr(region, "is_cross_stitch_overlay", False)
+        ]
+        ownership_contexts = cls._build_cross_stitch_ownership_contexts(engine, fills)
+        fill_items = [
+            (layer, region, [region], region, ownership_contexts.get(region.uid))
+            for layer, region in fills
+        ]
+        overlay_items = [
+            (layer, region, [region], region, None)
+            for layer, region in overlays
+        ]
+        return fill_items + overlay_items
 
     @staticmethod
     def _generation_worker_count(job_count: int) -> int:
@@ -233,6 +277,7 @@ class StitchWorker(QThread):
         for layer, region in region_jobs:
             if (
                 region.stitch_settings.fill_mode != "cross_stitch"
+                or getattr(region, "is_cross_stitch_overlay", False)
                 or region.mask is None
             ):
                 continue

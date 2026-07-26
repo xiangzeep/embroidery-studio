@@ -56,6 +56,75 @@ def install_fake_pyembroidery():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_cross_worker_builds_ownership_for_fills_and_keeps_overlay_separate(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        layer = project_mod.Layer(thread_color_rgb=(20, 30, 40), order=0)
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_pattern_size_mm=2.0,
+        )
+        fill_a = project_mod.Region(
+            mask=np.full((8, 8), 255, dtype=np.uint8),
+            stitch_settings=settings,
+        )
+        fill_b = project_mod.Region(
+            mask=np.full((8, 8), 255, dtype=np.uint8),
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        overlay = project_mod.Region(
+            mask=np.full((8, 8), 255, dtype=np.uint8),
+            stitch_settings=project_mod.StitchSettings(fill_mode="run"),
+            is_cross_stitch_overlay=True,
+        )
+
+        items = main_mod.StitchWorker._cross_stitch_work_items(
+            [(layer, fill_a), (layer, fill_b), (layer, overlay)],
+            engine,
+        )
+        fill_items = [item for item in items if item[1] in (fill_a, fill_b)]
+        overlay_items = [item for item in items if item[1] is overlay]
+
+        self.assertTrue(all(item[4] is not None for item in fill_items))
+        self.assertEqual(
+            set(fill_items[0][4].base_masks),
+            {fill_a.uid, fill_b.uid},
+        )
+        self.assertEqual(overlay_items[0][4], None)
+
+    def test_same_thread_cross_overlay_exports_after_fill_with_jump_between_runs(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        overlay = project_mod.Region(is_cross_stitch_overlay=True)
+        overlay.stitch_settings = project_mod.StitchSettings(fill_mode="run")
+        overlay.stitch_paths = [
+            [(100.0, 0.0), (110.0, 0.0)],
+            [(200.0, 0.0), (210.0, 0.0)],
+        ]
+        fill = project_mod.Region()
+        fill.stitch_settings = project_mod.StitchSettings(fill_mode="cross_stitch")
+        fill.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        # Deliberately reversed: export must promote the base fill before its overlay.
+        layer.regions = [overlay, fill]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        sewing = [
+            (x, y) for x, y, command in pattern.stitches
+            if command == pyembroidery.STITCH
+        ]
+        commands = [command for _, _, command in pattern.stitches]
+
+        self.assertEqual(sewing, [(10, 0), (110, 0), (210, 0)])
+        self.assertEqual(commands.count(pyembroidery.JUMP), 3)
+
     def test_cross_stitch_overlay_role_round_trips(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
 
