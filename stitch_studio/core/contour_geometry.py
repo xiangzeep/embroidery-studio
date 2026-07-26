@@ -66,6 +66,15 @@ def detect_locked_corner_indices(
         if min(left, right) < min_support_length:
             continue
 
+        immediate_left = float(
+            np.linalg.norm(contour[(index - 1) % len(contour)] - current)
+        )
+        immediate_right = float(
+            np.linalg.norm(contour[(index + 1) % len(contour)] - current)
+        )
+        if max(immediate_left, immediate_right) < min_support_length:
+            continue
+
         cosine = np.clip(np.dot(incoming, outgoing) / (left * right), -1.0, 1.0)
         interior = float(np.degrees(np.arccos(cosine)))
         scores[index] = max(0.0, 180.0 - interior)
@@ -138,7 +147,7 @@ def _cyclic_anchor_pairs(anchors: Sequence[int]) -> Iterable[tuple[int, int]]:
 def _cyclic_slice(contour: np.ndarray, start: int, end: int) -> np.ndarray:
     if end > start:
         return contour[start : end + 1]
-    return np.vstack((contour[start:], contour[: end + 1], contour[start]))
+    return np.vstack((contour[start:], contour[: end + 1]))
 
 
 def _chaikin_closed(contour: np.ndarray, iterations: int) -> np.ndarray:
