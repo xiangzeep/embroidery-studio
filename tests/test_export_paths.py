@@ -1,5 +1,7 @@
 import importlib
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -52,10 +54,155 @@ def install_fake_pyembroidery():
     fake.EmbPattern = EmbPattern
     fake.write = lambda pattern, filepath, settings=None: None
     sys.modules["pyembroidery"] = fake
+    loaded_exporter = sys.modules.get("stitch_studio.core.export_engine")
+    if loaded_exporter is not None:
+        loaded_exporter.pyembroidery = fake
     return fake
 
 
+def real_synthetic_roundtrip_metrics():
+    """Export and decode Task 5 artifacts in a clean, real-pyembroidery process."""
+    import pyembroidery
+
+    from stitch_studio.core.export_engine import ExportEngine
+    from tests.test_recognition_engine import build_synthetic_face_pipeline
+
+    result = build_synthetic_face_pipeline()
+    project = result["project"]
+    exporter = ExportEngine()
+    source = exporter.build_pattern(project)
+    source_bounds = exporter._sewn_bounds(source)
+    metrics = {
+        "source": {
+            "stitches": len(source.stitches),
+            "threads": len(source.threadlist),
+            "bounds": source_bounds,
+        },
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        for extension in ("pes", "dst"):
+            path = os.path.join(directory, f"cross-fidelity.{extension}")
+            exporter.export(project, path)
+            decoded = pyembroidery.EmbPattern(path)
+            metrics[extension] = {
+                "stitches": len(decoded.stitches),
+                "threads": len(decoded.threadlist),
+                "bounds": exporter._sewn_bounds(decoded),
+                "end": bool(
+                    decoded.stitches
+                    and (int(decoded.stitches[-1][2]) & 0xFF) == pyembroidery.END
+                ),
+                "bytes": os.path.getsize(path),
+            }
+    return metrics
+
+
 class ExportPathTests(unittest.TestCase):
+    def test_synthetic_face_cross_fidelity_stays_within_stitch_and_jump_budget(
+        self,
+    ):
+        pyembroidery = install_fake_pyembroidery()
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        export_mod.pyembroidery = pyembroidery
+        from tests.test_recognition_engine import build_synthetic_face_pipeline
+
+        enhanced = build_synthetic_face_pipeline()
+        baseline = build_synthetic_face_pipeline(full_cross_baseline=True)
+        exporter = export_mod.ExportEngine()
+        enhanced_pattern = exporter.build_pattern(enhanced["project"])
+        baseline_pattern = exporter.build_pattern(baseline["project"])
+
+        def command_count(pattern, command):
+            return sum(
+                (int(candidate) & 0xFF) == command
+                for _, _, candidate in pattern.stitches
+            )
+
+        enhanced_stitches = command_count(enhanced_pattern, pyembroidery.STITCH)
+        baseline_stitches = command_count(baseline_pattern, pyembroidery.STITCH)
+        enhanced_jumps = command_count(enhanced_pattern, pyembroidery.JUMP)
+        baseline_jumps = command_count(baseline_pattern, pyembroidery.JUMP)
+        overlay_paths = sum(
+            len(region.stitch_paths)
+            for layer in enhanced["layers"]
+            for region in layer.regions
+            if region.is_cross_stitch_overlay
+        )
+
+        self.assertGreater(enhanced_stitches, 0)
+        self.assertGreater(baseline_stitches, 0)
+        self.assertLessEqual(enhanced_stitches, int(baseline_stitches * 1.35))
+        self.assertLessEqual(
+            enhanced_jumps,
+            baseline_jumps + overlay_paths + 8,
+        )
+        self.assertLessEqual(len(enhanced_pattern.threadlist), 8)
+
+    def test_real_pyembroidery_pes_dst_roundtrip_keeps_bounds_and_threads(
+        self,
+    ):
+        availability = subprocess.run(
+            [sys.executable, "-c", "import pyembroidery"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if availability.returncode:
+            self.skipTest("real pyembroidery package is unavailable")
+
+        script = (
+            "import json; "
+            "from tests.test_export_paths import real_synthetic_roundtrip_metrics; "
+            "print('TASK5_METRICS=' + json.dumps(real_synthetic_roundtrip_metrics()))"
+        )
+        environment = os.environ.copy()
+        environment["QT_QPA_PLATFORM"] = "offscreen"
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        payload = next(
+            line.removeprefix("TASK5_METRICS=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("TASK5_METRICS=")
+        )
+        metrics = json.loads(payload)
+        source_bounds = metrics["source"]["bounds"]
+        self.assertIsNotNone(source_bounds)
+        bounds_tolerance = max(
+            2.0,
+            max(
+                source_bounds[2] - source_bounds[0],
+                source_bounds[3] - source_bounds[1],
+            )
+            * 0.01,
+        )
+
+        for extension in ("pes", "dst"):
+            decoded = metrics[extension]
+            self.assertGreater(decoded["stitches"], 0)
+            self.assertTrue(decoded["end"])
+            self.assertGreater(decoded["bytes"], 0)
+            self.assertEqual(decoded["threads"], metrics["source"]["threads"])
+            self.assertIsNotNone(decoded["bounds"])
+            for source_value, decoded_value in zip(
+                source_bounds,
+                decoded["bounds"],
+            ):
+                self.assertLessEqual(
+                    abs(source_value - decoded_value),
+                    bounds_tolerance,
+                )
+
     def test_cross_worker_builds_ownership_for_fills_and_keeps_overlay_separate(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -3610,6 +3757,23 @@ class ExportPathTests(unittest.TestCase):
         settings = project_mod.StitchSettings(fill_mode="cross_stitch", cross_method="auto")
 
         self.assertEqual(engine._choose_cross_stitch_method(mask, settings, image), "half")
+
+    def test_cross_stitch_auto_method_keeps_broad_saturated_flat_region_full_cross(
+        self,
+    ):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.ones((96, 96), dtype=np.uint8) * 255
+        image = np.full((96, 96, 3), (42, 88, 168), dtype=np.uint8)
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="auto",
+            cross_detail_boost=0.5,
+        )
+
+        self.assertEqual(engine._choose_cross_stitch_method(mask, settings, image), "cross")
 
     def test_default_fill_settings_are_dense_without_duplicate_edge_contour(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")

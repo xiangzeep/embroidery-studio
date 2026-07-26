@@ -2,6 +2,8 @@ import unittest
 import hashlib
 import importlib
 import os
+import time
+import tracemalloc
 from unittest import mock
 
 import cv2
@@ -17,6 +19,147 @@ from stitch_studio.core.recognition_engine import (
 from stitch_studio.core.image_engine import ImageEngine
 from stitch_studio.core.project import QuantizationSettings
 from stitch_studio.core.thread_db import ThreadColor
+
+
+def synthetic_face_fixture(scale=1):
+    """Return the deterministic Task 5 face and semantic detail masks."""
+    image = np.full((96, 96, 3), (60, 130, 210), dtype=np.uint8)
+    image[48:, :] = (42, 88, 168)
+    subject = np.array([[24, 88], [48, 8], [72, 88]], dtype=np.int32)
+    cv2.fillPoly(image, [subject], (245, 120, 102))
+
+    expected = {
+        name: np.zeros(image.shape[:2], dtype=np.uint8)
+        for name in (
+            "left_eye",
+            "right_eye",
+            "left_pupil",
+            "right_pupil",
+            "left_highlight",
+            "right_highlight",
+            "left_brow",
+            "right_brow",
+            "left_mouth_corner",
+            "right_mouth_corner",
+            "under_mouth_line",
+        )
+    }
+    for name, center in (("left_eye", (42, 40)), ("right_eye", (58, 40))):
+        cv2.ellipse(image, center, (10, 14), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(expected[name], center, (10, 14), 0, 0, 360, 1, 2)
+    for name, center in (("left_pupil", (43, 42)), ("right_pupil", (59, 42))):
+        cv2.circle(image, center, 4, (20, 20, 20), -1)
+        cv2.circle(expected[name], center, 4, 1, -1)
+    for name, center in (
+        ("left_highlight", (44, 40)),
+        ("right_highlight", (60, 40)),
+    ):
+        cv2.circle(image, center, 1, (248, 248, 248), -1)
+        cv2.circle(expected[name], center, 1, 1, -1)
+
+    mouth = np.array([[36, 54], [50, 62], [66, 54]], dtype=np.int32)
+    cv2.polylines(image, [mouth], False, (22, 22, 22), 2)
+    cv2.circle(expected["left_mouth_corner"], (36, 54), 2, 1, -1)
+    cv2.circle(expected["right_mouth_corner"], (66, 54), 2, 1, -1)
+    cv2.line(image, (41, 68), (61, 68), (22, 22, 22), 1)
+    cv2.line(expected["under_mouth_line"], (41, 68), (61, 68), 1, 1)
+
+    for name, start, end in (
+        ("left_brow", (35, 23), (43, 20)),
+        ("right_brow", (55, 20), (63, 23)),
+    ):
+        cv2.line(image, start, end, (22, 22, 22), 2)
+        cv2.line(expected[name], start, end, 1, 2)
+
+    threads = [
+        ThreadColor(name="Blue", color_rgb=(60, 130, 210)),
+        ThreadColor(name="Navy", color_rgb=(42, 88, 168)),
+        ThreadColor(name="Coral", color_rgb=(245, 120, 102)),
+        ThreadColor(name="White", color_rgb=(248, 248, 248)),
+        ThreadColor(name="Black", color_rgb=(22, 22, 22)),
+    ]
+    settings = QuantizationSettings(
+        n_colors=8,
+        preserve_details=True,
+        include_background=True,
+    )
+    if scale != 1:
+        target = (image.shape[1] * scale, image.shape[0] * scale)
+        image = cv2.resize(image, target, interpolation=cv2.INTER_NEAREST)
+        expected = {
+            name: cv2.resize(mask, target, interpolation=cv2.INTER_NEAREST)
+            for name, mask in expected.items()
+        }
+    return image, threads, settings, expected
+
+
+def build_synthetic_face_pipeline(
+    generation_mode="cross_stitch",
+    scale=1,
+    full_cross_baseline=False,
+):
+    """Run recognition, layer construction, and the real stitch worker."""
+    from stitch_studio.core.project import Project
+    from stitch_studio.core.stitch_engine import StitchEngine
+    from stitch_studio.ui.main_window import StitchWorker
+
+    image, threads, settings, expected = synthetic_face_fixture(scale)
+    recognition = RecognitionEngine.recognize(image, threads, settings)
+    layers = ImageEngine.build_layers_from_recognition(
+        recognition,
+        threads,
+        image,
+        generation_mode=generation_mode,
+        quant_settings=settings,
+    )
+    if full_cross_baseline:
+        for layer in layers:
+            layer.regions = [
+                region
+                for region in layer.regions
+                if not region.is_cross_stitch_overlay
+            ]
+            for region in layer.regions:
+                if region.stitch_settings.fill_mode == "cross_stitch":
+                    region.stitch_settings.cross_method = "cross"
+
+    project = Project()
+    project.name = f"Synthetic face {generation_mode}"
+    project.source_image = image
+    project.processed_image = image
+    project.quant_settings = settings
+    project.generation_mode = generation_mode
+    project.layers = layers
+    engine = StitchEngine()
+    worker = StitchWorker(project, engine, image=image)
+    worker.run()
+    if worker.failure_message:
+        raise AssertionError(worker.failure_message)
+    return {
+        "image": image,
+        "threads": threads,
+        "settings": settings,
+        "expected": expected,
+        "recognition": recognition,
+        "layers": layers,
+        "project": project,
+        "engine": engine,
+    }
+
+
+def semantic_mask_recall(actual, expected, tolerance=2):
+    actual_mask = np.asarray(actual, dtype=np.uint8)
+    if tolerance:
+        actual_mask = cv2.dilate(
+            actual_mask,
+            np.ones((tolerance * 2 + 1, tolerance * 2 + 1), dtype=np.uint8),
+            iterations=1,
+        )
+    expected_mask = np.asarray(expected, dtype=bool)
+    return float(
+        np.count_nonzero((actual_mask > 0) & expected_mask)
+        / max(1, np.count_nonzero(expected_mask))
+    )
 
 
 class RecognitionMetricTests(unittest.TestCase):
@@ -98,6 +241,209 @@ class DesignPaletteTests(unittest.TestCase):
 
 
 class DetailRecognitionTests(unittest.TestCase):
+    def test_synthetic_face_cross_pipeline_recalls_semantic_details_with_bounded_layers(
+        self,
+    ):
+        result = build_synthetic_face_pipeline()
+        layers = result["layers"]
+        overlays = [
+            region
+            for layer in layers
+            for region in layer.regions
+            if region.is_cross_stitch_overlay
+        ]
+        fills = [
+            (layer, region)
+            for layer in layers
+            for region in layer.regions
+            if region.stitch_settings.fill_mode == "cross_stitch"
+        ]
+
+        self.assertTrue(overlays)
+        overlay_union = np.logical_or.reduce(
+            [region.mask > 0 for region in overlays]
+        )
+        recalls = {
+            name: semantic_mask_recall(overlay_union, mask)
+            for name, mask in result["expected"].items()
+        }
+        protected = np.logical_or.reduce(
+            [mask > 0 for mask in result["expected"].values()]
+        )
+        self.assertGreaterEqual(
+            semantic_mask_recall(overlay_union, protected),
+            0.90,
+            recalls,
+        )
+        for name in (
+            "left_eye",
+            "right_eye",
+            "left_pupil",
+            "right_pupil",
+            "left_highlight",
+            "right_highlight",
+            "left_brow",
+            "right_brow",
+            "left_mouth_corner",
+            "right_mouth_corner",
+            "under_mouth_line",
+        ):
+            self.assertGreaterEqual(recalls[name], 0.75, (name, recalls))
+
+        drawable_layers = [
+            layer
+            for layer in layers
+            if any(region.stitch_paths for region in layer.regions)
+        ]
+        drawable_thread_colors = {
+            layer.thread_uid or layer.thread_color_rgb
+            for layer in drawable_layers
+        }
+        self.assertLessEqual(len(drawable_thread_colors), 8)
+        self.assertLessEqual(len(drawable_layers), 8)
+        self.assertTrue(
+            all(
+                len(path) >= 2
+                for region in overlays
+                for path in region.stitch_paths
+            )
+        )
+        self.assertTrue(
+            all(
+                max(
+                    index
+                    for index, candidate in enumerate(layer.regions)
+                    if candidate.stitch_settings.fill_mode == "cross_stitch"
+                )
+                < min(
+                    index
+                    for index, candidate in enumerate(layer.regions)
+                    if candidate.is_cross_stitch_overlay
+                )
+                for layer in layers
+                if (
+                    any(
+                        region.stitch_settings.fill_mode == "cross_stitch"
+                        for region in layer.regions
+                    )
+                    and any(region.is_cross_stitch_overlay for region in layer.regions)
+                )
+            )
+        )
+
+        from stitch_studio.ui.main_window import StitchWorker
+
+        contexts = StitchWorker._build_cross_stitch_ownership_contexts(
+            result["engine"],
+            fills,
+        )
+        unique_contexts = {id(context): context for context in contexts.values()}
+        self.assertTrue(unique_contexts)
+        for context in unique_contexts.values():
+            overlap_count = np.sum(
+                [mask > 0 for mask in context.base_masks.values()],
+                axis=0,
+            )
+            self.assertEqual(int(overlap_count.max()), 1)
+
+        boundary_methods = []
+        for _, region in fills:
+            context = contexts.get(region.uid)
+            if context is None:
+                continue
+            boundary_methods.extend(
+                spec.method_override
+                for spec in result["engine"]._cross_stitch_cell_specs(
+                    context.base_mask_for(region.uid),
+                    region.mask,
+                    region.stitch_settings,
+                    ownership_override=True,
+                    grid_origin_px=context.base_grid_origin_px,
+                )
+            )
+        self.assertTrue(
+            any(method in ("half", "half_flipped") for method in boundary_methods)
+        )
+
+        background_uids = {thread.uid for thread in result["threads"][:2]}
+        background_fills = [
+            region
+            for layer, region in fills
+            if layer.thread_uid in background_uids
+        ]
+        self.assertGreaterEqual(len(background_fills), 1)
+        self.assertLessEqual(len(background_fills), 2)
+        background_paths = sum(len(region.stitch_paths) for region in background_fills)
+        self.assertGreater(background_paths, 0)
+        self.assertLess(background_paths, int(np.prod(result["image"].shape[:2]) * 0.40))
+
+    def test_synthetic_face_photo_pipeline_keeps_feature_threads_and_generates_stitches(
+        self,
+    ):
+        result = build_synthetic_face_pipeline(generation_mode="photo_stitch")
+        recognition = result["recognition"]
+        thread_map = recognition.thread_map
+        expected = result["expected"]
+
+        expected_thread = {
+            "left_eye": 4,
+            "right_eye": 4,
+            "left_pupil": 4,
+            "right_pupil": 4,
+            "left_highlight": 3,
+            "right_highlight": 3,
+            "left_brow": 4,
+            "right_brow": 4,
+            "left_mouth_corner": 4,
+            "right_mouth_corner": 4,
+            "under_mouth_line": 4,
+        }
+        for name, thread_index in expected_thread.items():
+            recall = semantic_mask_recall(
+                thread_map == thread_index,
+                expected[name],
+            )
+            self.assertGreaterEqual(recall, 0.75, (name, recall))
+
+        drawable_layers = [
+            layer
+            for layer in result["layers"]
+            if any(region.stitch_paths for region in layer.regions)
+        ]
+        self.assertTrue(drawable_layers)
+        self.assertLessEqual(len(drawable_layers), 8)
+        self.assertGreater(
+            sum(
+                len(path)
+                for layer in drawable_layers
+                for region in layer.regions
+                for path in region.stitch_paths
+            ),
+            0,
+        )
+
+    def test_medium_synthetic_face_generation_has_guarded_runtime_and_python_memory(
+        self,
+    ):
+        tracemalloc.start()
+        started = time.perf_counter()
+        try:
+            result = build_synthetic_face_pipeline(scale=2)
+            elapsed = time.perf_counter() - started
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertTrue(
+            any(
+                region.stitch_paths
+                for layer in result["layers"]
+                for region in layer.regions
+            )
+        )
+        self.assertLess(elapsed, 15.0)
+        self.assertLess(peak_bytes, 256 * 1024 * 1024)
+
     def test_feature_outline_uses_adaptive_local_corners(self):
         settings = ImageEngine._feature_outline_stitch_settings()
 

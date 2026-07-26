@@ -1780,7 +1780,12 @@ class StitchEngine:
             return "upright"
         if contrast >= 42 and boost >= 0.65:
             return "dense_upright"
-        if luminance <= 85 or (chroma >= 80 and boost >= 0.45):
+        # Dense decorative templates are for local detail, not broad flat fills.
+        detail_area_limit = max(24, int(binary.size * 0.08))
+        if (
+            area <= detail_area_limit
+            and (luminance <= 85 or (chroma >= 80 and boost >= 0.45))
+        ):
             return "double_cross"
         return "cross"
 

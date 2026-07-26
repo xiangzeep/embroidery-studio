@@ -728,6 +728,11 @@ class ImageEngine:
             feature_groups,
             detail.shape,
         )
+        semantic_neighborhood = cv2.dilate(
+            feature_union.astype(np.uint8),
+            np.ones((13, 13), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
         source_luminance = None
         highlight_seed = np.zeros(detail.shape, dtype=bool)
         if source_image is not None and source_image.shape[:2] == detail.shape:
@@ -740,7 +745,10 @@ class ImageEngine:
                 & feature_support
                 & subject
             )
-        protected = (detail | highlight_seed) & subject
+        protected = (
+            (detail & (subject | semantic_neighborhood))
+            | (highlight_seed & subject)
+        )
         if not np.any(protected):
             return
 
@@ -890,12 +898,12 @@ class ImageEngine:
                         component,
                         f"{layer.name} cross line {component_id}-{region_index}",
                         settings,
-                        1,
+                        3 if contributor.is_detail_region else 2,
                         contrast,
                     )
 
         total_budget = max(12, int(np.ceil(detail.size / 1024.0)))
-        per_color_budget = max(6, int(np.ceil(total_budget / 2.0)))
+        per_color_budget = max(8, int(np.ceil(total_budget / 2.0)))
         selected = 0
         selected_by_color = {}
         for _, _, layer, contributor, mask, name, stitch_settings in sorted(
