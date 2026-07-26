@@ -741,6 +741,87 @@ class ExportPathTests(unittest.TestCase):
         )
         self.assertEqual(reinforced[len(base) * 2 - 1 :], base[1:])
 
+    def test_adaptive_photo_feature_export_preserves_bounds_and_stitch_budget(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        stitch_engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.5,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="adaptive",
+            run_passes=3,
+        )
+        feature_masks = {
+            "eye": cv2.ellipse(
+                np.zeros((88, 112), dtype=np.uint8),
+                (12, 10),
+                (6, 4),
+                0,
+                0,
+                360,
+                255,
+                3,
+            ),
+            "mouth": np.zeros((88, 112), dtype=np.uint8),
+        }
+        mouth = np.asarray(
+            [(12, 12), (48, 16), (40, 24), (48, 32), (12, 36), (24, 22)],
+            dtype=np.int32,
+        )
+        cv2.polylines(feature_masks["mouth"], [mouth], True, 255, 3)
+
+        for feature_name, mask in feature_masks.items():
+            with self.subTest(feature=feature_name):
+                project = project_mod.Project()
+                layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+                region = project_mod.Region(mask=mask, stitch_settings=settings)
+                region.stitch_paths = stitch_engine.generate_region_paths(region)
+                region.stitch_points = [
+                    point for path in region.stitch_paths for point in path
+                ]
+                layer.regions = [region]
+                project.layers = [layer]
+
+                before = region.stitch_bounds()
+                pattern = export_mod.ExportEngine().build_pattern(project)
+                after = pattern.bounds()
+                self.assertIsNotNone(before)
+                self.assertIsNotNone(after)
+                self.assertLessEqual(
+                    abs((before[2] - before[0]) - (after[2] - after[0])),
+                    1.0,
+                )
+                self.assertLessEqual(
+                    abs((before[3] - before[1]) - (after[3] - after[1])),
+                    1.0,
+                )
+
+                distances = np.concatenate(
+                    [
+                        np.linalg.norm(
+                            np.diff(np.asarray(path, dtype=np.float64), axis=0),
+                            axis=1,
+                        )
+                        for path in region.stitch_paths
+                    ]
+                )
+                self.assertTrue(np.all(distances > 0.1), distances)
+                self.assertLessEqual(
+                    float(np.max(distances)),
+                    3.0 * settings.stitch_length_mm * 10.0,
+                )
+                stitch_count = sum(
+                    command == pyembroidery.STITCH
+                    for _, _, command in pattern.stitches
+                )
+                self.assertGreaterEqual(stitch_count, 50)
+                self.assertLessEqual(stitch_count, 700)
+
     def test_short_skeleton_spur_is_pruned_from_open_detail(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 

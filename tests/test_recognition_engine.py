@@ -1,5 +1,6 @@
 import unittest
 import hashlib
+import importlib
 import os
 from unittest import mock
 
@@ -782,6 +783,26 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(mouth_region.stitch_settings.run_corner_mode, "adaptive")
         self.assertEqual(eye_region.stitch_settings.run_passes, 3)
         self.assertEqual(mouth_region.stitch_settings.run_passes, 3)
+
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        stitch_engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        for feature_name, region in (("eye", eye_region), ("mouth", mouth_region)):
+            with self.subTest(feature=feature_name):
+                paths = stitch_engine.generate_region_paths(region)
+                self.assertEqual(len(paths), 1)
+                path = paths[0]
+                self.assertEqual(path[0], path[-1])
+                distances = np.linalg.norm(
+                    np.diff(np.asarray(path, dtype=np.float64), axis=0),
+                    axis=1,
+                )
+                self.assertTrue(np.all(distances > 0.1), distances)
+                self.assertLessEqual(
+                    float(np.max(distances)),
+                    3.0 * region.stitch_settings.stitch_length_mm * 10.0,
+                )
+                self.assertGreaterEqual(len(path), 50)
+                self.assertLessEqual(len(path), 500)
 
     def test_feature_run_owns_same_color_antialias_halo(self):
         design_map = np.zeros((48, 48), dtype=np.int32)
