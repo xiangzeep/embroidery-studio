@@ -59,16 +59,24 @@ class StitchWorker(QThread):
             ownership_masks = {}
             dense_ownership_masks = {}
             has_cross_ownership = False
+            cross_grid_origin_px = None
+            dense_grid_origin_px = None
             is_cross_stitch = bool(region_jobs) and all(
                 region.stitch_settings.fill_mode == "cross_stitch"
                 for _, region in region_jobs
             )
-            if is_cross_stitch:
+            if is_cross_stitch and len(region_jobs) > 1:
                 ownership_masks = self.engine.build_cross_stitch_ownership_masks([
                     (region, self._cross_stitch_priority(layer, region))
                     for layer, region in region_jobs
                 ])
                 has_cross_ownership = bool(ownership_masks)
+                if has_cross_ownership:
+                    cross_grid_origin_px = getattr(
+                        ownership_masks,
+                        "grid_origin_px",
+                        None,
+                    )
                 if has_cross_ownership and any(
                     region.stitch_settings.cross_method.startswith("dense_upright")
                     for _, region in region_jobs
@@ -82,13 +90,19 @@ class StitchWorker(QThread):
                         ],
                         grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
                     )
+                    dense_grid_origin_px = getattr(
+                        dense_ownership_masks,
+                        "grid_origin_px",
+                        None,
+                    )
+            if is_cross_stitch:
                 work_items = [
                     (
                         layer,
                         region,
                         [region],
                         region,
-                        ownership_masks.get(region.uid),
+                        ownership_masks.get(region.uid) if has_cross_ownership else None,
                     )
                     for layer, region in region_jobs
                 ]
@@ -111,6 +125,9 @@ class StitchWorker(QThread):
                             if has_cross_ownership
                             else None
                         ),
+                        cross_grid_origin_px=cross_grid_origin_px,
+                        ownership_mask_immutable=has_cross_ownership,
+                        dense_grid_origin_px=dense_grid_origin_px,
                     )
                     self._store_group_paths(target, members, paths)
                     done += len(members)
@@ -130,6 +147,9 @@ class StitchWorker(QThread):
                                 if has_cross_ownership
                                 else None
                             ),
+                            cross_grid_origin_px=cross_grid_origin_px,
+                            ownership_mask_immutable=has_cross_ownership,
+                            dense_grid_origin_px=dense_grid_origin_px,
                         ): (target, members)
                         for _, target, members, working_region, mask_override in work_items
                     }

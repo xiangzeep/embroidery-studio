@@ -2658,7 +2658,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(paths, [])
 
-    def test_cross_stitch_worker_passes_explicit_ownership_context(self):
+    def test_single_cross_stitch_worker_does_not_claim_shared_ownership(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -2684,11 +2684,18 @@ class ExportPathTests(unittest.TestCase):
                 mask_override,
                 cross_ownership_override=False,
                 dense_mask_override=None,
+                cross_grid_origin_px=None,
+                ownership_mask_immutable=False,
+                dense_grid_origin_px=None,
             ):
                 self.calls.append((
                     region.uid,
+                    mask_override,
                     cross_ownership_override,
                     dense_mask_override,
+                    cross_grid_origin_px,
+                    ownership_mask_immutable,
+                    dense_grid_origin_px,
                 ))
                 return []
 
@@ -2702,7 +2709,111 @@ class ExportPathTests(unittest.TestCase):
 
         main_mod.StitchWorker(project, engine).run()
 
-        self.assertEqual(engine.calls, [(region.uid, True, None)])
+        self.assertEqual(len(engine.calls), 1)
+        uid, mask_override, shared, dense, origin, immutable, dense_origin = engine.calls[0]
+        self.assertEqual(uid, region.uid)
+        self.assertIsNone(mask_override)
+        self.assertFalse(shared)
+        self.assertIsNone(dense)
+        self.assertIsNone(origin)
+        self.assertFalse(immutable)
+        self.assertIsNone(dense_origin)
+
+    def test_single_cross_stitch_worker_rejects_twenty_five_percent_coverage(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = importlib.import_module("stitch_studio.core.stitch_engine").StitchEngine(
+            px_per_mm=10.0
+        )
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        mask = np.zeros((10, 10), dtype=np.uint8)
+        mask[:5, :5] = 255
+        region = project_mod.Region(mask=mask)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            underlay=False,
+        )
+        layer.regions = [region]
+        project.layers = [layer]
+
+        main_mod.StitchWorker(project, engine).run()
+
+        self.assertEqual(region.stitch_paths, [])
+
+    def test_worker_non_aligned_ownership_uses_builder_grid_origin_once(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        first_mask = np.zeros((40, 40), dtype=np.uint8)
+        first_mask[10:30, 10:30] = 255
+        second_mask = np.zeros((40, 40), dtype=np.uint8)
+        second_mask[10:30, 30:40] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            cross_align_grid=False,
+            cross_grid_offset_x_mm=0.2,
+            cross_grid_offset_y_mm=0.3,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first = project_mod.Region(mask=first_mask, stitch_settings=settings)
+        second = project_mod.Region(
+            mask=second_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer.regions = [first, second]
+        project.layers = [layer]
+
+        main_mod.StitchWorker(project, engine).run()
+
+        self.assertIn([(12.0, 13.0), (22.0, 23.0)], first.stitch_paths)
+
+    def test_worker_checkerboard_ownership_paths_do_not_duplicate_cells(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        first_mask = np.zeros((6, 6), dtype=np.uint8)
+        second_mask = np.zeros((6, 6), dtype=np.uint8)
+        for row in range(3):
+            for column in range(3):
+                target = first_mask if (row + column) % 2 == 0 else second_mask
+                target[row * 2:(row + 1) * 2, column * 2:(column + 1) * 2] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first = project_mod.Region(mask=first_mask, stitch_settings=settings)
+        second = project_mod.Region(
+            mask=second_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer.regions = [first, second]
+        project.layers = [layer]
+
+        main_mod.StitchWorker(project, engine).run()
+
+        paths = first.stitch_paths + second.stitch_paths
+        self.assertEqual(len(paths), len({tuple(path) for path in paths}))
 
     def test_cross_stitch_worker_disables_context_without_shared_ownership(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
@@ -2723,6 +2834,9 @@ class ExportPathTests(unittest.TestCase):
                 mask_override,
                 cross_ownership_override=False,
                 dense_mask_override=None,
+                cross_grid_origin_px=None,
+                ownership_mask_immutable=False,
+                dense_grid_origin_px=None,
             ):
                 self.calls.append(cross_ownership_override)
                 return []

@@ -21,6 +21,14 @@ from .project import Region, StitchSettings
 UNITS_PER_MM = 10  # pyembroidery uses 1/10mm
 
 
+class CrossStitchOwnershipMasks(dict):
+    """Ownership masks plus the grid origin that assigned their cells."""
+
+    def __init__(self, masks, grid_origin_px: Tuple[float, float]):
+        super().__init__(masks)
+        self.grid_origin_px = grid_origin_px
+
+
 class StitchEngine:
     """Generates stitch paths from region masks and settings."""
 
@@ -48,6 +56,9 @@ class StitchEngine:
         mask_override: Optional[np.ndarray] = None,
         cross_ownership_override: bool = False,
         dense_mask_override: Optional[np.ndarray] = None,
+        cross_grid_origin_px: Optional[Tuple[float, float]] = None,
+        ownership_mask_immutable: bool = False,
+        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate separated stitch paths for preview and export."""
         original_mask = region.mask
@@ -56,7 +67,10 @@ class StitchEngine:
             return []
 
         settings = region.stitch_settings
-        mask = self._prepare_mask(source_mask, settings)
+        if ownership_mask_immutable:
+            mask = (source_mask > 0).astype(np.uint8) * 255
+        else:
+            mask = self._prepare_mask(source_mask, settings)
         if mask is None or np.count_nonzero(mask) == 0:
             return []
 
@@ -89,6 +103,8 @@ class StitchEngine:
             cross_source_mask=original_mask,
             cross_ownership_override=cross_ownership_override,
             dense_mask_override=dense_mask_override,
+            cross_grid_origin_px=cross_grid_origin_px,
+            dense_grid_origin_px=dense_grid_origin_px,
         )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
@@ -218,6 +234,8 @@ class StitchEngine:
         cross_source_mask: Optional[np.ndarray] = None,
         cross_ownership_override: bool = False,
         dense_mask_override: Optional[np.ndarray] = None,
+        cross_grid_origin_px: Optional[Tuple[float, float]] = None,
+        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
@@ -244,6 +262,8 @@ class StitchEngine:
                 source_mask=cross_source_mask,
                 ownership_override=cross_ownership_override,
                 dense_mask_override=dense_mask_override,
+                grid_origin_px=cross_grid_origin_px,
+                dense_grid_origin_px=dense_grid_origin_px,
             )
         if mode == "none":
             return []
@@ -1240,7 +1260,10 @@ class StitchEngine:
         offset_y = (reference.cross_grid_offset_y_mm + shift_y_mm) * self.px_per_mm
         start_x = offset_x + np.floor((0.0 - offset_x) / cell_size) * cell_size
         start_y = offset_y + np.floor((0.0 - offset_y) / cell_size) * cell_size
-        assigned = {region.uid: np.zeros(shape, dtype=np.uint8) for region, _ in entries}
+        assigned = CrossStitchOwnershipMasks(
+            {region.uid: np.zeros(shape, dtype=np.uint8) for region, _ in entries},
+            (float(start_x), float(start_y)),
+        )
         minimum_coverage = max(0.05, min(0.25, reference.cross_coverage * 0.5))
 
         grid = []
@@ -1329,6 +1352,7 @@ class StitchEngine:
         self,
         mask: np.ndarray,
         settings: StitchSettings,
+        grid_origin_px: Optional[Tuple[float, float]] = None,
     ):
         """Yield shared-grid bounds, pixel slices, and stable grid coordinates."""
         cell_w = max(1.0, settings.cross_pattern_size_mm * self.px_per_mm)
@@ -1341,7 +1365,13 @@ class StitchEngine:
         if len(xs) == 0:
             return []
 
-        if settings.cross_align_grid:
+        if grid_origin_px is not None:
+            origin_x, origin_y = grid_origin_px
+            grid_column_offset = int(np.floor((xs.min() - origin_x) / cell_w + 1e-9))
+            grid_row_offset = int(np.floor((ys.min() - origin_y) / cell_h + 1e-9))
+            start_x = origin_x + grid_column_offset * cell_w
+            start_y = origin_y + grid_row_offset * cell_h
+        elif settings.cross_align_grid:
             start_x = offset_x + np.floor((xs.min() - offset_x) / cell_w) * cell_w
             start_y = offset_y + np.floor((ys.min() - offset_y) / cell_h) * cell_h
             grid_column_offset = int(np.floor((start_x - offset_x) / cell_w + 1e-9))
@@ -1388,12 +1418,14 @@ class StitchEngine:
         source_mask: Optional[np.ndarray],
         settings: StitchSettings,
         ownership_override: bool = False,
+        grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[CrossStitchCell]:
         """Describe owned cells using source occupancy to fit boundary stitches."""
         specs: List[CrossStitchCell] = []
         for cell, slices, grid_row, grid_col in self._iter_cross_grid_cells(
             ownership_mask,
             settings,
+            grid_origin_px=grid_origin_px,
         ):
             ownership_patch = ownership_mask[slices] > 0
             if not np.any(ownership_patch):
@@ -1508,6 +1540,8 @@ class StitchEngine:
         source_mask: Optional[np.ndarray] = None,
         ownership_override: bool = False,
         dense_mask_override: Optional[np.ndarray] = None,
+        grid_origin_px: Optional[Tuple[float, float]] = None,
+        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[List[Tuple[float, float]]]:
         occupancy_mask = source_mask if source_mask is not None else mask
         method = settings.cross_method
@@ -1519,6 +1553,7 @@ class StitchEngine:
             occupancy_mask,
             settings,
             ownership_override=ownership_override,
+            grid_origin_px=grid_origin_px,
         )
         paths: List[List[Tuple[float, float]]] = []
 
@@ -1556,6 +1591,7 @@ class StitchEngine:
                 occupancy_mask,
                 dense_settings,
                 ownership_override=ownership_override,
+                grid_origin_px=dense_grid_origin_px,
             )
             for spec in dense_specs:
                 # A shifted upright overlay can only reinforce cells fully
@@ -1581,6 +1617,8 @@ class StitchEngine:
         source_mask: Optional[np.ndarray] = None,
         ownership_override: bool = False,
         dense_mask_override: Optional[np.ndarray] = None,
+        grid_origin_px: Optional[Tuple[float, float]] = None,
+        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[Tuple[float, float]]:
         return [
             pt
@@ -1591,6 +1629,8 @@ class StitchEngine:
                 source_mask=source_mask,
                 ownership_override=ownership_override,
                 dense_mask_override=dense_mask_override,
+                grid_origin_px=grid_origin_px,
+                dense_grid_origin_px=dense_grid_origin_px,
             )
             for pt in path
         ]
