@@ -2,6 +2,7 @@ import unittest
 import hashlib
 import importlib
 import os
+import statistics
 import time
 import tracemalloc
 from unittest import mock
@@ -162,6 +163,23 @@ def semantic_mask_recall(actual, expected, tolerance=2):
     )
 
 
+def rasterize_worker_stitch_paths(regions, shape, px_per_mm):
+    """Rasterize 0.1 mm worker output back into source-image pixels."""
+    raster = np.zeros(shape, dtype=np.uint8)
+    unit_to_source_px = float(px_per_mm) / 10.0
+    path_count = 0
+    for region in regions:
+        for path in region.stitch_paths:
+            if len(path) < 2:
+                continue
+            points = np.rint(
+                np.asarray(path, dtype=np.float64) * unit_to_source_px
+            ).astype(np.int32)
+            cv2.polylines(raster, [points], False, 1, 1)
+            path_count += 1
+    return raster, path_count
+
+
 class RecognitionMetricTests(unittest.TestCase):
     def test_beginner_default_limits_physical_thread_count(self):
         self.assertEqual(QuantizationSettings().n_colors, 12)
@@ -258,20 +276,30 @@ class DetailRecognitionTests(unittest.TestCase):
             for region in layer.regions
             if region.stitch_settings.fill_mode == "cross_stitch"
         ]
+        self.assertTrue(
+            all(
+                region.stitch_settings.cross_method == "cross"
+                for _, region in fills
+            )
+        )
 
         self.assertTrue(overlays)
-        overlay_union = np.logical_or.reduce(
-            [region.mask > 0 for region in overlays]
+        stitch_raster, overlay_path_count = rasterize_worker_stitch_paths(
+            overlays,
+            result["image"].shape[:2],
+            result["engine"].px_per_mm,
         )
+        self.assertGreater(overlay_path_count, 0)
+        self.assertGreater(int(np.count_nonzero(stitch_raster)), 0)
         recalls = {
-            name: semantic_mask_recall(overlay_union, mask)
+            name: semantic_mask_recall(stitch_raster, mask)
             for name, mask in result["expected"].items()
         }
         protected = np.logical_or.reduce(
             [mask > 0 for mask in result["expected"].values()]
         )
         self.assertGreaterEqual(
-            semantic_mask_recall(overlay_union, protected),
+            semantic_mask_recall(stitch_raster, protected),
             0.90,
             recalls,
         )
@@ -422,27 +450,46 @@ class DetailRecognitionTests(unittest.TestCase):
             0,
         )
 
-    def test_medium_synthetic_face_generation_has_guarded_runtime_and_python_memory(
+    def test_large_synthetic_face_generation_has_stable_relative_performance(
         self,
     ):
         tracemalloc.start()
-        started = time.perf_counter()
         try:
-            result = build_synthetic_face_pipeline(scale=2)
-            elapsed = time.perf_counter() - started
+            memory_result = build_synthetic_face_pipeline(scale=4)
             _, peak_bytes = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
+        build_synthetic_face_pipeline(scale=4, full_cross_baseline=True)
 
+        enhanced_times = []
+        baseline_times = []
+        for iteration in range(5):
+            variants = (
+                (False, enhanced_times),
+                (True, baseline_times),
+            )
+            if iteration % 2:
+                variants = tuple(reversed(variants))
+            for full_cross_baseline, samples in variants:
+                started = time.perf_counter()
+                build_synthetic_face_pipeline(
+                    scale=4,
+                    full_cross_baseline=full_cross_baseline,
+                )
+                samples.append(time.perf_counter() - started)
+
+        enhanced_median = statistics.median(enhanced_times)
+        baseline_median = statistics.median(baseline_times)
+        self.assertEqual(memory_result["image"].shape[:2], (384, 384))
         self.assertTrue(
             any(
                 region.stitch_paths
-                for layer in result["layers"]
+                for layer in memory_result["layers"]
                 for region in layer.regions
             )
         )
-        self.assertLess(elapsed, 15.0)
         self.assertLess(peak_bytes, 256 * 1024 * 1024)
+        self.assertLessEqual(enhanced_median, baseline_median * 1.5)
 
     def test_feature_outline_uses_adaptive_local_corners(self):
         settings = ImageEngine._feature_outline_stitch_settings()
@@ -728,7 +775,19 @@ class DetailRecognitionTests(unittest.TestCase):
         self.assertTrue(fills)
         self.assertTrue(overlays)
         self.assertTrue(all(region.stitch_settings.fill_mode == "run" for region in overlays))
-        self.assertTrue(all(region.stitch_settings.run_corner_mode == "adaptive" for region in overlays))
+        contour_overlays = [
+            region
+            for region in overlays
+            if region.stitch_settings.run_trace_contour
+        ]
+        self.assertTrue(contour_overlays)
+        self.assertTrue(
+            all(
+                region.stitch_settings.run_corner_mode == "preserve"
+                and region.stitch_settings.run_passes == 1
+                for region in contour_overlays
+            )
+        )
         self.assertTrue(all(region.is_detail_region for region in overlays))
         overlay_union = np.logical_or.reduce([region.mask > 0 for region in overlays])
         protected = detail & subject

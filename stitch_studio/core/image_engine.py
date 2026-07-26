@@ -956,6 +956,13 @@ class ImageEngine:
         overlay_mask = np.asarray(mask, dtype=bool)
         if not np.any(overlay_mask):
             return
+        overlay_settings = StitchSettings.from_dict(stitch_settings.to_dict())
+        if (
+            overlay_settings.fill_mode == "run"
+            and overlay_settings.run_trace_contour
+        ):
+            overlay_settings.run_corner_mode = "preserve"
+            overlay_settings.run_passes = 1
         region = Region(
             name=name,
             mask=overlay_mask.astype(np.uint8) * 255,
@@ -964,7 +971,7 @@ class ImageEngine:
             thread_match_delta_e=contributor.thread_match_delta_e,
             is_detail_region=True,
             is_cross_stitch_overlay=True,
-            stitch_settings=stitch_settings,
+            stitch_settings=overlay_settings,
         )
         region.polygon = GeometryEngine.reconstruct_region_polygon(region.mask)
         layer.add_region(region)
@@ -1714,7 +1721,7 @@ class ImageEngine:
             underlay=False,
             contour_count=0,
             pull_compensation_mm=0.0,
-            cross_method="auto",
+            cross_method="cross",
             cross_pattern_size_mm=1.8,
             cross_coverage=0.5,
             cross_align_grid=True,
