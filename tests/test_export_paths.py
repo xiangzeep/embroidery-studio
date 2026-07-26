@@ -660,6 +660,48 @@ class ExportPathTests(unittest.TestCase):
             high_frequency_turn_energy(preserve_path) * 0.72,
         )
 
+    def test_legacy_corner_mode_matches_explicit_smooth_and_preserve_profiles(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        corners = np.asarray(
+            [(8, 38), (20, 15), (40, 8), (61, 17), (71, 42), (49, 65), (23, 60)],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, [corners], 255)
+
+        def settings(**overrides):
+            values = {
+                "fill_mode": "run",
+                "stitch_length_mm": 0.55,
+                "underlay": False,
+                "run_trace_contour": True,
+            }
+            values.update(overrides)
+            return project_mod.StitchSettings(**values)
+
+        legacy_smooth = engine._generate_closed_contour_run(
+            mask,
+            settings(run_corner_mode="legacy", run_preserve_corners=False),
+        )[0]
+        explicit_smooth = engine._generate_closed_contour_run(
+            mask,
+            settings(run_corner_mode="smooth"),
+        )[0]
+        legacy_preserve = engine._generate_closed_contour_run(
+            mask,
+            settings(run_corner_mode="legacy", run_preserve_corners=True),
+        )[0]
+        explicit_preserve = engine._generate_closed_contour_run(
+            mask,
+            settings(run_corner_mode="preserve"),
+        )[0]
+
+        self.assertEqual(legacy_smooth, explicit_smooth)
+        self.assertEqual(legacy_preserve, explicit_preserve)
+
     def test_adaptive_closed_run_keeps_mouth_tips_without_chords_or_zero_edges(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -774,6 +816,8 @@ class ExportPathTests(unittest.TestCase):
             dtype=np.int32,
         )
         cv2.polylines(feature_masks["mouth"], [mouth], True, 255, 3)
+        expected_stitch_counts = {"eye": 69, "mouth": 210}
+        scene_scale = 10.0 / stitch_engine.px_per_mm
 
         for feature_name, mask in feature_masks.items():
             with self.subTest(feature=feature_name):
@@ -792,6 +836,19 @@ class ExportPathTests(unittest.TestCase):
                 after = pattern.bounds()
                 self.assertIsNotNone(before)
                 self.assertIsNotNone(after)
+                ys, xs = np.where(mask > 0)
+                expected = (
+                    float(xs.min()) * scene_scale,
+                    float(ys.min()) * scene_scale,
+                    float(xs.max()) * scene_scale,
+                    float(ys.max()) * scene_scale,
+                )
+                for actual in (before, after):
+                    for actual_edge, expected_edge in zip(actual, expected):
+                        self.assertLessEqual(
+                            abs(actual_edge - expected_edge),
+                            scene_scale,
+                        )
                 self.assertLessEqual(
                     abs((before[2] - before[0]) - (after[2] - after[0])),
                     1.0,
@@ -801,26 +858,40 @@ class ExportPathTests(unittest.TestCase):
                     1.0,
                 )
 
-                distances = np.concatenate(
-                    [
-                        np.linalg.norm(
-                            np.diff(np.asarray(path, dtype=np.float64), axis=0),
-                            axis=1,
-                        )
-                        for path in region.stitch_paths
-                    ]
-                )
-                self.assertTrue(np.all(distances > 0.1), distances)
-                self.assertLessEqual(
-                    float(np.max(distances)),
-                    3.0 * settings.stitch_length_mm * 10.0,
-                )
+                allowed = cv2.dilate(
+                    mask,
+                    np.ones((5, 5), dtype=np.uint8),
+                    iterations=1,
+                ) > 0
+                previous = None
+                for x, y, command in pattern.stitches:
+                    if command != pyembroidery.STITCH:
+                        previous = None
+                        continue
+                    current = np.asarray((x, y), dtype=np.float64)
+                    if previous is not None:
+                        distance = float(np.linalg.norm(current - previous))
+                        self.assertGreater(distance, 0.0)
+                        sample_count = max(2, int(np.ceil(distance / 0.75)))
+                        for sample in np.linspace(previous, current, sample_count):
+                            px = int(round(sample[0] / scene_scale))
+                            py = int(round(sample[1] / scene_scale))
+                            self.assertGreaterEqual(px, 0)
+                            self.assertGreaterEqual(py, 0)
+                            self.assertLess(px, allowed.shape[1])
+                            self.assertLess(py, allowed.shape[0])
+                            self.assertTrue(
+                                allowed[py, px],
+                                msg=f"{feature_name} stitch left feature mask at {(px, py)}",
+                            )
+                    previous = current
                 stitch_count = sum(
                     command == pyembroidery.STITCH
                     for _, _, command in pattern.stitches
                 )
-                self.assertGreaterEqual(stitch_count, 50)
-                self.assertLessEqual(stitch_count, 700)
+                expected_count = expected_stitch_counts[feature_name]
+                self.assertGreaterEqual(stitch_count, int(expected_count * 0.75))
+                self.assertLessEqual(stitch_count, int(expected_count * 1.5))
 
     def test_short_skeleton_spur_is_pruned_from_open_detail(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
