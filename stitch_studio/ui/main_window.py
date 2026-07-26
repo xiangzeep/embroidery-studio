@@ -1198,20 +1198,27 @@ class MainWindow(QMainWindow):
         # before shared cell ownership is computed for any of them.
         mask_scale = self._current_mask_scale()
         origin = (old_bounds[0] / mask_scale, old_bounds[1] / mask_scale)
+        polygon_regions = []
+        fallback_regions = []
         for region in layer.regions:
             if getattr(region, "polygon", None) is not None and not region.polygon.is_empty:
                 region.polygon = shapely_scale(region.polygon, xfact=sx, yfact=sy, origin=origin)
                 region.polygon = shapely_translate(region.polygon, xoff=dx / mask_scale, yoff=dy / mask_scale)
                 self._sync_region_mask_to_polygon(region)
+                polygon_regions.append(region)
+            else:
+                fallback_regions.append(region)
 
         # Phase two: derive contexts from the completed project state once,
-        # then regenerate every region against those same allocations.
+        # then regenerate only regions whose source geometry was updated.
         ownership_contexts = self._cross_stitch_ownership_contexts()
-        for region in layer.regions:
+        for region in polygon_regions:
             self._regenerate_region_with_context(
                 region,
                 ownership_contexts.get(region.uid),
             )
+        for region in fallback_regions:
+            region.scale_stitches(sx, origin=(old_bounds[0], old_bounds[1]))
 
     def _resize_region_polygon(self, region: Region, scene_bounds):
         polygon = getattr(region, "polygon", None)

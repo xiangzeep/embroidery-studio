@@ -18,6 +18,7 @@
   present, while separating incompatible cross-grid configurations.
 - Resize a layer atomically: update every polygon/mask first, then build the
   final compatible contexts once and regenerate the entire layer.
+- Preserve legacy stitch-path fallback resizing for regions without a polygon.
 
 ## TDD Evidence
 
@@ -43,6 +44,11 @@ with a manual all-masks-updated unified generation baseline. The sequential
 implementation failed because its first region was generated against the
 second region's old mask. A run-layer regression confirms non-cross generation
 still occurs in phase two.
+The Important regression cycle added a no-polygon layer-resize test first. It
+failed because the atomic phase two regenerated the fallback region and erased
+its existing path. The fix keeps polygon and fallback regions in separate
+phase-one collections, then verifies the legacy `scale_stitches` result and
+zero regeneration calls for the fallback path.
 
 ## Implementation
 
@@ -97,9 +103,12 @@ still occurs in phase two.
   coverage, so old mask pixels and stitch paths cannot remain outside the new
   boundary.
 - Layer resize now has two phases: it transforms and rasterizes every editable
-  region without generation, then builds ownership contexts once from the
-  completed project state and regenerates every layer region with those stable
-  contexts. This prevents stale shared-cell paths at adjacent resized edges.
+  polygon region without generation, while collecting no-polygon fallback
+  regions separately. It builds ownership contexts once from the completed
+  project state and regenerates only polygon regions with those stable contexts;
+  fallback regions retain the legacy `scale_stitches(sx, origin=old_min)`
+  behavior. This prevents stale shared-cell paths at adjacent resized edges
+  without changing the existing fallback semantics.
 
 ## Verification
 
@@ -108,10 +117,11 @@ still occurs in phase two.
 QT_QPA_PLATFORM=offscreen ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Focused TDD results: atomic adjacent-cross resize, run-layer resize, and two
-existing resize/context regressions passed. Full offscreen result: 238 tests
-passed; 3 skipped. The suite retains pre-existing Qt mouse event deprecation,
-font-alias, and joblib physical-core discovery warnings.
+Focused TDD results: atomic adjacent-cross resize, run-layer resize, the new
+no-polygon fallback resize regression, and two existing resize/context
+regressions passed. Full offscreen result: 239 tests passed; 3 skipped. The
+suite retains pre-existing Qt mouse event deprecation, font-alias, and joblib
+physical-core discovery warnings.
 
 ## Residual Risk
 

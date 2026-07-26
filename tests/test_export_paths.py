@@ -3068,6 +3068,52 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(region.stitch_paths, [[(0.0, 0.0), (8.0, 8.0)]])
         self.assertEqual(int(np.count_nonzero(region.mask[:, 8:])), 0)
 
+    def test_layer_resize_scales_fallback_region_without_regeneration(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        class RecordingEngine:
+            def __init__(self):
+                self.calls = []
+
+            def generate_region_paths(
+                self,
+                region,
+                image,
+                flow_field,
+                mask_override=None,
+                ownership_context=None,
+            ):
+                self.calls.append(region.uid)
+                return []
+
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        region = project_mod.Region(
+            mask=np.full((10, 10), 255, dtype=np.uint8),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        region.stitch_paths = [[(0.0, 0.0), (10.0, 10.0)]]
+        region.stitch_points = [(0.0, 0.0), (10.0, 10.0)]
+        layer.regions = [region]
+        project.layers = [layer]
+        engine = RecordingEngine()
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = engine
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+
+        window._resize_layer_regions(layer, (0.0, 0.0, 20.0, 20.0))
+
+        self.assertEqual(region.stitch_paths, [[(0.0, 0.0), (20.0, 20.0)]])
+        self.assertEqual(region.stitch_points, [(0.0, 0.0), (20.0, 20.0)])
+        self.assertEqual(engine.calls, [])
+
     def test_ownership_context_rejects_missing_base_or_dense_origin(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 
