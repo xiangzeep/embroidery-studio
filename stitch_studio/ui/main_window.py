@@ -1188,20 +1188,30 @@ class MainWindow(QMainWindow):
         self.status_info.setText(tr("status.resized"))
 
     def _resize_layer_regions(self, layer: Layer, scene_bounds):
+        """Atomically update a layer before regenerating its stitch paths."""
         old_bounds = layer.stitch_bounds()
         if old_bounds is None:
             return
         sx, sy, dx, dy = self._scene_bounds_transform(old_bounds, scene_bounds)
+
+        # Phase one: every editable region must expose its final source mask
+        # before shared cell ownership is computed for any of them.
+        mask_scale = self._current_mask_scale()
+        origin = (old_bounds[0] / mask_scale, old_bounds[1] / mask_scale)
         for region in layer.regions:
             if getattr(region, "polygon", None) is not None and not region.polygon.is_empty:
-                mask_scale = self._current_mask_scale()
-                origin = (old_bounds[0] / mask_scale, old_bounds[1] / mask_scale)
                 region.polygon = shapely_scale(region.polygon, xfact=sx, yfact=sy, origin=origin)
                 region.polygon = shapely_translate(region.polygon, xoff=dx / mask_scale, yoff=dy / mask_scale)
                 self._sync_region_mask_to_polygon(region)
-                self._regenerate_region(layer, region)
-            else:
-                region.scale_stitches(sx, origin=(old_bounds[0], old_bounds[1]))
+
+        # Phase two: derive contexts from the completed project state once,
+        # then regenerate every region against those same allocations.
+        ownership_contexts = self._cross_stitch_ownership_contexts()
+        for region in layer.regions:
+            self._regenerate_region_with_context(
+                region,
+                ownership_contexts.get(region.uid),
+            )
 
     def _resize_region_polygon(self, region: Region, scene_bounds):
         polygon = getattr(region, "polygon", None)
@@ -1269,11 +1279,19 @@ class MainWindow(QMainWindow):
         )
 
     def _regenerate_region(self, layer: Layer, region: Region):
+        ownership_contexts = self._cross_stitch_ownership_contexts()
+        self._regenerate_region_with_context(
+            region,
+            ownership_contexts.get(region.uid),
+        )
+
+    def _regenerate_region_with_context(self, region: Region, ownership_context):
+        """Generate one region with a context already built for this project state."""
         paths = self.stitch_engine.generate_region_paths(
             region,
             self.project.processed_image,
             self._flow_field,
-            ownership_context=self._cross_stitch_ownership_contexts().get(region.uid),
+            ownership_context=ownership_context,
         )
         region.stitch_paths = paths
         region.stitch_points = [pt for path in paths for pt in path]

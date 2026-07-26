@@ -16,6 +16,8 @@
   single-region regeneration paths when a compatible shared grid exists.
 - Keep shared cross ownership active when unrelated non-cross regions are
   present, while separating incompatible cross-grid configurations.
+- Resize a layer atomically: update every polygon/mask first, then build the
+  final compatible contexts once and regenerate the entire layer.
 
 ## TDD Evidence
 
@@ -36,6 +38,11 @@ The final review cycle added four red tests for runtime `auto` dense selection,
 read-only ownership storage, a checkerboard alongside a run region, and edited
 polygon rasterization with final path bounds. They exposed the missing dense
 allocation, all-region Worker gating, mutable context inputs, and stale masks.
+The final atomic-resize cycle first compared adjacent cross-region resize output
+with a manual all-masks-updated unified generation baseline. The sequential
+implementation failed because its first region was generated against the
+second region's old mask. A run-layer regression confirms non-cross generation
+still occurs in phase two.
 
 ## Implementation
 
@@ -89,6 +96,10 @@ allocation, all-region Worker gating, mutable context inputs, and stale masks.
   region mask before regenerating ownership. Rasterization uses pixel-center
   coverage, so old mask pixels and stitch paths cannot remain outside the new
   boundary.
+- Layer resize now has two phases: it transforms and rasterizes every editable
+  region without generation, then builds ownership contexts once from the
+  completed project state and regenerates every layer region with those stable
+  contexts. This prevents stale shared-cell paths at adjacent resized edges.
 
 ## Verification
 
@@ -97,10 +108,10 @@ allocation, all-region Worker gating, mutable context inputs, and stale masks.
 QT_QPA_PLATFORM=offscreen ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Focused TDD results: 4 final-review regressions and 15 existing ownership
-regressions passed. Full offscreen result: 236 tests passed; 3 skipped. The
-suite retains pre-existing Qt mouse event deprecation, font-alias, and joblib
-physical-core discovery warnings.
+Focused TDD results: atomic adjacent-cross resize, run-layer resize, and two
+existing resize/context regressions passed. Full offscreen result: 238 tests
+passed; 3 skipped. The suite retains pre-existing Qt mouse event deprecation,
+font-alias, and joblib physical-core discovery warnings.
 
 ## Residual Risk
 

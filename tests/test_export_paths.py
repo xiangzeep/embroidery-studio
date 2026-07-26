@@ -2961,6 +2961,113 @@ class ExportPathTests(unittest.TestCase):
         self.assertGreaterEqual(min(y for _, y in edited_points), 0.0)
         self.assertLessEqual(max(y for _, y in edited_points), 8.0)
 
+    def test_layer_resize_regenerates_adjacent_cross_regions_from_one_final_context(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=0.4,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        left_mask = np.zeros((16, 16), dtype=np.uint8)
+        right_mask = np.zeros((16, 16), dtype=np.uint8)
+        left_mask[:, :8] = 255
+        right_mask[:, 8:] = 255
+        left = project_mod.Region(
+            mask=left_mask,
+            polygon=Polygon([(0, 0), (8, 0), (8, 16), (0, 16)]),
+            stitch_settings=settings,
+        )
+        right = project_mod.Region(
+            mask=right_mask,
+            polygon=Polygon([(8, 0), (16, 0), (16, 16), (8, 16)]),
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer.regions = [left, right]
+        for region in layer.regions:
+            region.stitch_points = [(0.0, 0.0), (16.0, 16.0)]
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = engine
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+
+        window._resize_layer_regions(layer, (0.0, 0.0, 10.0, 10.0))
+
+        resized_paths = {region.uid: region.stitch_paths for region in layer.regions}
+        contexts = window._cross_stitch_ownership_contexts()
+        expected_paths = {
+            region.uid: engine.generate_region_paths(
+                region,
+                ownership_context=contexts.get(region.uid),
+            )
+            for region in layer.regions
+        }
+        all_paths = [path for paths in resized_paths.values() for path in paths]
+
+        self.assertEqual(resized_paths, expected_paths)
+        self.assertEqual(len(all_paths), len({tuple(path) for path in all_paths}))
+        self.assertTrue(all_paths)
+
+    def test_layer_resize_keeps_run_region_generation(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        class RecordingEngine:
+            def __init__(self):
+                self.calls = []
+
+            def generate_region_paths(
+                self,
+                region,
+                image,
+                flow_field,
+                mask_override=None,
+                ownership_context=None,
+            ):
+                self.calls.append((region.uid, ownership_context))
+                return [[(0.0, 0.0), (8.0, 8.0)]]
+
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        mask = np.full((16, 16), 255, dtype=np.uint8)
+        region = project_mod.Region(
+            mask=mask,
+            polygon=Polygon([(0, 0), (16, 0), (16, 16), (0, 16)]),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        region.stitch_points = [(0.0, 0.0), (16.0, 16.0)]
+        layer.regions = [region]
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = RecordingEngine()
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+
+        window._resize_layer_regions(layer, (0.0, 0.0, 8.0, 8.0))
+
+        self.assertEqual(window.stitch_engine.calls, [(region.uid, None)])
+        self.assertEqual(region.stitch_paths, [[(0.0, 0.0), (8.0, 8.0)]])
+        self.assertEqual(int(np.count_nonzero(region.mask[:, 8:])), 0)
+
     def test_ownership_context_rejects_missing_base_or_dense_origin(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 
