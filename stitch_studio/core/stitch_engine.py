@@ -6,6 +6,7 @@ Supports multiple fill modes with flow control.
 
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Mapping
+from types import MappingProxyType
 
 import numpy as np
 import cv2
@@ -57,6 +58,18 @@ class CrossStitchOwnershipContext:
             )
         if self.dense_masks is not None and not self.dense_masks:
             raise ValueError("Cross stitch dense ownership context requires masks")
+
+        object.__setattr__(self, "base_masks", self._freeze_masks(self.base_masks))
+        if self.dense_masks is not None:
+            object.__setattr__(self, "dense_masks", self._freeze_masks(self.dense_masks))
+
+    @staticmethod
+    def _freeze_masks(masks: Mapping[str, np.ndarray]) -> Mapping[str, np.ndarray]:
+        """Freeze ownership storage without copying its full-size mask arrays."""
+        frozen = dict(masks)
+        for mask in frozen.values():
+            mask.setflags(write=False)
+        return MappingProxyType(frozen)
 
     @classmethod
     def from_ownership_masks(

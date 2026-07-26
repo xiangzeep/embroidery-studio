@@ -2793,6 +2793,174 @@ class ExportPathTests(unittest.TestCase):
         paths = first.stitch_paths + second.stitch_paths
         self.assertEqual(len(paths), len({tuple(path) for path in paths}))
 
+    def test_worker_auto_cross_method_has_dense_ownership_context(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        engine._choose_cross_stitch_method = lambda *args: "dense_upright"
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        left_mask = np.zeros((20, 20), dtype=np.uint8)
+        right_mask = np.zeros((20, 20), dtype=np.uint8)
+        left_mask[:, :10] = 255
+        right_mask[:, 10:] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="auto",
+            cross_pattern_size_mm=1.0,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        left = project_mod.Region(mask=left_mask, stitch_settings=settings)
+        right = project_mod.Region(
+            mask=right_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer.regions = [left, right]
+        project.layers = [layer]
+
+        worker = main_mod.StitchWorker(project, engine)
+        worker.run()
+
+        self.assertIsNone(worker.failure_message)
+        self.assertTrue(left.stitch_paths or right.stitch_paths)
+
+    def test_shared_context_is_mapping_and_array_read_only(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        mask = np.full((4, 4), 255, dtype=np.uint8)
+        context = stitch_mod.CrossStitchOwnershipContext(
+            {"region": mask},
+            base_grid_origin_px=(0.0, 0.0),
+        )
+
+        self.assertFalse(context.base_masks["region"].flags.writeable)
+        with self.assertRaises(TypeError):
+            context.base_masks["another"] = mask
+        with self.assertRaises(ValueError):
+            context.base_masks["region"][0, 0] = 0
+
+    def test_worker_keeps_checkerboard_ownership_with_unrelated_run_region(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        first_mask = np.zeros((6, 6), dtype=np.uint8)
+        second_mask = np.zeros((6, 6), dtype=np.uint8)
+        for row in range(3):
+            for column in range(3):
+                first_mask[row * 2:(row + 1) * 2, column * 2] = 255
+                second_mask[row * 2:(row + 1) * 2, column * 2 + 1] = 255
+        cross_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first = project_mod.Region(mask=first_mask, stitch_settings=cross_settings)
+        second = project_mod.Region(
+            mask=second_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(cross_settings.to_dict()),
+        )
+        run_mask = np.zeros((6, 6), dtype=np.uint8)
+        run_mask[:, 0] = 255
+        run = project_mod.Region(
+            mask=run_mask,
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        layer.regions = [first, second, run]
+        project.layers = [layer]
+
+        worker = main_mod.StitchWorker(project, engine)
+        worker.run()
+
+        cross_paths = first.stitch_paths + second.stitch_paths
+        self.assertIsNone(worker.failure_message)
+        self.assertEqual(len(cross_paths), 9)
+        self.assertEqual(len(cross_paths), len({tuple(path) for path in cross_paths}))
+
+    def test_resize_and_boundary_edit_rasterize_masks_and_confine_cross_paths(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        project = project_mod.Project()
+        layer = project_mod.Layer()
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=0.4,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first_mask = np.zeros((16, 16), dtype=np.uint8)
+        second_mask = np.zeros((16, 16), dtype=np.uint8)
+        first_mask[:, :8] = 255
+        second_mask[:, 8:] = 255
+        first = project_mod.Region(
+            mask=first_mask,
+            polygon=Polygon([(0, 0), (8, 0), (8, 16), (0, 16)]),
+            stitch_settings=settings,
+        )
+        second = project_mod.Region(
+            mask=second_mask,
+            polygon=Polygon([(8, 0), (16, 0), (16, 16), (8, 16)]),
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer.regions = [first, second]
+        for region in layer.regions:
+            region.stitch_points = [(0.0, 0.0), (16.0, 16.0)]
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = engine
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        window._refresh_region_mask = lambda *args: None
+        window._refresh_layer_stitches = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+
+        window._resize_layer_regions(layer, (0.0, 0.0, 8.0, 8.0))
+
+        self.assertEqual(int(np.count_nonzero(first.mask[:, 4:])), 0)
+        self.assertEqual(int(np.count_nonzero(second.mask[:, :4])), 0)
+        resized_points = [pt for region in layer.regions for path in region.stitch_paths for pt in path]
+        self.assertTrue(resized_points)
+        self.assertGreaterEqual(min(x for x, _ in resized_points), 0.0)
+        self.assertLessEqual(max(x for x, _ in resized_points), 8.0)
+        self.assertLessEqual(max(y for _, y in resized_points), 8.0)
+
+        window._apply_boundary_edit(first.uid, [(4, 0), (8, 0), (8, 8), (4, 8)])
+
+        self.assertEqual(int(np.count_nonzero(first.mask[:, :4])), 0)
+        edited_points = [pt for path in first.stitch_paths for pt in path]
+        self.assertTrue(edited_points)
+        self.assertGreaterEqual(min(x for x, _ in edited_points), 4.0)
+        self.assertLessEqual(max(x for x, _ in edited_points), 8.0)
+        self.assertGreaterEqual(min(y for _, y in edited_points), 0.0)
+        self.assertLessEqual(max(y for _, y in edited_points), 8.0)
+
     def test_ownership_context_rejects_missing_base_or_dense_origin(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 

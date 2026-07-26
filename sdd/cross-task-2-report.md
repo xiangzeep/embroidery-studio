@@ -14,6 +14,8 @@
   occupancy during shared cross-stitch generation.
 - Rebuild the same context for Worker, resize, boundary-edit, and direct
   single-region regeneration paths when a compatible shared grid exists.
+- Keep shared cross ownership active when unrelated non-cross regions are
+  present, while separating incompatible cross-grid configurations.
 
 ## TDD Evidence
 
@@ -30,6 +32,10 @@ The final cycle began red with no atomic context API and a local regeneration
 path that generated each checkerboard color independently. It added explicit
 missing-base-origin, missing-dense-origin, direct-regeneration, and
 resize/boundary regeneration tests before the implementation.
+The final review cycle added four red tests for runtime `auto` dense selection,
+read-only ownership storage, a checkerboard alongside a run region, and edited
+polygon rasterization with final path bounds. They exposed the missing dense
+allocation, all-region Worker gating, mutable context inputs, and stale masks.
 
 ## Implementation
 
@@ -60,6 +66,10 @@ resize/boundary regeneration tests before the implementation.
   and only source-full-classified cells, so they cannot duplicate an adjacent
   color or cancel a boundary half stitch. A dense method with a context but no
   dense mapping now fails explicitly instead of falling back to the base mask.
+- Every compatible shared group now prebuilds dense ownership, including
+  `cross_method="auto"` groups where the dense method is only resolved during
+  generation. Non-cross regions are excluded from grouping, and cross regions
+  are grouped by mask shape plus grid size/alignment/offset before assignment.
 - Kept unaligned-grid offsets relative to the mask origin and covered the
   single-application contract with an exact cell-origin test.
 - Verified connected one-pixel detail and isolated noise through
@@ -72,8 +82,13 @@ resize/boundary regeneration tests before the implementation.
   second offset application for non-aligned shared grids.
 - Context ownership masks bypass morphology and only undergo binary
   normalization, preventing neighboring checkerboard cells from expanding into
-  duplicate final stitch paths. The context reuses the builder's arrays and
-  does not add full-size mask copies.
+  duplicate final stitch paths. The context reuses the builder's arrays,
+  marks them non-writeable, and exposes only `MappingProxyType` mappings, so it
+  does not add full-size mask copies or allow Worker threads to mutate them.
+- Resize and boundary edit now rasterize the resulting polygon back to the
+  region mask before regenerating ownership. Rasterization uses pixel-center
+  coverage, so old mask pixels and stitch paths cannot remain outside the new
+  boundary.
 
 ## Verification
 
@@ -82,13 +97,15 @@ resize/boundary regeneration tests before the implementation.
 QT_QPA_PLATFORM=offscreen ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Focused TDD result: 14 cross-stitch ownership/regeneration tests passed.
-Full offscreen result: 232 tests passed; 3 skipped. The suite retains
-pre-existing Qt mouse event deprecation, font-alias, and joblib physical-core
-discovery warnings.
+Focused TDD results: 4 final-review regressions and 15 existing ownership
+regressions passed. Full offscreen result: 236 tests passed; 3 skipped. The
+suite retains pre-existing Qt mouse event deprecation, font-alias, and joblib
+physical-core discovery warnings.
 
 ## Residual Risk
 
-Mixed-grid cross-stitch jobs intentionally use normal per-region generation;
-they do not claim shared-cell exclusivity. Dense ownership metadata adds only a
-small context object and reuses the existing full-size ownership masks.
+Single-region cross-stitch jobs intentionally use normal per-region generation;
+they do not claim shared-cell exclusivity. Prebuilding dense ownership for an
+`auto`-safe shared group retains one additional full-size assignment mask set;
+the context does not make another copy of either assignment. Polygon
+rasterization allocates temporary index arrays only while an edit is applied.

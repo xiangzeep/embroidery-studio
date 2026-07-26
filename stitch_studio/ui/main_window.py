@@ -10,6 +10,7 @@ from copy import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
+import cv2
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QIcon
+from shapely import intersects_xy
 from shapely.geometry import Polygon
 from shapely.affinity import scale as shapely_scale, translate as shapely_translate
 
@@ -56,27 +58,25 @@ class StitchWorker(QThread):
                 for region in layer.regions
                 if region.visible
             ]
-            ownership_context = self._build_cross_stitch_ownership_context(
+            ownership_contexts = self._build_cross_stitch_ownership_contexts(
                 self.engine,
                 region_jobs,
             )
-            is_cross_stitch = bool(region_jobs) and all(
-                region.stitch_settings.fill_mode == "cross_stitch"
-                for _, region in region_jobs
-            )
-            if is_cross_stitch:
-                work_items = [
-                    (
-                        layer,
-                        region,
-                        [region],
-                        region,
-                        None,
-                    )
-                    for layer, region in region_jobs
-                ]
-            else:
-                work_items = self._photo_stitch_work_items(region_jobs)
+            cross_jobs = [
+                (layer, region)
+                for layer, region in region_jobs
+                if region.stitch_settings.fill_mode == "cross_stitch"
+            ]
+            other_jobs = [
+                (layer, region)
+                for layer, region in region_jobs
+                if region.stitch_settings.fill_mode != "cross_stitch"
+            ]
+            work_items = [
+                (layer, region, [region], region, None)
+                for layer, region in cross_jobs
+            ]
+            work_items.extend(self._photo_stitch_work_items(other_jobs))
 
             done = total_regions - sum(len(item[2]) for item in work_items)
 
@@ -88,7 +88,7 @@ class StitchWorker(QThread):
                         self.image,
                         self.flow_field,
                         mask_override,
-                        ownership_context=ownership_context,
+                        ownership_context=ownership_contexts.get(working_region.uid),
                     )
                     self._store_group_paths(target, members, paths)
                     done += len(members)
@@ -102,7 +102,7 @@ class StitchWorker(QThread):
                             self.image,
                             self.flow_field,
                             mask_override,
-                            ownership_context=ownership_context,
+                            ownership_context=ownership_contexts.get(working_region.uid),
                         ): (target, members)
                         for _, target, members, working_region, mask_override in work_items
                     }
@@ -198,24 +198,52 @@ class StitchWorker(QThread):
         if not base_masks:
             return None
 
-        dense_masks = None
-        if any(
-            region.stitch_settings.cross_method.startswith("dense_upright")
-            for _, region in region_jobs
-        ):
-            reference = region_jobs[0][1].stitch_settings
-            half_pattern_mm = reference.cross_pattern_size_mm / 2.0
-            dense_masks = engine.build_cross_stitch_ownership_masks(
-                priorities,
-                grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
-            )
-            if not dense_masks:
-                raise ValueError("Dense cross stitch ownership builder returned no masks")
+        # `auto` resolves at fill time, so every truly shared group needs the
+        # shifted allocation ready before a region can select dense_upright.
+        reference = region_jobs[0][1].stitch_settings
+        half_pattern_mm = reference.cross_pattern_size_mm / 2.0
+        dense_masks = engine.build_cross_stitch_ownership_masks(
+            priorities,
+            grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
+        )
+        if not dense_masks:
+            raise ValueError("Dense cross stitch ownership builder returned no masks")
 
         return CrossStitchOwnershipContext.from_ownership_masks(
             base_masks,
             dense_masks,
         )
+
+    @staticmethod
+    def _cross_stitch_grid_key(region):
+        """Return the allocation inputs that must match for one shared grid."""
+        settings = region.stitch_settings
+        return (
+            tuple(region.mask.shape) if region.mask is not None else None,
+            round(float(settings.cross_pattern_size_mm), 6),
+            bool(settings.cross_align_grid),
+            round(float(settings.cross_grid_offset_x_mm), 6),
+            round(float(settings.cross_grid_offset_y_mm), 6),
+        )
+
+    @classmethod
+    def _build_cross_stitch_ownership_contexts(cls, engine, region_jobs):
+        """Create contexts only for compatible multi-region cross-stitch grids."""
+        groups = {}
+        for layer, region in region_jobs:
+            if (
+                region.stitch_settings.fill_mode != "cross_stitch"
+                or region.mask is None
+            ):
+                continue
+            groups.setdefault(cls._cross_stitch_grid_key(region), []).append((layer, region))
+
+        contexts = {}
+        for entries in groups.values():
+            context = cls._build_cross_stitch_ownership_context(engine, entries)
+            if context is not None:
+                contexts.update({region.uid: context for _, region in entries})
+        return contexts
 
     @staticmethod
     def _store_region_paths(region, paths):
@@ -1170,6 +1198,7 @@ class MainWindow(QMainWindow):
                 origin = (old_bounds[0] / mask_scale, old_bounds[1] / mask_scale)
                 region.polygon = shapely_scale(region.polygon, xfact=sx, yfact=sy, origin=origin)
                 region.polygon = shapely_translate(region.polygon, xoff=dx / mask_scale, yoff=dy / mask_scale)
+                self._sync_region_mask_to_polygon(region)
                 self._regenerate_region(layer, region)
             else:
                 region.scale_stitches(sx, origin=(old_bounds[0], old_bounds[1]))
@@ -1213,6 +1242,7 @@ class MainWindow(QMainWindow):
             resized = resized.buffer(0)
         if not resized.is_empty:
             region.polygon = resized
+            self._sync_region_mask_to_polygon(region)
 
     @staticmethod
     def _scene_bounds_transform(old_bounds, new_bounds):
@@ -1224,7 +1254,7 @@ class MainWindow(QMainWindow):
         sy = max(new_bottom - new_top, 1e-6) / old_h
         return sx, sy, new_left - old_left, new_top - old_top
 
-    def _cross_stitch_ownership_context(self):
+    def _cross_stitch_ownership_contexts(self):
         """Rebuild shared ownership after local geometry or mask changes."""
         region_jobs = [
             (layer, region)
@@ -1233,7 +1263,7 @@ class MainWindow(QMainWindow):
             for region in layer.regions
             if region.visible
         ]
-        return StitchWorker._build_cross_stitch_ownership_context(
+        return StitchWorker._build_cross_stitch_ownership_contexts(
             self.stitch_engine,
             region_jobs,
         )
@@ -1243,7 +1273,7 @@ class MainWindow(QMainWindow):
             region,
             self.project.processed_image,
             self._flow_field,
-            ownership_context=self._cross_stitch_ownership_context(),
+            ownership_context=self._cross_stitch_ownership_contexts().get(region.uid),
         )
         region.stitch_paths = paths
         region.stitch_points = [pt for path in paths for pt in path]
@@ -1266,6 +1296,36 @@ class MainWindow(QMainWindow):
                 self._current_mask_scale(),
                 getattr(region, "polygon", None),
             )
+
+    @staticmethod
+    def _rasterize_polygon_mask(polygon, shape):
+        """Rasterize polygon coverage at pixel centers into an existing mask shape."""
+        raster = np.zeros(shape, dtype=np.uint8)
+        geometries = getattr(polygon, "geoms", [polygon])
+        for geometry in geometries:
+            if geometry.is_empty or not hasattr(geometry, "exterior"):
+                continue
+            exterior = np.rint(
+                np.asarray(geometry.exterior.coords, dtype=np.float64)
+            ).astype(np.int32)
+            cv2.fillPoly(raster, [exterior], 255)
+            for interior in geometry.interiors:
+                hole = np.rint(
+                    np.asarray(interior.coords, dtype=np.float64)
+                ).astype(np.int32)
+                cv2.fillPoly(raster, [hole], 0)
+        rows, columns = np.where(raster > 0)
+        if len(columns):
+            inside = intersects_xy(polygon, columns + 0.5, rows + 0.5)
+            raster[rows[~inside], columns[~inside]] = 0
+        return raster
+
+    def _sync_region_mask_to_polygon(self, region: Region):
+        """Keep editable geometry and source occupancy synchronized."""
+        polygon = getattr(region, "polygon", None)
+        if region.mask is None or polygon is None or polygon.is_empty:
+            return
+        region.mask = self._rasterize_polygon_mask(polygon, region.mask.shape)
 
     def _start_boundary_edit(self, uid: str):
         """Start interactive Bezier boundary editing for a single region."""
@@ -1298,6 +1358,7 @@ class MainWindow(QMainWindow):
             return
 
         region.polygon = polygon
+        self._sync_region_mask_to_polygon(region)
         self._regenerate_region(layer, region)
 
         self._refresh_region_mask(layer, region)
