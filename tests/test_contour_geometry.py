@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from stitch_studio.core.contour_geometry import (
+    _EPSILON,
     adaptive_closed_contour,
     detect_locked_corner_indices,
     normalize_closed_contour,
@@ -39,6 +40,11 @@ class LocalContourGeometryTests(unittest.TestCase):
         self.assertFalse(
             any({start, end} == {left_tip, right_tip} for start, end in internal_segments)
         )
+        distances = np.linalg.norm(
+            np.diff(np.asarray(rebuilt, dtype=np.float64), axis=0),
+            axis=1,
+        )
+        self.assertTrue(np.all(distances > _EPSILON), distances)
 
     def test_rounded_eye_does_not_lock_pixel_stair_steps(self):
         angles = np.linspace(0.0, 2.0 * np.pi, 48, endpoint=False)

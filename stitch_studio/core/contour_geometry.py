@@ -209,11 +209,17 @@ def _resample_segments(
 
     cumulative = np.concatenate(([0.0], np.cumsum(distances)))
     targets = list(np.arange(0.0, total, spacing))
+    if targets and total - targets[-1] <= _EPSILON:
+        targets.pop()
     if not closed or not targets:
         targets.append(total)
 
     result = []
     for target in targets:
+        if total - target <= _EPSILON:
+            point = points[0] if closed else points[-1]
+            result.append((float(point[0]), float(point[1])))
+            continue
         segment = min(np.searchsorted(cumulative, target, side="right") - 1, len(distances) - 1)
         segment = max(0, segment)
         length = distances[segment]
