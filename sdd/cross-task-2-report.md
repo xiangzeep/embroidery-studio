@@ -12,6 +12,8 @@
   contents, and allocate dense shifted-grid cells globally.
 - Preserve the ownership builder's grid origin and treat its masks as immutable
   occupancy during shared cross-stitch generation.
+- Rebuild the same context for Worker, resize, boundary-edit, and direct
+  single-region regeneration paths when a compatible shared grid exists.
 
 ## TDD Evidence
 
@@ -24,6 +26,10 @@ A review-fix cycle added explicit ownership context, dense shifted-grid
 ownership, unaligned offset-origin, Worker propagation, and final-path tests.
 A final review cycle added Worker-level tests for the single-region coverage
 rule, shared non-aligned origins, and checkerboard path uniqueness.
+The final cycle began red with no atomic context API and a local regeneration
+path that generated each checkerboard color independently. It added explicit
+missing-base-origin, missing-dense-origin, direct-regeneration, and
+resize/boundary regeneration tests before the implementation.
 
 ## Implementation
 
@@ -32,18 +38,28 @@ rule, shared non-aligned origins, and checkerboard path uniqueness.
 - Added `_cross_stitch_cell_specs(ownership_mask, source_mask, settings)` which
   returns `CrossStitchCell` instances with source coverage and method overrides.
 - Passed global grid row and column coordinates to `classify_cross_stitch_cell`.
-- Routed `generate_region_paths(..., mask_override=...)` with the original
-  source mask into cross-stitch generation, so shared ownership never erases
-  boundary direction.
+- Added `CrossStitchOwnershipContext`, an immutable atomic carrier for base
+  masks/origin, optional dense masks/origin, and the shared-ownership flag.
+  `generate_region_paths(..., ownership_context=context)` is now the only
+  ownership API; ordinary direct calls without a context retain their existing
+  mask and coverage behavior.
+- A context cannot be combined with `mask_override`. Context masks are only
+  binary-normalized, while the original region mask remains the source for
+  boundary direction and `half` / `half_flipped` classification.
 - Limited low-coverage fallback to genuinely shared ownership. The legacy
   single-mask path continues to filter isolated noise and honor the configured
   coverage threshold.
-- Replaced prepared/raw full-image mask comparison with the explicit
-  `cross_ownership_override` context propagated by `StitchWorker`.
-- Added `dense_mask_override`, built once from the globally shifted grid in
-  `StitchWorker`. Dense secondary upright paths use this unique allocation and
-  only source-full-classified cells, so they cannot duplicate an adjacent color
-  or cancel a boundary half stitch.
+- `StitchWorker` constructs the context once and passes it to every compatible
+  region. The `MainWindow` rebuilds it for resize, boundary-edit, and direct
+  regeneration. Single-region Worker jobs deliberately receive no context.
+- The context factory rejects builder mappings that lack base or dense
+  `grid_origin_px` metadata with an explicit `ValueError`; it does not silently
+  infer an origin from a mask or fall back through `getattr`.
+- Dense ownership is built once from the globally shifted grid and stored in
+  the same context. Dense secondary upright paths use this unique allocation
+  and only source-full-classified cells, so they cannot duplicate an adjacent
+  color or cancel a boundary half stitch. A dense method with a context but no
+  dense mapping now fails explicitly instead of falling back to the base mask.
 - Kept unaligned-grid offsets relative to the mask origin and covered the
   single-application contract with an exact cell-origin test.
 - Verified connected one-pixel detail and isolated noise through
@@ -54,9 +70,10 @@ rule, shared non-aligned origins, and checkerboard path uniqueness.
 - `CrossStitchOwnershipMasks` carries the builder origin as metadata without
   copying mask arrays. The iterator consumes this explicit origin, avoiding a
   second offset application for non-aligned shared grids.
-- Immutable ownership masks bypass morphology and only undergo binary
+- Context ownership masks bypass morphology and only undergo binary
   normalization, preventing neighboring checkerboard cells from expanding into
-  duplicate final stitch paths.
+  duplicate final stitch paths. The context reuses the builder's arrays and
+  does not add full-size mask copies.
 
 ## Verification
 
@@ -65,11 +82,13 @@ rule, shared non-aligned origins, and checkerboard path uniqueness.
 QT_QPA_PLATFORM=offscreen ../../.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Result: 228 tests passed; 3 skipped. The suite retains pre-existing Qt mouse
-event deprecation, font-alias, and joblib physical-core discovery warnings.
+Focused TDD result: 14 cross-stitch ownership/regeneration tests passed.
+Full offscreen result: 232 tests passed; 3 skipped. The suite retains
+pre-existing Qt mouse event deprecation, font-alias, and joblib physical-core
+discovery warnings.
 
 ## Residual Risk
 
 Mixed-grid cross-stitch jobs intentionally use normal per-region generation;
 they do not claim shared-cell exclusivity. Dense ownership metadata adds only a
-small mapping object and reuses the existing full-size ownership masks.
+small context object and reuses the existing full-size ownership masks.

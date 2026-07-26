@@ -26,7 +26,7 @@ from ..core.thread_db import ThreadDatabase
 from ..core.project import Project, Layer, Region, StitchSettings
 from ..core.image_engine import ImageEngine, FlowFieldEngine
 from ..core.recognition_engine import RecognitionEngine
-from ..core.stitch_engine import StitchEngine
+from ..core.stitch_engine import StitchEngine, CrossStitchOwnershipContext
 from ..core.export_engine import ExportEngine, SUPPORTED_FORMATS
 from ..i18n import tr
 
@@ -56,45 +56,14 @@ class StitchWorker(QThread):
                 for region in layer.regions
                 if region.visible
             ]
-            ownership_masks = {}
-            dense_ownership_masks = {}
-            has_cross_ownership = False
-            cross_grid_origin_px = None
-            dense_grid_origin_px = None
+            ownership_context = self._build_cross_stitch_ownership_context(
+                self.engine,
+                region_jobs,
+            )
             is_cross_stitch = bool(region_jobs) and all(
                 region.stitch_settings.fill_mode == "cross_stitch"
                 for _, region in region_jobs
             )
-            if is_cross_stitch and len(region_jobs) > 1:
-                ownership_masks = self.engine.build_cross_stitch_ownership_masks([
-                    (region, self._cross_stitch_priority(layer, region))
-                    for layer, region in region_jobs
-                ])
-                has_cross_ownership = bool(ownership_masks)
-                if has_cross_ownership:
-                    cross_grid_origin_px = getattr(
-                        ownership_masks,
-                        "grid_origin_px",
-                        None,
-                    )
-                if has_cross_ownership and any(
-                    region.stitch_settings.cross_method.startswith("dense_upright")
-                    for _, region in region_jobs
-                ):
-                    reference = region_jobs[0][1].stitch_settings
-                    half_pattern_mm = reference.cross_pattern_size_mm / 2.0
-                    dense_ownership_masks = self.engine.build_cross_stitch_ownership_masks(
-                        [
-                            (region, self._cross_stitch_priority(layer, region))
-                            for layer, region in region_jobs
-                        ],
-                        grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
-                    )
-                    dense_grid_origin_px = getattr(
-                        dense_ownership_masks,
-                        "grid_origin_px",
-                        None,
-                    )
             if is_cross_stitch:
                 work_items = [
                     (
@@ -102,7 +71,7 @@ class StitchWorker(QThread):
                         region,
                         [region],
                         region,
-                        ownership_masks.get(region.uid) if has_cross_ownership else None,
+                        None,
                     )
                     for layer, region in region_jobs
                 ]
@@ -119,15 +88,7 @@ class StitchWorker(QThread):
                         self.image,
                         self.flow_field,
                         mask_override,
-                        cross_ownership_override=has_cross_ownership,
-                        dense_mask_override=(
-                            dense_ownership_masks.get(working_region.uid)
-                            if has_cross_ownership
-                            else None
-                        ),
-                        cross_grid_origin_px=cross_grid_origin_px,
-                        ownership_mask_immutable=has_cross_ownership,
-                        dense_grid_origin_px=dense_grid_origin_px,
+                        ownership_context=ownership_context,
                     )
                     self._store_group_paths(target, members, paths)
                     done += len(members)
@@ -141,15 +102,7 @@ class StitchWorker(QThread):
                             self.image,
                             self.flow_field,
                             mask_override,
-                            cross_ownership_override=has_cross_ownership,
-                            dense_mask_override=(
-                                dense_ownership_masks.get(working_region.uid)
-                                if has_cross_ownership
-                                else None
-                            ),
-                            cross_grid_origin_px=cross_grid_origin_px,
-                            ownership_mask_immutable=has_cross_ownership,
-                            dense_grid_origin_px=dense_grid_origin_px,
+                            ownership_context=ownership_context,
                         ): (target, members)
                         for _, target, members, working_region, mask_override in work_items
                     }
@@ -227,6 +180,42 @@ class StitchWorker(QThread):
         )
         luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
         return 3.0 if luminance < 72.0 else 1.0
+
+    @classmethod
+    def _build_cross_stitch_ownership_context(cls, engine, region_jobs):
+        """Build one complete shared ownership context for compatible regions."""
+        if len(region_jobs) < 2 or not all(
+            region.stitch_settings.fill_mode == "cross_stitch"
+            for _, region in region_jobs
+        ):
+            return None
+
+        priorities = [
+            (region, cls._cross_stitch_priority(layer, region))
+            for layer, region in region_jobs
+        ]
+        base_masks = engine.build_cross_stitch_ownership_masks(priorities)
+        if not base_masks:
+            return None
+
+        dense_masks = None
+        if any(
+            region.stitch_settings.cross_method.startswith("dense_upright")
+            for _, region in region_jobs
+        ):
+            reference = region_jobs[0][1].stitch_settings
+            half_pattern_mm = reference.cross_pattern_size_mm / 2.0
+            dense_masks = engine.build_cross_stitch_ownership_masks(
+                priorities,
+                grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
+            )
+            if not dense_masks:
+                raise ValueError("Dense cross stitch ownership builder returned no masks")
+
+        return CrossStitchOwnershipContext.from_ownership_masks(
+            base_masks,
+            dense_masks,
+        )
 
     @staticmethod
     def _store_region_paths(region, paths):
@@ -1235,11 +1224,26 @@ class MainWindow(QMainWindow):
         sy = max(new_bottom - new_top, 1e-6) / old_h
         return sx, sy, new_left - old_left, new_top - old_top
 
+    def _cross_stitch_ownership_context(self):
+        """Rebuild shared ownership after local geometry or mask changes."""
+        region_jobs = [
+            (layer, region)
+            for layer in self.project.layers
+            if layer.visible
+            for region in layer.regions
+            if region.visible
+        ]
+        return StitchWorker._build_cross_stitch_ownership_context(
+            self.stitch_engine,
+            region_jobs,
+        )
+
     def _regenerate_region(self, layer: Layer, region: Region):
         paths = self.stitch_engine.generate_region_paths(
             region,
             self.project.processed_image,
             self._flow_field,
+            ownership_context=self._cross_stitch_ownership_context(),
         )
         region.stitch_paths = paths
         region.stitch_points = [pt for path in paths for pt in path]

@@ -4,9 +4,11 @@ Converts masked regions + stitch settings into stitch point sequences.
 Supports multiple fill modes with flow control.
 """
 
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Mapping
+
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional
 from scipy.interpolate import RegularGridInterpolator
 from shapely.geometry import Polygon, LineString, MultiLineString, Point
 from shapely.affinity import rotate as shapely_rotate
@@ -27,6 +29,88 @@ class CrossStitchOwnershipMasks(dict):
     def __init__(self, masks, grid_origin_px: Tuple[float, float]):
         super().__init__(masks)
         self.grid_origin_px = grid_origin_px
+
+
+@dataclass(frozen=True)
+class CrossStitchOwnershipContext:
+    """Immutable shared-grid ownership inputs for cross-stitch generation."""
+
+    base_masks: Mapping[str, np.ndarray]
+    base_grid_origin_px: Tuple[float, float]
+    immutable: bool = True
+    dense_masks: Optional[Mapping[str, np.ndarray]] = None
+    dense_grid_origin_px: Optional[Tuple[float, float]] = None
+    shared: bool = True
+
+    def __post_init__(self):
+        if not self.shared:
+            raise ValueError("Cross stitch ownership context must be shared")
+        if not self.immutable:
+            raise ValueError("Cross stitch ownership context masks must be immutable")
+        if not self.base_masks:
+            raise ValueError("Cross stitch ownership context requires base masks")
+        if self.base_grid_origin_px is None:
+            raise ValueError("Cross stitch ownership context requires a base grid origin")
+        if (self.dense_masks is None) != (self.dense_grid_origin_px is None):
+            raise ValueError(
+                "Cross stitch dense ownership requires both masks and a grid origin"
+            )
+        if self.dense_masks is not None and not self.dense_masks:
+            raise ValueError("Cross stitch dense ownership context requires masks")
+
+    @classmethod
+    def from_ownership_masks(
+        cls,
+        base_masks: Mapping[str, np.ndarray],
+        dense_masks: Optional[Mapping[str, np.ndarray]] = None,
+    ) -> "CrossStitchOwnershipContext":
+        """Build a context from builder output, requiring its grid metadata."""
+        try:
+            base_origin = base_masks.grid_origin_px
+        except AttributeError as exc:
+            raise ValueError(
+                "Cross stitch ownership masks require grid_origin_px metadata"
+            ) from exc
+        if base_origin is None:
+            raise ValueError("Cross stitch ownership masks require grid_origin_px metadata")
+
+        dense_origin = None
+        if dense_masks is not None:
+            try:
+                dense_origin = dense_masks.grid_origin_px
+            except AttributeError as exc:
+                raise ValueError(
+                    "Dense cross stitch ownership masks require grid_origin_px metadata"
+                ) from exc
+            if dense_origin is None:
+                raise ValueError(
+                    "Dense cross stitch ownership masks require grid_origin_px metadata"
+                )
+
+        return cls(
+            base_masks=base_masks,
+            base_grid_origin_px=base_origin,
+            dense_masks=dense_masks,
+            dense_grid_origin_px=dense_origin,
+        )
+
+    def base_mask_for(self, region_uid: str) -> np.ndarray:
+        try:
+            return self.base_masks[region_uid]
+        except KeyError as exc:
+            raise ValueError(
+                f"Cross stitch ownership context has no base mask for region {region_uid}"
+            ) from exc
+
+    def dense_mask_for(self, region_uid: str) -> Optional[np.ndarray]:
+        if self.dense_masks is None:
+            return None
+        try:
+            return self.dense_masks[region_uid]
+        except KeyError as exc:
+            raise ValueError(
+                f"Cross stitch ownership context has no dense mask for region {region_uid}"
+            ) from exc
 
 
 class StitchEngine:
@@ -54,23 +138,29 @@ class StitchEngine:
         image: Optional[np.ndarray] = None,
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         mask_override: Optional[np.ndarray] = None,
-        cross_ownership_override: bool = False,
-        dense_mask_override: Optional[np.ndarray] = None,
-        cross_grid_origin_px: Optional[Tuple[float, float]] = None,
-        ownership_mask_immutable: bool = False,
-        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
+        ownership_context: Optional[CrossStitchOwnershipContext] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate separated stitch paths for preview and export."""
         original_mask = region.mask
-        source_mask = mask_override if mask_override is not None else original_mask
-        if source_mask is None:
-            return []
-
         settings = region.stitch_settings
-        if ownership_mask_immutable:
+        if ownership_context is not None:
+            if not isinstance(ownership_context, CrossStitchOwnershipContext):
+                raise TypeError("ownership_context must be a CrossStitchOwnershipContext")
+            if settings.fill_mode != "cross_stitch":
+                raise ValueError("Cross stitch ownership context requires cross_stitch fill mode")
+            if mask_override is not None:
+                raise ValueError(
+                    "Cross stitch ownership context cannot be combined with mask_override"
+                )
+            source_mask = ownership_context.base_mask_for(region.uid)
+            # Ownership allocation is authoritative and must not be expanded by
+            # morphology; original_mask below still fits the source boundary.
             mask = (source_mask > 0).astype(np.uint8) * 255
         else:
-            mask = self._prepare_mask(source_mask, settings)
+            source_mask = mask_override if mask_override is not None else original_mask
+            mask = self._prepare_mask(source_mask, settings) if source_mask is not None else None
+        if source_mask is None:
+            return []
         if mask is None or np.count_nonzero(mask) == 0:
             return []
 
@@ -101,10 +191,8 @@ class StitchEngine:
             getattr(region, "polygon", None),
             getattr(region, "design_color_rgb", None),
             cross_source_mask=original_mask,
-            cross_ownership_override=cross_ownership_override,
-            dense_mask_override=dense_mask_override,
-            cross_grid_origin_px=cross_grid_origin_px,
-            dense_grid_origin_px=dense_grid_origin_px,
+            ownership_context=ownership_context,
+            cross_region_uid=region.uid,
         )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
@@ -232,10 +320,8 @@ class StitchEngine:
         polygon: Optional[Polygon] = None,
         source_color: Optional[Tuple[int, int, int]] = None,
         cross_source_mask: Optional[np.ndarray] = None,
-        cross_ownership_override: bool = False,
-        dense_mask_override: Optional[np.ndarray] = None,
-        cross_grid_origin_px: Optional[Tuple[float, float]] = None,
-        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
+        ownership_context: Optional[CrossStitchOwnershipContext] = None,
+        cross_region_uid: Optional[str] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
@@ -260,10 +346,8 @@ class StitchEngine:
                 settings,
                 image,
                 source_mask=cross_source_mask,
-                ownership_override=cross_ownership_override,
-                dense_mask_override=dense_mask_override,
-                grid_origin_px=cross_grid_origin_px,
-                dense_grid_origin_px=dense_grid_origin_px,
+                ownership_context=ownership_context,
+                region_uid=cross_region_uid,
             )
         if mode == "none":
             return []
@@ -1538,12 +1622,24 @@ class StitchEngine:
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
         source_mask: Optional[np.ndarray] = None,
-        ownership_override: bool = False,
-        dense_mask_override: Optional[np.ndarray] = None,
-        grid_origin_px: Optional[Tuple[float, float]] = None,
-        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
+        ownership_context: Optional[CrossStitchOwnershipContext] = None,
+        region_uid: Optional[str] = None,
     ) -> List[List[Tuple[float, float]]]:
         occupancy_mask = source_mask if source_mask is not None else mask
+        ownership_override = ownership_context is not None
+        grid_origin_px = None
+        dense_ownership_mask = None
+        dense_grid_origin_px = None
+        if ownership_context is not None:
+            if region_uid is None:
+                raise ValueError("Cross stitch ownership context requires a region uid")
+            # Validate that the context owns this region even though its base
+            # mask has already become `mask` in generate_region_paths().
+            ownership_context.base_mask_for(region_uid)
+            grid_origin_px = ownership_context.base_grid_origin_px
+            dense_ownership_mask = ownership_context.dense_mask_for(region_uid)
+            dense_grid_origin_px = ownership_context.dense_grid_origin_px
+
         method = settings.cross_method
         if method == "auto":
             method = self._choose_cross_stitch_method(occupancy_mask, settings, image)
@@ -1583,9 +1679,12 @@ class StitchEngine:
             dense_settings.cross_grid_offset_x_mm += half / self.px_per_mm
             dense_settings.cross_grid_offset_y_mm += half / self.px_per_mm
             dense_method = "upright_flipped" if "flipped" in method else "upright"
-            dense_ownership_mask = (
-                dense_mask_override if dense_mask_override is not None else mask
-            )
+            if dense_ownership_mask is None:
+                if ownership_context is not None:
+                    raise ValueError(
+                        "Dense cross stitch ownership context requires dense ownership masks"
+                    )
+                dense_ownership_mask = mask
             dense_specs = self._cross_stitch_cell_specs(
                 dense_ownership_mask,
                 occupancy_mask,
@@ -1615,10 +1714,8 @@ class StitchEngine:
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
         source_mask: Optional[np.ndarray] = None,
-        ownership_override: bool = False,
-        dense_mask_override: Optional[np.ndarray] = None,
-        grid_origin_px: Optional[Tuple[float, float]] = None,
-        dense_grid_origin_px: Optional[Tuple[float, float]] = None,
+        ownership_context: Optional[CrossStitchOwnershipContext] = None,
+        region_uid: Optional[str] = None,
     ) -> List[Tuple[float, float]]:
         return [
             pt
@@ -1627,10 +1724,8 @@ class StitchEngine:
                 settings,
                 image,
                 source_mask=source_mask,
-                ownership_override=ownership_override,
-                dense_mask_override=dense_mask_override,
-                grid_origin_px=grid_origin_px,
-                dense_grid_origin_px=dense_grid_origin_px,
+                ownership_context=ownership_context,
+                region_uid=region_uid,
             )
             for pt in path
         ]
