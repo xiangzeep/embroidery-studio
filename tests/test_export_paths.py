@@ -2368,6 +2368,128 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(cells), 2)
 
+    def test_owned_cross_cell_uses_original_mask_for_half_direction(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        original = np.zeros((10, 10), dtype=np.uint8)
+        original[np.tril_indices(10)] = 255
+        ownership = np.full((10, 10), 255, dtype=np.uint8)
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+        )
+
+        cells = engine._cross_stitch_cell_specs(ownership, original, settings)
+
+        self.assertEqual(len(cells), 1)
+        self.assertEqual(cells[0].method_override, "half")
+
+    def test_owned_full_cell_retains_configured_cross_method(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        full = np.full((10, 10), 255, dtype=np.uint8)
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="upright",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+        )
+
+        cells = engine._cross_stitch_cell_specs(full, full, settings)
+
+        self.assertEqual(len(cells), 1)
+        self.assertIsNone(cells[0].method_override)
+
+    def test_owned_cross_cells_use_grid_coordinates_for_tie_breaks(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        ownership = np.full((10, 20), 255, dtype=np.uint8)
+        original = np.zeros((10, 20), dtype=np.uint8)
+        original[:5, :] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+        )
+
+        cells = engine._cross_stitch_cell_specs(ownership, original, settings)
+
+        self.assertEqual(
+            [cell.method_override for cell in cells],
+            ["half", "half_flipped"],
+        )
+
+    def test_owned_cross_cells_keep_global_grid_coordinates_for_tie_breaks(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        ownership = np.zeros((10, 30), dtype=np.uint8)
+        ownership[:, 10:30] = 255
+        original = np.zeros((10, 30), dtype=np.uint8)
+        original[:5, 10:30] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            cross_align_grid=True,
+        )
+
+        cells = engine._cross_stitch_cell_specs(ownership, original, settings)
+
+        self.assertEqual(
+            [cell.method_override for cell in cells],
+            ["half_flipped", "half"],
+        )
+
+    def test_owned_cross_paths_keep_source_boundary_instead_of_full_cross(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        source = np.zeros((10, 10), dtype=np.uint8)
+        source[np.tril_indices(10)] = 255
+        ownership = np.full((10, 10), 255, dtype=np.uint8)
+        region = project_mod.Region(mask=source)
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+
+        paths = engine.generate_region_paths(region, mask_override=ownership)
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0], [(0.0, 0.0), (10.0, 10.0)])
+
+    def test_cross_stitch_cells_keep_filtering_isolated_source_noise(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        mask = np.zeros((10, 10), dtype=np.uint8)
+        mask[0, 0] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+        )
+
+        self.assertEqual(engine._cross_stitch_cells(mask, settings), [])
+
     def test_cross_stitch_global_grid_assigns_split_cell_to_one_color(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")

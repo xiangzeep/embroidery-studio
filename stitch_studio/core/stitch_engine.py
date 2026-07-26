@@ -13,6 +13,7 @@ from shapely.affinity import rotate as shapely_rotate
 from shapely.ops import unary_union
 
 from .contour_geometry import adaptive_closed_contour
+from .cross_stitch_geometry import CrossStitchCell, classify_cross_stitch_cell
 from .project import Region, StitchSettings
 
 
@@ -47,7 +48,8 @@ class StitchEngine:
         mask_override: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         """Generate separated stitch paths for preview and export."""
-        source_mask = mask_override if mask_override is not None else region.mask
+        original_mask = region.mask
+        source_mask = mask_override if mask_override is not None else original_mask
         if source_mask is None:
             return []
 
@@ -82,6 +84,7 @@ class StitchEngine:
             flow_field,
             getattr(region, "polygon", None),
             getattr(region, "design_color_rgb", None),
+            cross_source_mask=original_mask,
         )
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
@@ -208,6 +211,7 @@ class StitchEngine:
         flow_field: Optional[Tuple[np.ndarray, np.ndarray]],
         polygon: Optional[Polygon] = None,
         source_color: Optional[Tuple[int, int, int]] = None,
+        cross_source_mask: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
         mode = settings.fill_mode
         if mode == "run":
@@ -227,7 +231,12 @@ class StitchEngine:
         if mode == "stipple":
             return [self._generate_stipple_fill(mask, settings)]
         if mode == "cross_stitch":
-            return self._generate_cross_stitch_paths(mask, settings, image)
+            return self._generate_cross_stitch_paths(
+                mask,
+                settings,
+                image,
+                source_mask=cross_source_mask,
+            )
         if mode == "none":
             return []
         return self._generate_scanline_paths(mask, settings, polygon)
@@ -1306,14 +1315,14 @@ class StitchEngine:
             round(float(settings.cross_grid_offset_y_mm), 6),
         )
 
-    def _cross_stitch_cells(
+    def _iter_cross_grid_cells(
         self,
         mask: np.ndarray,
         settings: StitchSettings,
-    ) -> List[Tuple[float, float, float, float]]:
+    ):
+        """Yield shared-grid bounds, pixel slices, and stable grid coordinates."""
         cell_w = max(1.0, settings.cross_pattern_size_mm * self.px_per_mm)
         cell_h = cell_w
-        coverage_threshold = float(np.clip(settings.cross_coverage, 0.0, 1.0))
         offset_x = settings.cross_grid_offset_x_mm * self.px_per_mm
         offset_y = settings.cross_grid_offset_y_mm * self.px_per_mm
 
@@ -1325,31 +1334,102 @@ class StitchEngine:
         if settings.cross_align_grid:
             start_x = offset_x + np.floor((xs.min() - offset_x) / cell_w) * cell_w
             start_y = offset_y + np.floor((ys.min() - offset_y) / cell_h) * cell_h
+            grid_column_offset = int(np.floor((start_x - offset_x) / cell_w + 1e-9))
+            grid_row_offset = int(np.floor((start_y - offset_y) / cell_h + 1e-9))
         else:
             start_x = float(xs.min()) + offset_x
             start_y = float(ys.min()) + offset_y
+            grid_column_offset = 0
+            grid_row_offset = 0
 
         end_x = float(xs.max() + 1)
         end_y = float(ys.max() + 1)
-        cells: List[Tuple[float, float, float, float]] = []
 
         y = start_y
+        row_index = 0
         while y < end_y:
             x = start_x
+            column_index = 0
             while x < end_x:
-                ix0 = max(0, int(np.floor(x)))
-                iy0 = max(0, int(np.floor(y)))
-                ix1 = min(w, int(np.ceil(x + cell_w)))
-                iy1 = min(h, int(np.ceil(y + cell_h)))
+                # Adjacent fractional cells must share an exact rounded edge.
+                ix0 = max(0, int(np.floor(x + 1e-9)))
+                iy0 = max(0, int(np.floor(y + 1e-9)))
+                ix1 = min(w, int(np.floor(x + cell_w + 1e-9)))
+                iy1 = min(h, int(np.floor(y + cell_h + 1e-9)))
+                if ix1 <= ix0 and ix0 < w:
+                    ix1 = ix0 + 1
+                if iy1 <= iy0 and iy0 < h:
+                    iy1 = iy0 + 1
                 if ix1 > ix0 and iy1 > iy0:
-                    cell_mask = mask[iy0:iy1, ix0:ix1] > 0
-                    coverage = float(np.count_nonzero(cell_mask)) / float(cell_mask.size)
-                    if coverage + 1e-9 >= coverage_threshold:
-                        cells.append((float(x), float(y), float(cell_w), float(cell_h)))
+                    yield (
+                        (float(x), float(y), float(cell_w), float(cell_h)),
+                        (slice(iy0, iy1), slice(ix0, ix1)),
+                        grid_row_offset + row_index,
+                        grid_column_offset + column_index,
+                    )
                 x += cell_w
+                column_index += 1
             y += cell_h
+            row_index += 1
 
-        return cells
+    def _cross_stitch_cell_specs(
+        self,
+        ownership_mask: np.ndarray,
+        source_mask: Optional[np.ndarray],
+        settings: StitchSettings,
+    ) -> List[CrossStitchCell]:
+        """Describe owned cells using source occupancy to fit boundary stitches."""
+        specs: List[CrossStitchCell] = []
+        shared_ownership = (
+            source_mask is not None
+            and not np.array_equal(ownership_mask > 0, source_mask > 0)
+        )
+        for cell, slices, grid_row, grid_col in self._iter_cross_grid_cells(
+            ownership_mask,
+            settings,
+        ):
+            ownership_patch = ownership_mask[slices] > 0
+            if not np.any(ownership_patch):
+                continue
+            source_patch = (
+                source_mask[slices]
+                if source_mask is not None
+                else ownership_patch
+            )
+            coverage = float(np.count_nonzero(source_patch)) / max(1, source_patch.size)
+            if (
+                not shared_ownership
+                and coverage + 1e-9 < float(settings.cross_coverage)
+            ):
+                continue
+            override = classify_cross_stitch_cell(
+                source_patch,
+                min(float(settings.cross_coverage), 0.5),
+                grid_row=grid_row,
+                grid_col=grid_col,
+            )
+            # Shared ownership has already rejected isolated color noise. Its
+            # full-cell assignment keeps connected one-pixel details stitchable.
+            if (
+                override == "reject"
+                and shared_ownership
+                and np.count_nonzero(ownership_patch)
+            ):
+                override = None
+            specs.append(CrossStitchCell(cell, coverage, override))
+        return specs
+
+    def _cross_stitch_cells(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[Tuple[float, float, float, float]]:
+        """Compatibility wrapper for callers expecting only accepted bounds."""
+        return [
+            spec.bounds
+            for spec in self._cross_stitch_cell_specs(mask, mask, settings)
+            if spec.method_override != "reject"
+        ]
 
     def _cross_stitch_cell_paths(
         self,
@@ -1418,22 +1498,35 @@ class StitchEngine:
         mask: np.ndarray,
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
+        source_mask: Optional[np.ndarray] = None,
     ) -> List[List[Tuple[float, float]]]:
+        occupancy_mask = source_mask if source_mask is not None else mask
         method = settings.cross_method
         if method == "auto":
-            method = self._choose_cross_stitch_method(mask, settings, image)
+            method = self._choose_cross_stitch_method(occupancy_mask, settings, image)
         max_segment_px = settings.stitch_length_max_mm * self.px_per_mm
-        cells = self._cross_stitch_cells(mask, settings)
+        cell_specs = self._cross_stitch_cell_specs(mask, occupancy_mask, settings)
         paths: List[List[Tuple[float, float]]] = []
 
         rows = {}
-        for cell in cells:
-            rows.setdefault(round(cell[1], 6), []).append(cell)
+        for spec in cell_specs:
+            rows.setdefault(round(spec.bounds[1], 6), []).append(spec)
 
         for row_index, row_y in enumerate(sorted(rows)):
-            row = sorted(rows[row_y], key=lambda c: c[0], reverse=bool(row_index % 2))
-            for cell in row:
-                paths.extend(self._cross_stitch_cell_paths(cell, method, max_segment_px))
+            row = sorted(
+                rows[row_y],
+                key=lambda spec: spec.bounds[0],
+                reverse=bool(row_index % 2),
+            )
+            for spec in row:
+                cell_method = spec.method_override or method
+                paths.extend(
+                    self._cross_stitch_cell_paths(
+                        spec.bounds,
+                        cell_method,
+                        max_segment_px,
+                    )
+                )
 
         if method.startswith("dense_upright"):
             half = max(1.0, settings.cross_pattern_size_mm * self.px_per_mm / 2.0)
@@ -1451,8 +1544,18 @@ class StitchEngine:
         mask: np.ndarray,
         settings: StitchSettings,
         image: Optional[np.ndarray] = None,
+        source_mask: Optional[np.ndarray] = None,
     ) -> List[Tuple[float, float]]:
-        return [pt for path in self._generate_cross_stitch_paths(mask, settings, image) for pt in path]
+        return [
+            pt
+            for path in self._generate_cross_stitch_paths(
+                mask,
+                settings,
+                image,
+                source_mask,
+            )
+            for pt in path
+        ]
 
     def _choose_cross_stitch_method(
         self,
