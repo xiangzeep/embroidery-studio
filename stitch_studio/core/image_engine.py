@@ -714,10 +714,9 @@ class ImageEngine:
             return
         feature_groups = []
         for group in getattr(recognition, "feature_outline_groups", ()):
-            group_mask = np.asarray(group, dtype=bool)
+            group_mask = np.array(group, dtype=bool, copy=True)
             if group_mask.shape != detail.shape:
                 continue
-            group_mask &= subject
             if np.any(group_mask):
                 feature_groups.append(group_mask)
         feature_union = (
@@ -745,10 +744,69 @@ class ImageEngine:
                 & feature_support
                 & subject
             )
-        protected = (
-            (detail & (subject | semantic_neighborhood))
-            | (highlight_seed & subject)
+        # Subject segmentation can exclude the one-pixel ink itself. Admit only
+        # immediately touching antialias/detail pixels, never the former broad
+        # semantic neighborhood that could pull unrelated background marks in.
+        subject_support = cv2.dilate(
+            subject.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        inverse = (~subject).astype(np.uint8)
+        hole_count, hole_labels, hole_stats, _ = cv2.connectedComponentsWithStats(
+            inverse,
+            connectivity=8,
         )
+        max_hole_area = max(64, int(detail.size * 0.002))
+        for component_id in range(1, hole_count):
+            x, y, width, height, area = (
+                int(value) for value in hole_stats[component_id]
+            )
+            touches_border = (
+                x == 0
+                or y == 0
+                or x + width == detail.shape[1]
+                or y + height == detail.shape[0]
+            )
+            if touches_border or area > max_hole_area:
+                continue
+            subject_support[hole_labels == component_id] = True
+        subject_hulls = np.zeros(detail.shape, dtype=np.uint8)
+        subject_contours, _ = cv2.findContours(
+            subject.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        for contour in subject_contours:
+            if cv2.contourArea(contour) >= 9.0:
+                cv2.fillConvexPoly(subject_hulls, cv2.convexHull(contour), 1)
+        subject_above = np.zeros(detail.shape, dtype=bool)
+        subject_below = np.zeros(detail.shape, dtype=bool)
+        subject_left = np.zeros(detail.shape, dtype=bool)
+        subject_right = np.zeros(detail.shape, dtype=bool)
+        subject_above[1:] = np.maximum.accumulate(subject, axis=0)[:-1]
+        subject_below[:-1] = np.maximum.accumulate(
+            subject[::-1],
+            axis=0,
+        )[::-1][1:]
+        subject_left[:, 1:] = np.maximum.accumulate(subject, axis=1)[:, :-1]
+        subject_right[:, :-1] = np.maximum.accumulate(
+            subject[:, ::-1],
+            axis=1,
+        )[:, ::-1][:, 1:]
+        concavity_channel = (
+            (subject_above & subject_below)
+            | (subject_left & subject_right)
+        )
+        # Semantic strokes such as eyebrows can sit just outside a coarse
+        # subject mask. Reject hull pixels enclosed by subject on opposite
+        # sides: those are open concavities, not exterior facial details.
+        subject_support |= (
+            (subject_hulls > 0)
+            & semantic_neighborhood
+            & ~concavity_channel
+        )
+        protected = (detail & subject_support) | (highlight_seed & subject)
         if not np.any(protected):
             return
 
@@ -760,10 +818,15 @@ class ImageEngine:
         )
         image_diagonal = max(1.0, float(np.hypot(*detail.shape)))
 
-        def candidate_score(mask: np.ndarray, contrast: float) -> float:
+        def candidate_score(
+            mask: np.ndarray,
+            contrast: float,
+            origin_x: int = 0,
+            origin_y: int = 0,
+        ) -> float:
             ys, xs = np.where(mask)
-            center_x = float(np.mean(xs))
-            center_y = float(np.mean(ys))
+            center_x = float(np.mean(xs)) + origin_x
+            center_y = float(np.mean(ys)) + origin_y
             distance = np.hypot(center_x - subject_center[0], center_y - subject_center[1])
             centrality = max(0.0, 1.0 - distance / image_diagonal)
             return float(np.count_nonzero(mask)) * 32.0 + contrast * 8.0 + centrality
@@ -776,15 +839,27 @@ class ImageEngine:
             stitch_settings: StitchSettings,
             priority: int,
             contrast: float,
+            origin_x: int = 0,
+            origin_y: int = 0,
         ):
             if not np.any(mask):
                 return
+            ys, xs = np.where(mask)
+            local_x0 = int(xs.min())
+            local_y0 = int(ys.min())
+            local_x1 = int(xs.max()) + 1
+            local_y1 = int(ys.max()) + 1
+            compact = np.array(
+                mask[local_y0:local_y1, local_x0:local_x1],
+                dtype=bool,
+                copy=True,
+            )
             candidates.append((
                 priority,
-                candidate_score(mask, contrast),
+                candidate_score(mask, contrast, origin_x, origin_y),
                 layer,
                 contributor,
-                mask,
+                (origin_x + local_x0, origin_y + local_y0, compact),
                 name,
                 stitch_settings,
             ))
@@ -812,19 +887,20 @@ class ImageEngine:
                         overlay_mask,
                         f"{layer.name} cross detail {group_index}-{region_index}",
                         ImageEngine._feature_outline_stitch_settings(),
-                        3,
+                        5,
                         100.0,
                     )
 
                 compact_seed = highlight_seed & fill_mask & ~feature_union
-                compact_count, compact_labels = cv2.connectedComponents(
+                compact_count, compact_labels, compact_stats, _ = cv2.connectedComponentsWithStats(
                     compact_seed.astype(np.uint8),
                     connectivity=8,
                 )
                 for component_id in range(1, compact_count):
-                    component = compact_labels == component_id
-                    if int(np.count_nonzero(component)) > max(24, int(detail.size * 0.006)):
+                    x, y, width, height, area = compact_stats[component_id]
+                    if int(area) > max(24, int(detail.size * 0.006)):
                         continue
+                    component = compact_labels[y:y + height, x:x + width] == component_id
                     append_candidate(
                         layer,
                         contributor,
@@ -833,49 +909,70 @@ class ImageEngine:
                         ImageEngine._feature_outline_stitch_settings(),
                         2,
                         80.0,
+                        int(x),
+                        int(y),
                     )
 
                 remaining = protected & fill_mask & ~feature_union & ~highlight_seed
-                component_count, labels = cv2.connectedComponents(
+                component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
                     remaining.astype(np.uint8),
                     connectivity=8,
                 )
                 for component_id in range(1, component_count):
-                    component = labels == component_id
-                    area = int(np.count_nonzero(component))
+                    x, y, width, height, area = (
+                        int(value) for value in stats[component_id]
+                    )
                     if area < 3:
                         continue
-                    ys, xs = np.where(component)
-                    width = int(xs.max() - xs.min() + 1)
-                    height = int(ys.max() - ys.min() + 1)
+                    component = labels[y:y + height, x:x + width] == component_id
                     long_axis = max(width, height)
                     short_axis = min(width, height)
                     stroke_width = float(
                         cv2.distanceTransform(
-                            component.astype(np.uint8), cv2.DIST_L2, 3
+                            np.pad(
+                                component.astype(np.uint8),
+                                1,
+                                mode="constant",
+                            ),
+                            cv2.DIST_L2,
+                            3,
                         ).max() * 2.0
                     )
                     is_thin_line = long_axis >= 4 and stroke_width <= 5.0
                     semantic_contact = np.any(
                         component
-                        & cv2.dilate(
-                            feature_union.astype(np.uint8),
-                            np.ones((13, 13), dtype=np.uint8),
-                            iterations=1,
-                        ).astype(bool)
+                        & semantic_neighborhood[y:y + height, x:x + width]
+                    )
+                    pad_x0 = max(0, x - 1)
+                    pad_y0 = max(0, y - 1)
+                    pad_x1 = min(detail.shape[1], x + width + 1)
+                    pad_y1 = min(detail.shape[0], y + height + 1)
+                    padded_component = (
+                        labels[pad_y0:pad_y1, pad_x0:pad_x1] == component_id
                     )
                     border = cv2.dilate(
-                        component.astype(np.uint8),
+                        padded_component.astype(np.uint8),
                         np.ones((3, 3), dtype=np.uint8),
                         iterations=1,
-                    ).astype(bool) & ~component & subject
+                    ).astype(bool) & ~padded_component
+                    border &= subject[pad_y0:pad_y1, pad_x0:pad_x1]
                     if source_luminance is not None and np.any(border):
                         contrast = abs(
-                            float(np.median(source_luminance[component]))
-                            - float(np.median(source_luminance[border]))
+                            float(np.median(
+                                source_luminance[y:y + height, x:x + width][component]
+                            ))
+                            - float(np.median(
+                                source_luminance[
+                                    pad_y0:pad_y1,
+                                    pad_x0:pad_x1,
+                                ][border]
+                            ))
                         )
                     else:
-                        contrast = 24.0 if np.any(border & ~fill_mask) else 0.0
+                        contrast = 24.0 if np.any(
+                            border
+                            & ~fill_mask[pad_y0:pad_y1, pad_x0:pad_x1]
+                        ) else 0.0
                     is_supported_compact_detail = (
                         long_axis <= 14
                         and short_axis >= 2
@@ -898,15 +995,22 @@ class ImageEngine:
                         component,
                         f"{layer.name} cross line {component_id}-{region_index}",
                         settings,
-                        3 if contributor.is_detail_region else 2,
+                        (
+                            5
+                            if is_thin_line and semantic_contact
+                            else 4 if is_thin_line else 3
+                        ),
                         contrast,
+                        x,
+                        y,
                     )
 
-        total_budget = max(12, int(np.ceil(detail.size / 1024.0)))
-        per_color_budget = max(8, int(np.ceil(total_budget / 2.0)))
+        total_budget = max(14, int(np.ceil(detail.size / 1024.0)))
+        per_color_budget = max(10, int(np.ceil(total_budget * 0.75)))
         selected = 0
         selected_by_color = {}
-        for _, _, layer, contributor, mask, name, stitch_settings in sorted(
+        selected_overlays = {}
+        for priority, _, layer, contributor, compact_mask, name, stitch_settings in sorted(
             candidates,
             key=lambda candidate: (-candidate[0], -candidate[1]),
         ):
@@ -919,15 +1023,42 @@ class ImageEngine:
                 break
             if selected_by_color.get(color_key, 0) >= per_color_budget:
                 continue
-            ImageEngine._append_cross_stitch_detail_overlay(
-                layer,
-                contributor,
-                mask,
-                name,
-                stitch_settings,
+            x, y, local_mask = compact_mask
+            settings_key = tuple(sorted(stitch_settings.to_dict().items()))
+            # Closed feature contours must remain separate because the contour
+            # generator intentionally traces one loop per region.
+            feature_key = (
+                name
+                if priority in (3, 5) or (priority == 4 and selected < 12)
+                else None
             )
+            overlay_key = (layer.uid, color_key, settings_key, feature_key)
+            overlay = selected_overlays.get(overlay_key)
+            if overlay is None:
+                overlay = {
+                    "layer": layer,
+                    "contributor": contributor,
+                    "mask": np.zeros(detail.shape, dtype=bool),
+                    "name": name,
+                    "settings": stitch_settings,
+                }
+                selected_overlays[overlay_key] = overlay
+            target = overlay["mask"][
+                y:y + local_mask.shape[0],
+                x:x + local_mask.shape[1],
+            ]
+            target |= local_mask
             selected += 1
             selected_by_color[color_key] = selected_by_color.get(color_key, 0) + 1
+
+        for overlay in selected_overlays.values():
+            ImageEngine._append_cross_stitch_detail_overlay(
+                overlay["layer"],
+                overlay["contributor"],
+                overlay["mask"],
+                overlay["name"],
+                overlay["settings"],
+            )
 
     @staticmethod
     def _feature_outline_support_mask(

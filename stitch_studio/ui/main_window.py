@@ -242,16 +242,20 @@ class StitchWorker(QThread):
         if not base_masks:
             return None
 
-        # `auto` resolves at fill time, so every truly shared group needs the
-        # shifted allocation ready before a region can select dense_upright.
-        reference = region_jobs[0][1].stitch_settings
-        half_pattern_mm = reference.cross_pattern_size_mm / 2.0
-        dense_masks = engine.build_cross_stitch_ownership_masks(
-            priorities,
-            grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
-        )
-        if not dense_masks:
-            raise ValueError("Dense cross stitch ownership builder returned no masks")
+        dense_masks = None
+        if any(
+            region.stitch_settings.cross_method == "auto"
+            or region.stitch_settings.cross_method.startswith("dense_upright")
+            for _, region in region_jobs
+        ):
+            reference = region_jobs[0][1].stitch_settings
+            half_pattern_mm = reference.cross_pattern_size_mm / 2.0
+            dense_masks = engine.build_cross_stitch_ownership_masks(
+                priorities,
+                grid_offset_shift_mm=(half_pattern_mm, half_pattern_mm),
+            )
+            if not dense_masks:
+                raise ValueError("Dense cross stitch ownership builder returned no masks")
 
         return CrossStitchOwnershipContext.from_ownership_masks(
             base_masks,
@@ -1158,25 +1162,119 @@ class MainWindow(QMainWindow):
         self._on_layer_selected(uid)
 
     def _scale_stitch_object(self, uid: str, factor: float):
-        """Scale a generated layer or region and redraw from project data."""
+        """Scale editable source geometry so regeneration and saving retain it."""
         layer = self.project.get_layer(uid)
-        if layer:
-            layer.scale_stitches(factor)
-            affected_layer = layer
+        if layer is not None:
+            entries = [(layer, region) for region in layer.regions if region.visible]
         else:
-            region = None
-            affected_layer = None
-            for candidate_layer in self.project.layers:
-                region = candidate_layer.get_region(uid)
-                if region:
-                    affected_layer = candidate_layer
-                    break
-            if not region or affected_layer is None:
-                return
-            region.scale_stitches(factor)
+            found = self._find_region_with_layer(uid)
+            entries = [found] if found else []
+        if not entries:
+            return
+
+        polygon_entries = [
+            (candidate_layer, region)
+            for candidate_layer, region in entries
+            if region.polygon is not None and not region.polygon.is_empty
+        ]
+        if not polygon_entries:
+            for _, region in entries:
+                region.scale_stitches(factor)
+            affected_layers = {
+                id(candidate_layer): candidate_layer
+                for candidate_layer, _ in entries
+            }
+        else:
+            bounds = [
+                region.polygon.bounds for _, region in polygon_entries
+            ]
+            min_x = min(item[0] for item in bounds)
+            min_y = min(item[1] for item in bounds)
+            max_x = max(item[2] for item in bounds)
+            max_y = max(item[3] for item in bounds)
+            source_shape = (
+                self.project.processed_image.shape[:2]
+                if self.project.processed_image is not None
+                else next(
+                    (
+                        region.mask.shape
+                        for _, region in polygon_entries
+                        if region.mask is not None
+                    ),
+                    None,
+                )
+            )
+            effective_factor = factor
+            if source_shape is not None and factor > 1.0:
+                source_h, source_w = source_shape
+                geometry_w = max_x - min_x
+                geometry_h = max_y - min_y
+                if geometry_w > 0.0:
+                    effective_factor = min(
+                        effective_factor,
+                        source_w / geometry_w,
+                    )
+                if geometry_h > 0.0:
+                    effective_factor = min(
+                        effective_factor,
+                        source_h / geometry_h,
+                    )
+            origin = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+            for _, region in polygon_entries:
+                region.polygon = shapely_scale(
+                    region.polygon,
+                    xfact=effective_factor,
+                    yfact=effective_factor,
+                    origin=origin,
+                )
+            if source_shape is not None:
+                scaled_bounds = [
+                    region.polygon.bounds for _, region in polygon_entries
+                ]
+                scaled_min_x = min(item[0] for item in scaled_bounds)
+                scaled_min_y = min(item[1] for item in scaled_bounds)
+                scaled_max_x = max(item[2] for item in scaled_bounds)
+                scaled_max_y = max(item[3] for item in scaled_bounds)
+                source_h, source_w = source_shape
+                shift_x = (
+                    -scaled_min_x
+                    if scaled_min_x < 0.0
+                    else source_w - scaled_max_x
+                    if scaled_max_x > source_w
+                    else 0.0
+                )
+                shift_y = (
+                    -scaled_min_y
+                    if scaled_min_y < 0.0
+                    else source_h - scaled_max_y
+                    if scaled_max_y > source_h
+                    else 0.0
+                )
+                if shift_x or shift_y:
+                    for _, region in polygon_entries:
+                        region.polygon = shapely_translate(
+                            region.polygon,
+                            xoff=shift_x,
+                            yoff=shift_y,
+                        )
+            for _, region in polygon_entries:
+                self._sync_region_mask_to_polygon(region)
+            regenerated = self._regenerate_changed_regions(
+                [region for _, region in polygon_entries]
+            )
+            affected_layers = {
+                id(candidate_layer): candidate_layer
+                for candidate_layer, _ in entries + regenerated
+            }
+            for _, region in entries:
+                if region.polygon is None or region.polygon.is_empty:
+                    region.scale_stitches(factor)
 
         self.project.modified = True
-        self._refresh_layer_stitches(affected_layer)
+        for candidate_layer, region in polygon_entries:
+            self._refresh_region_mask(candidate_layer, region)
+        for affected_layer in affected_layers.values():
+            self._refresh_layer_stitches(affected_layer)
         self.canvas.select_object(uid)
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
@@ -1184,30 +1282,96 @@ class MainWindow(QMainWindow):
         self.status_info.setText(tr("status.scaled").format(factor=factor))
 
     def _move_stitch_object(self, uid: str, dx: float, dy: float):
-        """Move a generated layer or region and redraw from project data."""
+        """Move editable source geometry so regeneration and saving retain it."""
         layer = self.project.get_layer(uid)
-        if layer:
-            layer.translate_stitches(dx, dy)
+        if layer is not None:
+            entries = [(layer, region) for region in layer.regions if region.visible]
         else:
-            region = None
-            for candidate_layer in self.project.layers:
-                region = candidate_layer.get_region(uid)
-                if region:
-                    break
-            if not region:
-                return
-            region.translate_stitches(dx, dy)
+            found = self._find_region_with_layer(uid)
+            entries = [found] if found else []
+        if not entries:
+            return
 
+        mask_scale = self._current_mask_scale()
+        source_shape = (
+            self.project.processed_image.shape[:2]
+            if self.project.processed_image is not None
+            else next(
+                (
+                    region.mask.shape
+                    for _, region in entries
+                    if region.mask is not None
+                ),
+                None,
+            )
+        )
+        polygon_bounds = [
+            region.polygon.bounds
+            for _, region in entries
+            if region.polygon is not None and not region.polygon.is_empty
+        ]
+        source_dx = dx / mask_scale
+        source_dy = dy / mask_scale
+        if source_shape is not None and polygon_bounds:
+            source_h, source_w = source_shape
+            source_dx = min(
+                max(source_dx, -min(bounds[0] for bounds in polygon_bounds)),
+                source_w - max(bounds[2] for bounds in polygon_bounds),
+            )
+            source_dy = min(
+                max(source_dy, -min(bounds[1] for bounds in polygon_bounds)),
+                source_h - max(bounds[3] for bounds in polygon_bounds),
+            )
+        scene_dx = source_dx * mask_scale
+        scene_dy = source_dy * mask_scale
+        polygon_entries = []
+        for candidate_layer, region in entries:
+            if region.polygon is not None and not region.polygon.is_empty:
+                region.polygon = shapely_translate(
+                    region.polygon,
+                    xoff=source_dx,
+                    yoff=source_dy,
+                )
+                self._sync_region_mask_to_polygon(region)
+                polygon_entries.append((candidate_layer, region))
+            else:
+                region.translate_stitches(scene_dx, scene_dy)
+
+        if not polygon_entries:
+            self.project.modified = True
+            self.canvas.select_object(uid)
+            self.layer_panel.select_uid(uid)
+            self.status_info.setText(
+                tr("status.moved").format(dx=scene_dx, dy=scene_dy)
+            )
+            return
+
+        regenerated = self._regenerate_changed_regions(
+            [region for _, region in polygon_entries]
+        )
+        affected_layers = {
+            id(candidate_layer): candidate_layer
+            for candidate_layer, _ in entries + regenerated
+        }
         self.project.modified = True
+        for candidate_layer, region in polygon_entries:
+            self._refresh_region_mask(candidate_layer, region)
+        for affected_layer in affected_layers.values():
+            self._refresh_layer_stitches(affected_layer)
         self.canvas.select_object(uid)
+        self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
-        self.status_info.setText(tr("status.moved").format(dx=dx, dy=dy))
+        self._update_stats()
+        self.status_info.setText(
+            tr("status.moved").format(dx=scene_dx, dy=scene_dy)
+        )
 
     def _resize_stitch_object(self, uid: str, scene_bounds):
         """Resize a region/layer to the mouse-provided scene bounds and regenerate."""
+        regenerated = []
         layer = self.project.get_layer(uid)
         if layer:
-            self._resize_layer_regions(layer, scene_bounds)
+            regenerated = self._resize_layer_regions(layer, scene_bounds)
             affected_layer = layer
             affected_region = None
         else:
@@ -1215,8 +1379,9 @@ class MainWindow(QMainWindow):
             if not found:
                 return
             layer, region = found
-            self._resize_region_polygon(region, scene_bounds)
-            self._regenerate_region(layer, region)
+            geometry_changed = self._resize_region_polygon(region, scene_bounds)
+            if geometry_changed:
+                regenerated = self._regenerate_region(layer, region)
             affected_layer = layer
             affected_region = region
 
@@ -1226,6 +1391,9 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_region_mask(affected_layer, affected_region)
         self._refresh_layer_stitches(affected_layer)
+        for regenerated_layer, _ in regenerated:
+            if regenerated_layer is not affected_layer:
+                self._refresh_layer_stitches(regenerated_layer)
         self.canvas.select_object(uid)
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
@@ -1236,7 +1404,7 @@ class MainWindow(QMainWindow):
         """Atomically update a layer before regenerating its stitch paths."""
         old_bounds = layer.stitch_bounds()
         if old_bounds is None:
-            return
+            return []
         sx, sy, dx, dy = self._scene_bounds_transform(old_bounds, scene_bounds)
 
         # Phase one: every editable region must expose its final source mask
@@ -1246,24 +1414,32 @@ class MainWindow(QMainWindow):
         polygon_regions = []
         fallback_regions = []
         for region in layer.regions:
-            if getattr(region, "polygon", None) is not None and not region.polygon.is_empty:
-                region.polygon = shapely_scale(region.polygon, xfact=sx, yfact=sy, origin=origin)
-                region.polygon = shapely_translate(region.polygon, xoff=dx / mask_scale, yoff=dy / mask_scale)
+            if (
+                getattr(region, "polygon", None) is not None
+                and not region.polygon.is_empty
+            ):
+                region.polygon = shapely_scale(
+                    region.polygon,
+                    xfact=sx,
+                    yfact=sy,
+                    origin=origin,
+                )
+                region.polygon = shapely_translate(
+                    region.polygon,
+                    xoff=dx / mask_scale,
+                    yoff=dy / mask_scale,
+                )
                 self._sync_region_mask_to_polygon(region)
                 polygon_regions.append(region)
             else:
                 fallback_regions.append(region)
 
         # Phase two: derive contexts from the completed project state once,
-        # then regenerate only regions whose source geometry was updated.
-        ownership_contexts = self._cross_stitch_ownership_contexts()
-        for region in polygon_regions:
-            self._regenerate_region_with_context(
-                region,
-                ownership_contexts.get(region.uid),
-            )
+        # including compatible regions in other layers that share its grid.
+        regenerated = self._regenerate_changed_regions(polygon_regions)
         for region in fallback_regions:
             region.scale_stitches(sx, origin=(old_bounds[0], old_bounds[1]))
+        return regenerated
 
     def _resize_region_polygon(self, region: Region, scene_bounds):
         polygon = getattr(region, "polygon", None)
@@ -1274,7 +1450,7 @@ class MainWindow(QMainWindow):
             sx, sy, dx, dy = self._scene_bounds_transform(region_bounds, scene_bounds)
             region.scale_stitches(sx, origin=(region_bounds[0], region_bounds[1]))
             region.translate_stitches(dx, dy)
-            return
+            return False
 
         mask_scale = self._current_mask_scale()
         old_minx, old_miny, old_maxx, old_maxy = polygon.bounds
@@ -1305,6 +1481,8 @@ class MainWindow(QMainWindow):
         if not resized.is_empty:
             region.polygon = resized
             self._sync_region_mask_to_polygon(region)
+            return True
+        return False
 
     @staticmethod
     def _scene_bounds_transform(old_bounds, new_bounds):
@@ -1321,9 +1499,7 @@ class MainWindow(QMainWindow):
         region_jobs = [
             (layer, region)
             for layer in self.project.layers
-            if layer.visible
             for region in layer.regions
-            if region.visible
         ]
         return StitchWorker._build_cross_stitch_ownership_contexts(
             self.stitch_engine,
@@ -1331,11 +1507,33 @@ class MainWindow(QMainWindow):
         )
 
     def _regenerate_region(self, layer: Layer, region: Region):
+        return self._regenerate_changed_regions([region])
+
+    def _regenerate_changed_regions(self, changed_regions):
+        """Regenerate changed regions and every fill sharing their ownership grid."""
+        if not changed_regions:
+            return []
         ownership_contexts = self._cross_stitch_ownership_contexts()
-        self._regenerate_region_with_context(
-            region,
-            ownership_contexts.get(region.uid),
-        )
+        changed_uids = {region.uid for region in changed_regions}
+        changed_context_ids = {
+            id(ownership_contexts[uid])
+            for uid in changed_uids
+            if uid in ownership_contexts
+        }
+        regenerated = []
+        for candidate_layer in self.project.layers:
+            for candidate in candidate_layer.regions:
+                context = ownership_contexts.get(candidate.uid)
+                if candidate.uid in changed_uids or (
+                    context is not None
+                    and id(context) in changed_context_ids
+                ):
+                    self._regenerate_region_with_context(
+                        candidate,
+                        context,
+                    )
+                    regenerated.append((candidate_layer, candidate))
+        return regenerated
 
     def _regenerate_region_with_context(self, region: Region, ownership_context):
         """Generate one region with a context already built for this project state."""
@@ -1429,12 +1627,15 @@ class MainWindow(QMainWindow):
 
         region.polygon = polygon
         self._sync_region_mask_to_polygon(region)
-        self._regenerate_region(layer, region)
+        regenerated = self._regenerate_region(layer, region)
 
         self._refresh_region_mask(layer, region)
 
         self.project.modified = True
         self._refresh_layer_stitches(layer)
+        for regenerated_layer, _ in regenerated:
+            if regenerated_layer is not layer:
+                self._refresh_layer_stitches(regenerated_layer)
         self.canvas.select_object(uid)
         self.layer_panel.refresh()
         self.layer_panel.select_uid(uid)
@@ -1454,12 +1655,14 @@ class MainWindow(QMainWindow):
         img_settings = self.image_panel.get_image_settings()
         img_h, img_w = self.project.processed_image.shape[:2]
         out_w = img_settings.output_width_mm * 10
-        out_h = img_settings.output_height_mm * 10
-        return min(out_w / img_w, out_h / img_h)
+        return out_w / img_w
 
     def _on_visibility_changed(self, uid, visible):
         if uid in self.canvas._layer_groups:
             self.canvas._layer_groups[uid].setVisible(visible)
+        layer = self.project.get_layer(uid)
+        if layer is not None and visible:
+            self._refresh_layer_stitches(layer)
 
     def _on_settings_changed(self, uid, settings):
         """When stitch settings change, mark project modified."""

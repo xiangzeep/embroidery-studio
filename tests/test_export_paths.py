@@ -123,6 +123,41 @@ def real_synthetic_roundtrip_metrics():
     return metrics
 
 
+def real_selected_layer_dst_roundtrip():
+    """Exercise the selected-layer DST path without the in-module test double."""
+    import pyembroidery
+
+    from stitch_studio.core.export_engine import ExportEngine
+    from stitch_studio.core.project import Layer, Region
+
+    region = Region(
+        stitch_paths=[
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(20.0, 0.0), (25.0, 0.0)],
+            [(30.0, 0.0), (35.0, 0.0)],
+        ],
+    )
+    layer = Layer(
+        name="Selected",
+        thread_color_rgb=(12, 34, 56),
+        regions=[region],
+    )
+    exporter = ExportEngine()
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "selected.dst")
+        written = exporter.export_layer(layer, path)
+        decoded = pyembroidery.EmbPattern(path)
+        return {
+            "written": [os.path.splitext(item)[1] for item in written],
+            "bounds": exporter._sewn_bounds(decoded),
+            "end": bool(
+                decoded.stitches
+                and (int(decoded.stitches[-1][2]) & 0xFF)
+                == pyembroidery.END
+            ),
+        }
+
+
 class ExportPathTests(unittest.TestCase):
     def test_synthetic_face_cross_fidelity_stays_within_stitch_and_jump_budget(
         self,
@@ -245,6 +280,43 @@ class ExportPathTests(unittest.TestCase):
                 baseline["jump_commands"] + metrics["overlay_paths"] + 8,
             )
 
+    def test_real_selected_layer_dst_roundtrip_is_valid(self):
+        availability = subprocess.run(
+            [sys.executable, "-c", "import pyembroidery"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if availability.returncode:
+            self.skipTest("real pyembroidery package is unavailable")
+
+        script = (
+            "import json; "
+            "from tests.test_export_paths import real_selected_layer_dst_roundtrip; "
+            "print('SELECTED_DST=' + json.dumps(real_selected_layer_dst_roundtrip()))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        payload = next(
+            line.removeprefix("SELECTED_DST=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("SELECTED_DST=")
+        )
+        metrics = json.loads(payload)
+        self.assertEqual(metrics["written"], [".dst", ".edr"])
+        self.assertEqual(metrics["bounds"], [0.0, 0.0, 35.0, 0.0])
+        self.assertTrue(metrics["end"])
+
     def test_cross_worker_builds_ownership_for_fills_and_keeps_overlay_separate(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -314,6 +386,88 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(sewing, [(10, 0), (110, 0), (210, 0)])
         self.assertEqual(commands.count(pyembroidery.JUMP), 3)
 
+    def test_selected_layer_export_keeps_fill_first_and_jumps_between_overlays(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        captured = {}
+        pyembroidery.write = lambda pattern, filepath, settings=None: captured.setdefault(
+            "pattern", pattern
+        )
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        overlay = project_mod.Region(is_cross_stitch_overlay=True)
+        overlay.stitch_settings = project_mod.StitchSettings(fill_mode="run")
+        overlay.stitch_paths = [
+            [(20.0, 0.0), (25.0, 0.0)],
+            [(30.0, 0.0), (35.0, 0.0)],
+        ]
+        fill = project_mod.Region()
+        fill.stitch_settings = project_mod.StitchSettings(fill_mode="cross_stitch")
+        fill.stitch_paths = [[(0.0, 0.0), (10.0, 0.0)]]
+        layer.regions = [overlay, fill]
+
+        export_mod.ExportEngine().export_layer(layer, "selected.pes")
+
+        pattern = captured["pattern"]
+        sewing = [
+            (x, y)
+            for x, y, command in pattern.stitches
+            if command == pyembroidery.STITCH
+        ]
+        commands = [command for _, _, command in pattern.stitches]
+        self.assertEqual(sewing, [(10, 0), (25, 0), (35, 0)])
+        self.assertEqual(commands.count(pyembroidery.JUMP), 3)
+
+    def test_selected_layer_pes_export_uses_safe_version_and_thread_fixup(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        captured = {}
+        pyembroidery.write = (
+            lambda pattern, filepath, settings=None: captured.update(
+                pattern=pattern,
+                settings=dict(settings or {}),
+            )
+        )
+        region = project_mod.Region(
+            stitch_paths=[[(0.0, 0.0), (10.0, 0.0)]],
+        )
+        layer = project_mod.Layer(
+            thread_color_rgb=(12, 34, 56),
+            regions=[region],
+        )
+
+        written = export_mod.ExportEngine().export_layer(layer, "selected.pes")
+
+        self.assertEqual(captured["settings"]["version"], 6.0)
+        self.assertEqual(len(captured["pattern"].threadlist), 1)
+        self.assertEqual(written, ["selected.pes"])
+
+    def test_selected_hidden_layer_is_still_exported(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        captured = {}
+        pyembroidery.write = (
+            lambda pattern, filepath, settings=None: captured.update(pattern=pattern)
+        )
+        layer = project_mod.Layer(
+            visible=False,
+            thread_color_rgb=(12, 34, 56),
+            regions=[
+                project_mod.Region(
+                    stitch_paths=[[(0.0, 0.0), (10.0, 0.0)]],
+                ),
+            ],
+        )
+
+        export_mod.ExportEngine().export_layer(layer, "hidden-selected.pes")
+
+        self.assertTrue(captured["pattern"].stitches)
+
     def test_cross_stitch_overlay_role_round_trips(self):
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -321,6 +475,36 @@ class ExportPathTests(unittest.TestCase):
         restored = project_mod.Region.from_dict(region.to_dict())
 
         self.assertTrue(restored.is_cross_stitch_overlay)
+
+    def test_region_polygon_round_trips_and_legacy_mask_reconstructs_geometry(self):
+        from shapely.geometry import Polygon
+
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        mask = np.zeros((12, 12), dtype=np.uint8)
+        mask[2:9, 3:10] = 255
+        polygon = Polygon([(3, 2), (10, 2), (9, 9), (3, 9)])
+        region = project_mod.Region(mask=mask, polygon=polygon)
+
+        restored = project_mod.Region.from_dict(region.to_dict())
+        legacy = region.to_dict()
+        legacy.pop("polygon_wkb", None)
+        restored_legacy = project_mod.Region.from_dict(legacy)
+
+        self.assertTrue(restored.polygon.equals_exact(polygon, 1e-9))
+        self.assertIsNotNone(restored_legacy.polygon)
+        self.assertFalse(restored_legacy.polygon.is_empty)
+
+    def test_corrupt_region_polygon_falls_back_to_stored_mask(self):
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        mask = np.zeros((12, 12), dtype=np.uint8)
+        mask[2:9, 3:10] = 255
+        payload = project_mod.Region(mask=mask).to_dict()
+        payload["polygon_wkb"] = "not-valid-wkb"
+
+        restored = project_mod.Region.from_dict(payload)
+
+        self.assertIsNotNone(restored.polygon)
+        self.assertFalse(restored.polygon.is_empty)
 
     def test_export_end_command_stays_at_last_needle_position(self):
         pyembroidery = install_fake_pyembroidery()
@@ -3456,6 +3640,292 @@ class ExportPathTests(unittest.TestCase):
         paths = first.stitch_paths + second.stitch_paths
         self.assertEqual(len(paths), len({tuple(path) for path in paths}))
 
+    def test_direct_regeneration_atomically_refreshes_shared_cross_group(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        project = project_mod.Project()
+        first_mask = np.zeros((8, 8), dtype=np.uint8)
+        second_mask = np.zeros((8, 8), dtype=np.uint8)
+        first_mask[:, :4] = 255
+        second_mask[:, 4:] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first = project_mod.Region(mask=first_mask, stitch_settings=settings)
+        second = project_mod.Region(
+            mask=second_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        layer = project_mod.Layer(regions=[first, second])
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.stitch_engine = engine
+        window.project = project
+        window._flow_field = None
+
+        window._regenerate_region(layer, first)
+        self.assertIsNotNone(second.stitch_paths)
+        old_second_paths = list(second.stitch_paths)
+        first.mask[:, 2:6] = 255
+        window._regenerate_region(layer, first)
+
+        all_paths = first.stitch_paths + second.stitch_paths
+        self.assertNotEqual(second.stitch_paths, old_second_paths)
+        self.assertEqual(len(all_paths), len({tuple(path) for path in all_paths}))
+
+    def test_plain_cross_group_does_not_build_dense_ownership_masks(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        class OwnershipMasks(dict):
+            grid_origin_px = (0.0, 0.0)
+
+        class RecordingEngine:
+            def __init__(self):
+                self.shifts = []
+
+            def build_cross_stitch_ownership_masks(
+                self, priorities, grid_offset_shift_mm=(0.0, 0.0)
+            ):
+                self.shifts.append(grid_offset_shift_mm)
+                return OwnershipMasks({
+                    region.uid: np.array(region.mask, copy=True)
+                    for region, _ in priorities
+                })
+
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+        )
+        jobs = [
+            (
+                project_mod.Layer(),
+                project_mod.Region(
+                    mask=np.full((8, 8), 255, dtype=np.uint8),
+                    stitch_settings=project_mod.StitchSettings.from_dict(
+                        settings.to_dict()
+                    ),
+                ),
+            )
+            for _ in range(2)
+        ]
+        engine = RecordingEngine()
+
+        context = main_mod.StitchWorker._build_cross_stitch_ownership_context(
+            engine, jobs
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(engine.shifts, [(0.0, 0.0)])
+
+    def test_keyboard_move_updates_mask_and_survives_regeneration(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=np.uint8)
+        mask[2:6, 2:6] = 255
+        region = project_mod.Region(
+            mask=mask,
+            polygon=Polygon([(2, 2), (6, 2), (6, 6), (2, 6)]),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        layer = project_mod.Layer(regions=[region])
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        window._refresh_layer_stitches = lambda *args: None
+        window._refresh_region_mask = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+        window._regenerate_region(layer, region)
+
+        window._move_stitch_object(region.uid, 4.0, 3.0)
+        moved_paths = list(region.stitch_paths)
+        window._regenerate_region(layer, region)
+
+        self.assertEqual(region.stitch_paths, moved_paths)
+        self.assertEqual(region.polygon.bounds, (6.0, 5.0, 10.0, 9.0))
+        self.assertEqual(int(np.count_nonzero(region.mask[5:9, 6:10])), 16)
+        restored = project_mod.Region.from_dict(region.to_dict())
+        np.testing.assert_array_equal(restored.mask, region.mask)
+
+    def test_keyboard_move_clamps_polygon_inside_generation_canvas(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=np.uint8)
+        mask[4:8, 4:8] = 255
+        region = project_mod.Region(
+            mask=mask,
+            polygon=Polygon([(4, 4), (8, 4), (8, 8), (4, 8)]),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        layer = project_mod.Layer(regions=[region])
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        window._refresh_layer_stitches = lambda *args: None
+        window._refresh_region_mask = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+        window._regenerate_region(layer, region)
+
+        window._move_stitch_object(region.uid, 20.0, 0.0)
+
+        self.assertEqual(region.polygon.bounds, (12.0, 4.0, 16.0, 8.0))
+        self.assertGreater(np.count_nonzero(region.mask), 0)
+
+    def test_mask_scale_matches_width_based_stitch_engine_units(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((100, 100, 3), dtype=np.uint8)
+        settings = project_mod.ImageSettings(
+            output_width_mm=100.0,
+            output_height_mm=50.0,
+        )
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.image_panel = types.SimpleNamespace(
+            get_image_settings=lambda: settings,
+        )
+
+        self.assertEqual(window._current_mask_scale(), 10.0)
+
+    def test_keyboard_scale_updates_polygon_and_survives_regeneration(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=np.uint8)
+        mask[4:8, 4:8] = 255
+        region = project_mod.Region(
+            mask=mask,
+            polygon=Polygon([(4, 4), (8, 4), (8, 8), (4, 8)]),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        layer = project_mod.Layer(regions=[region])
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        window._refresh_layer_stitches = lambda *args: None
+        window._refresh_region_mask = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+        window._regenerate_region(layer, region)
+
+        window._scale_stitch_object(region.uid, 1.5)
+        scaled_paths = list(region.stitch_paths)
+        window._regenerate_region(layer, region)
+
+        self.assertEqual(region.stitch_paths, scaled_paths)
+        self.assertEqual(region.polygon.bounds, (3.0, 3.0, 9.0, 9.0))
+
+    def test_keyboard_scale_translates_edge_region_inside_canvas(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((16, 16, 3), dtype=np.uint8)
+        mask = np.zeros((16, 16), dtype=np.uint8)
+        mask[4:12, 10:16] = 255
+        region = project_mod.Region(
+            mask=mask,
+            polygon=Polygon([(10, 4), (16, 4), (16, 12), (10, 12)]),
+            stitch_settings=project_mod.StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=1.0,
+                underlay=False,
+            ),
+        )
+        layer = project_mod.Layer(regions=[region])
+        project.layers = [layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        window._refresh_layer_stitches = lambda *args: None
+        window._refresh_region_mask = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+
+        window._scale_stitch_object(region.uid, 2.0)
+
+        min_x, min_y, max_x, max_y = region.polygon.bounds
+        self.assertGreaterEqual(min_x, 0.0)
+        self.assertGreaterEqual(min_y, 0.0)
+        self.assertLessEqual(max_x, 16.0)
+        self.assertLessEqual(max_y, 16.0)
+        self.assertGreaterEqual(np.count_nonzero(region.mask), 180)
+
     def test_resize_and_boundary_regeneration_pass_ownership_context(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -3523,6 +3993,109 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(engine.contexts), 3)
         self.assertTrue(all(context is not None for context in engine.contexts))
+
+    def test_layer_resize_refreshes_cross_stitch_neighbors_in_other_layers(self):
+        from shapely.geometry import Polygon
+
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        project = project_mod.Project()
+        project.processed_image = np.zeros((12, 12, 3), dtype=np.uint8)
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+            cross_coverage=0.5,
+            stitch_length_max_mm=20.0,
+            underlay=False,
+        )
+        first_mask = np.zeros((12, 12), dtype=np.uint8)
+        first_mask[2:8, 2:6] = 255
+        second_mask = np.zeros((12, 12), dtype=np.uint8)
+        second_mask[2:8, 6:10] = 255
+        first = project_mod.Region(
+            mask=first_mask,
+            polygon=Polygon([(2, 2), (6, 2), (6, 8), (2, 8)]),
+            stitch_settings=settings,
+        )
+        second = project_mod.Region(
+            mask=second_mask,
+            polygon=Polygon([(6, 2), (10, 2), (10, 8), (6, 8)]),
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        first_layer = project_mod.Layer(regions=[first])
+        second_layer = project_mod.Layer(regions=[second])
+        project.layers = [first_layer, second_layer]
+
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        window._flow_field = None
+        window._current_mask_scale = lambda: 1.0
+        refreshed_layers = []
+        window._refresh_layer_stitches = (
+            lambda layer: refreshed_layers.append(layer.uid)
+        )
+        window._refresh_layer_region_masks = lambda *args: None
+        window._update_stats = lambda: None
+        window.status_info = types.SimpleNamespace(setText=lambda text: None)
+        window.canvas = types.SimpleNamespace(select_object=lambda uid: None)
+        window.layer_panel = types.SimpleNamespace(
+            refresh=lambda: None,
+            select_uid=lambda uid: None,
+        )
+        window._regenerate_region(first_layer, first)
+        refreshed_layers.clear()
+
+        window._resize_stitch_object(
+            first_layer.uid,
+            (0.0, 0.0, 8.0, 12.0),
+        )
+
+        self.assertCountEqual(
+            refreshed_layers,
+            [first_layer.uid, second_layer.uid],
+        )
+
+    def test_local_cross_ownership_includes_hidden_layers_and_show_redraws(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+        )
+        first = project_mod.Region(
+            mask=np.full((8, 8), 255, dtype=np.uint8),
+            stitch_settings=settings,
+        )
+        second = project_mod.Region(
+            mask=np.full((8, 8), 255, dtype=np.uint8),
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        first_layer = project_mod.Layer(regions=[first])
+        second_layer = project_mod.Layer(regions=[second], visible=False)
+        project = project_mod.Project()
+        project.layers = [first_layer, second_layer]
+        window = main_mod.MainWindow.__new__(main_mod.MainWindow)
+        window.project = project
+        window.stitch_engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        window._flow_field = None
+        redraws = []
+        window._refresh_layer_stitches = lambda layer: redraws.append(layer.uid)
+        window.canvas = types.SimpleNamespace(_layer_groups={})
+
+        contexts = window._cross_stitch_ownership_contexts()
+        second_layer.visible = True
+        window._on_visibility_changed(second_layer.uid, True)
+
+        self.assertIn(first.uid, contexts)
+        self.assertIn(second.uid, contexts)
+        self.assertEqual(redraws, [second_layer.uid])
 
     def test_cross_stitch_worker_disables_context_without_shared_ownership(self):
         main_mod = importlib.import_module("stitch_studio.ui.main_window")

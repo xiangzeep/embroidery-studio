@@ -7,6 +7,7 @@ via pyembroidery (DST, PES, JEF, VP3, EXP, SVG, PNG).
 import pyembroidery
 import numpy as np
 import os
+from copy import copy
 from typing import List, Tuple, Optional, Dict
 from .project import Project, Layer, Region
 
@@ -206,8 +207,10 @@ class ExportEngine:
         for x, y, command in pattern.stitches:
             point = (float(x), float(y))
             if (int(command) & 0xFF) == pyembroidery.STITCH:
-                if previous is not None:
-                    points.append(previous)
+                # DST readers commonly omit a zero-length initial jump. The
+                # first stitch still starts at the machine origin, so include
+                # it when no explicit prior position survived decoding.
+                points.append((0.0, 0.0) if previous is None else previous)
                 points.append(point)
             previous = point
         if not points:
@@ -233,23 +236,12 @@ class ExportEngine:
             if region.visible
         ):
             raise ValueError("Layer has no stitches to export")
-        pattern = pyembroidery.EmbPattern()
-
-        thread = self._thread_for_layer(layer, 0)
-        pattern.add_thread(thread)
-
-        last_x, last_y = None, None
-        for region in layer.regions:
-            if not region.visible:
-                continue
-            paths = self._region_paths(region)
-            for path in self._order_region_paths(region, paths, last_x, last_y):
-                last_x, last_y = self._write_path(pattern, path, last_x, last_y)
-
-        pattern.add_stitch_absolute(pyembroidery.END, 0, 0)
-
-        write_settings = settings or {}
-        pyembroidery.write(pattern, filepath, write_settings)
+        project = Project()
+        project.name = layer.name
+        selected_layer = copy(layer)
+        selected_layer.visible = True
+        project.layers = [selected_layer]
+        return self.export(project, filepath, settings)
 
     def _safe_design_name(self, name: str) -> str:
         """Embroidery headers are safest with short ASCII design names."""

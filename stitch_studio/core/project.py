@@ -185,6 +185,8 @@ class Region:
             # Store mask as RLE-encoded base64
             d['mask_rle'] = _rle_encode(self.mask)
             d['mask_shape'] = list(self.mask.shape)
+        if self.polygon is not None and not self.polygon.is_empty:
+            d['polygon_wkb'] = self.polygon.wkb_hex
         return d
 
     @classmethod
@@ -193,6 +195,7 @@ class Region:
         ss = StitchSettings.from_dict(d.pop('stitch_settings', {}))
         mask_rle = d.pop('mask_rle', None)
         mask_shape = d.pop('mask_shape', None)
+        polygon_wkb = d.pop('polygon_wkb', None)
         design_color_rgb = d.get('design_color_rgb')
         r = cls(
             uid=d.get('uid', ''),
@@ -210,6 +213,18 @@ class Region:
         )
         if mask_rle and mask_shape:
             r.mask = _rle_decode(mask_rle, tuple(mask_shape))
+        if polygon_wkb:
+            try:
+                from shapely import wkb
+                r.polygon = wkb.loads(polygon_wkb, hex=True)
+            except Exception:
+                r.polygon = None
+        if r.polygon is None and r.mask is not None:
+            # Projects saved before polygon persistence still need editable
+            # source geometry. A valid stored mask is also the safest recovery
+            # path for a partially corrupted polygon payload.
+            from .geometry_engine import GeometryEngine
+            r.polygon = GeometryEngine.reconstruct_region_polygon(r.mask)
         return r
 
 
