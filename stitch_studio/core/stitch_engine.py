@@ -12,6 +12,7 @@ from shapely.geometry import Polygon, LineString, MultiLineString, Point
 from shapely.affinity import rotate as shapely_rotate
 from shapely.ops import unary_union
 
+from .contour_geometry import adaptive_closed_contour
 from .project import Region, StitchSettings
 
 
@@ -767,6 +768,18 @@ class StitchEngine:
 
         return paths
 
+    @staticmethod
+    def _resolved_run_corner_mode(settings: StitchSettings) -> str:
+        """Resolve modern corner settings without changing legacy projects."""
+        mode = getattr(settings, "run_corner_mode", "legacy")
+        if mode == "legacy":
+            return (
+                "preserve"
+                if getattr(settings, "run_preserve_corners", False)
+                else "smooth"
+            )
+        return mode if mode in ("smooth", "preserve", "adaptive") else "smooth"
+
     def _generate_closed_contour_run(
         self,
         mask: np.ndarray,
@@ -788,9 +801,8 @@ class StitchEngine:
         if not contours:
             return []
 
-        preserve_corners = bool(
-            getattr(settings, "run_preserve_corners", False)
-        )
+        corner_mode = self._resolved_run_corner_mode(settings)
+        preserve_corners = corner_mode == "preserve"
         points = []
         if preserve_corners:
             from skimage.morphology import thin
@@ -817,7 +829,9 @@ class StitchEngine:
             1.0,
             settings.stitch_length_mm * self.px_per_mm,
         )
-        if preserve_corners:
+        if corner_mode == "adaptive":
+            points = adaptive_closed_contour(points, stitch_length)
+        elif preserve_corners:
             points = self._resample_polyline_preserving_vertices(
                 points,
                 stitch_length,

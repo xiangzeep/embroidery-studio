@@ -622,6 +622,125 @@ class ExportPathTests(unittest.TestCase):
             high_frequency_turn_energy(sharp_path) * 0.72,
         )
 
+    def test_adaptive_closed_run_smooths_rounded_eye_more_than_preserve(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((80, 80), dtype=np.uint8)
+        cv2.ellipse(mask, (40, 40), (18, 25), 0, 0, 360, 255, 3)
+        preserve = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.55,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="preserve",
+        )
+        adaptive = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.55,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="adaptive",
+        )
+
+        preserve_path = engine._generate_closed_contour_run(mask, preserve)[0]
+        adaptive_path = engine._generate_closed_contour_run(mask, adaptive)[0]
+
+        def high_frequency_turn_energy(path):
+            points = np.asarray(path, dtype=np.float64)
+            vectors = np.diff(points, axis=0)
+            angles = np.unwrap(np.arctan2(vectors[:, 1], vectors[:, 0]))
+            turns = np.diff(angles)
+            return float(np.sum(np.abs(np.diff(turns))))
+
+        self.assertEqual(adaptive_path[0], adaptive_path[-1])
+        self.assertLess(
+            high_frequency_turn_energy(adaptive_path),
+            high_frequency_turn_energy(preserve_path) * 0.72,
+        )
+
+    def test_adaptive_closed_run_keeps_mouth_tips_without_chords_or_zero_edges(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((48, 64), dtype=np.uint8)
+        mouth = np.array(
+            [
+                [6, 28], [10, 18], [18, 11], [28, 8], [38, 11], [46, 18],
+                [56, 28], [46, 25], [38, 23], [28, 22], [18, 23], [10, 25],
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, [mouth], 255)
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.5,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="adaptive",
+            run_passes=1,
+        )
+
+        path = engine._generate_closed_contour_run(mask, settings)[0]
+        left_tip = np.asarray((6.0, 28.0))
+        right_tip = np.asarray((56.0, 28.0))
+        points = np.asarray(path, dtype=np.float64)
+
+        self.assertEqual(path[0], path[-1])
+        self.assertLess(np.min(np.linalg.norm(points - left_tip, axis=1)), 1.5)
+        self.assertLess(np.min(np.linalg.norm(points - right_tip, axis=1)), 1.5)
+        distances = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        self.assertTrue(np.all(distances > 1e-6), distances)
+        self.assertFalse(
+            any(
+                (
+                    np.linalg.norm(start - left_tip) < 1.5
+                    and np.linalg.norm(end - right_tip) < 1.5
+                )
+                or (
+                    np.linalg.norm(start - right_tip) < 1.5
+                    and np.linalg.norm(end - left_tip) < 1.5
+                )
+                for start, end in zip(points, points[1:])
+            )
+        )
+
+    def test_adaptive_closed_run_keeps_reinforced_pass_traversal(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((48, 64), dtype=np.uint8)
+        cv2.ellipse(mask, (32, 24), (18, 9), 0, 0, 360, 255, 3)
+        base_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.5,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="adaptive",
+            run_passes=1,
+        )
+        reinforced_settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.5,
+            underlay=False,
+            run_trace_contour=True,
+            run_corner_mode="adaptive",
+            run_passes=3,
+        )
+
+        base = engine._generate_closed_contour_run(mask, base_settings)[0]
+        reinforced = engine._generate_closed_contour_run(mask, reinforced_settings)[0]
+
+        self.assertEqual(reinforced[: len(base)], base)
+        self.assertEqual(
+            reinforced[len(base) : len(base) * 2 - 1],
+            list(reversed(base))[1:],
+        )
+        self.assertEqual(reinforced[len(base) * 2 - 1 :], base[1:])
+
     def test_short_skeleton_spur_is_pruned_from_open_detail(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
 
