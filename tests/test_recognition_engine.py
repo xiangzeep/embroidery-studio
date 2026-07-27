@@ -38,6 +38,21 @@ def _polyline_turn_angles(path):
     return np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
 
 
+def _mask_boundary_turn_p90(mask):
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+    )
+    if not contours:
+        return 0.0
+    contour = max(contours, key=lambda item: cv2.arcLength(item, True))[:, 0, :]
+    if len(contour) < 4:
+        return 0.0
+    contour = np.vstack((contour.astype(np.float64), contour[0].astype(np.float64)))
+    return float(np.percentile(_polyline_turn_angles(contour), 90))
+
+
 def synthetic_face_fixture(scale=1):
     """Return the deterministic Task 5 face and color-aware semantic truth."""
     blue_rgb = (60, 130, 210)
@@ -1195,6 +1210,53 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertFalse(np.any(outline_groups[0][25:36, 34:43]))
         self.assertFalse(np.any(outline_groups[1][25:36, 60:69]))
         self.assertFalse(np.any(outline_groups[2][53:64, 44:61]))
+
+    def test_subject_feature_restore_vectorizes_pointed_mouth_without_pixel_stair_jitter(self):
+        height, width = 96, 128
+        coral = (250, 140, 119)
+        black = (8, 8, 8)
+        white = (252, 252, 252)
+        source = np.full((height, width, 3), coral, dtype=np.uint8)
+        subject = np.ones((height, width), dtype=bool)
+        palette = np.asarray([coral, white, black], dtype=np.uint8)
+        thread_map = np.zeros((height, width), dtype=np.int32)
+
+        for center in ((48, 32), (76, 32)):
+            cv2.ellipse(source, center, (11, 16), 0, 0, 360, white, -1)
+            cv2.ellipse(thread_map, center, (11, 16), 0, 0, 360, 1, -1)
+        mouth_points = np.asarray(
+            [(38, 50), (64, 68), (90, 50), (82, 76), (64, 82), (46, 76)],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(source, [mouth_points], black)
+        cv2.fillPoly(thread_map, [mouth_points], 2)
+        cv2.line(source, (52, 84), (76, 84), black, 1)
+
+        restored, outlines, outline_groups = RecognitionEngine._restore_subject_features(
+            thread_map,
+            source,
+            subject,
+            palette,
+        )
+
+        mouth_group = max(outline_groups, key=np.count_nonzero)
+        self.assertTrue(np.any(mouth_group[48:53, 36:42]))
+        self.assertTrue(np.any(mouth_group[48:53, 86:93]))
+        self.assertTrue(np.any(restored[83:86, 51:78] == 2))
+        contours, _ = cv2.findContours(
+            mouth_group.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_NONE,
+        )
+        contour = max(contours, key=lambda item: cv2.arcLength(item, True))
+        approx = cv2.approxPolyDP(
+            contour,
+            max(1.0, 0.025 * cv2.arcLength(contour, True)),
+            True,
+        )
+        self.assertLessEqual(len(approx), 18)
+        self.assertLessEqual(_mask_boundary_turn_p90(mouth_group), 45.1)
+        self.assertLessEqual(int(np.count_nonzero(mouth_group)), 180)
 
     def test_subject_feature_restore_preserves_pupil_highlights(self):
         height, width = 72, 96

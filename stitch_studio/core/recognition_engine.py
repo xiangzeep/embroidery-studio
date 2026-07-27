@@ -276,20 +276,80 @@ class RecognitionEngine:
         eye_components = []
         eye_masks = []
 
-        def outer_border(component_mask: np.ndarray) -> np.ndarray:
+        def vector_border(
+            component_mask: np.ndarray,
+            *,
+            preserve_tips: bool = False,
+        ) -> np.ndarray:
             contours, _ = cv2.findContours(
                 component_mask.astype(np.uint8),
                 cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE,
+                cv2.CHAIN_APPROX_NONE,
             )
-            filled = np.zeros(restored.shape, dtype=np.uint8)
-            if contours:
-                cv2.drawContours(filled, contours, -1, 1, thickness=-1)
-            return cv2.morphologyEx(
-                filled,
-                cv2.MORPH_GRADIENT,
-                kernel,
-            ).astype(bool)
+            outline = np.zeros(restored.shape, dtype=np.uint8)
+            for contour in contours:
+                area = float(cv2.contourArea(contour))
+                perimeter = float(cv2.arcLength(contour, True))
+                if area < 2.0 or perimeter <= 1.0:
+                    continue
+                if preserve_tips:
+                    epsilon = max(0.8, perimeter * 0.012)
+                    approx = cv2.approxPolyDP(contour, epsilon, True)
+                    if len(approx) >= 3:
+                        cv2.polylines(
+                            outline,
+                            [approx],
+                            True,
+                            255,
+                            thickness=1,
+                            lineType=cv2.LINE_8,
+                        )
+                        continue
+                if len(contour) >= 5 and not preserve_tips:
+                    try:
+                        cv2.ellipse(
+                            outline,
+                            cv2.fitEllipse(contour),
+                            255,
+                            thickness=1,
+                            lineType=cv2.LINE_8,
+                        )
+                        continue
+                    except cv2.error:
+                        pass
+                epsilon = max(0.6, perimeter * 0.01)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                cv2.polylines(
+                    outline,
+                    [approx],
+                    True,
+                    255,
+                    thickness=1,
+                    lineType=cv2.LINE_8,
+                )
+            return outline > 0
+
+        def thin_line_endpoint_support(component_mask: np.ndarray) -> np.ndarray:
+            coords_yx = np.argwhere(component_mask)
+            if len(coords_yx) < 3:
+                return np.zeros(restored.shape, dtype=bool)
+            coords_xy = coords_yx[:, ::-1].astype(np.float32)
+            centered = coords_xy - np.mean(coords_xy, axis=0)
+            try:
+                _, _, vh = np.linalg.svd(centered, full_matrices=False)
+            except np.linalg.LinAlgError:
+                return np.zeros(restored.shape, dtype=bool)
+            axis = vh[0]
+            projections = centered @ axis
+            endpoints = (
+                coords_xy[int(np.argmin(projections))],
+                coords_xy[int(np.argmax(projections))],
+            )
+            support = np.zeros(restored.shape, dtype=np.uint8)
+            for endpoint in endpoints:
+                point = tuple(np.rint(endpoint).astype(np.int32).tolist())
+                cv2.circle(support, point, 1, 1, thickness=-1)
+            return support.astype(bool) & subject
 
         subject_envelope = np.zeros(restored.shape, dtype=np.uint8)
         subject_contours, _ = cv2.findContours(
@@ -332,7 +392,7 @@ class RecognitionEngine:
                 aspect = width / max(1, height)
                 if not 0.35 <= aspect <= 2.4:
                     continue
-                border = outer_border(component)
+                border = vector_border(component)
                 restored[border] = darkest
                 outlines |= border
                 if np.any(border):
@@ -364,6 +424,10 @@ class RecognitionEngine:
             )
             if area <= int(image_area * 0.015) and median_width <= 4.5:
                 restored[component] = darkest
+                long_axis = max(width, height)
+                short_axis = max(1, min(width, height))
+                if long_axis / short_axis >= 1.4:
+                    restored[thin_line_endpoint_support(component)] = darkest
 
         if highlight_thread is not None and eye_masks:
             source_luminance = (
@@ -446,7 +510,7 @@ class RecognitionEngine:
             if mouth_candidates:
                 component_id = max(mouth_candidates, key=lambda item: item[5])[0]
                 mouth = labels == component_id
-                border = outer_border(mouth)
+                border = vector_border(mouth, preserve_tips=True)
                 restored[border] = darkest
                 outlines |= border
                 if np.any(border):
