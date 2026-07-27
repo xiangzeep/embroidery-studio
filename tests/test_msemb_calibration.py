@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from stitch_studio.calibration.msemb_dataset import MSEmbDataset
+from stitch_studio.calibration.msemb_metrics import measure_msemb_fidelity
 
 
 def write_rgb(path: Path, color=(10, 20, 30), size=(256, 256)):
@@ -71,3 +72,40 @@ class MSEmbDatasetTests(unittest.TestCase):
             self.assertEqual(len(first["test"]), 2)
             all_ids = set(first["train"]) | set(first["val"]) | set(first["test"])
             self.assertEqual(all_ids, {f"{index:05d}" for index in range(10)})
+
+
+class MSEmbMetricTests(unittest.TestCase):
+    def test_identical_images_score_near_perfect(self):
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        image[:, 16:] = (240, 20, 20)
+        scores = measure_msemb_fidelity(image, image.copy())
+
+        self.assertGreaterEqual(scores.color_similarity, 0.99)
+        self.assertGreaterEqual(scores.edge_recall, 0.99)
+        self.assertGreaterEqual(scores.edge_precision, 0.99)
+        self.assertGreaterEqual(scores.texture_similarity, 0.99)
+        self.assertLessEqual(scores.noise_penalty, 0.01)
+        self.assertGreaterEqual(scores.overall, 0.98)
+
+    def test_missing_edges_and_wrong_colors_reduce_score(self):
+        target = np.zeros((64, 64, 3), dtype=np.uint8)
+        target[8:57, 8:57] = (240, 40, 40)
+        target[31:34, 8:57] = (10, 10, 10)
+        generated = np.full_like(target, (30, 120, 220))
+
+        scores = measure_msemb_fidelity(generated, target)
+
+        self.assertLess(scores.color_similarity, 0.80)
+        self.assertLess(scores.edge_recall, 0.70)
+        self.assertLess(scores.overall, 0.80)
+
+    def test_isolated_specks_increase_noise_penalty(self):
+        target = np.zeros((48, 48, 3), dtype=np.uint8)
+        generated = target.copy()
+        for index in range(12):
+            generated[2 + index * 3, 3 + index * 3] = (255, 255, 255)
+
+        scores = measure_msemb_fidelity(generated, target)
+
+        self.assertGreater(scores.noise_penalty, 0.0)
+        self.assertLess(scores.overall, 0.98)
