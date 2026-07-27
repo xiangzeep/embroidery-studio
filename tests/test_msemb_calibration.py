@@ -7,6 +7,7 @@ from PIL import Image
 
 from stitch_studio.calibration.msemb_dataset import MSEmbDataset
 from stitch_studio.calibration.msemb_metrics import measure_msemb_fidelity
+from stitch_studio.tools.msemb_calibrate import run_calibration
 
 
 def write_rgb(path: Path, color=(10, 20, 30), size=(256, 256)):
@@ -109,3 +110,24 @@ class MSEmbMetricTests(unittest.TestCase):
 
         self.assertGreater(scores.noise_penalty, 0.0)
         self.assertLess(scores.overall, 0.98)
+
+
+class MSEmbCalibrationRunnerTests(unittest.TestCase):
+    def test_runner_writes_report_without_modifying_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            output = Path(directory) / "report"
+            for index in range(3):
+                pair_id = f"{index:05d}"
+                write_rgb(root / "trainX_c" / f"c_{pair_id}.png", (20 + index, 40, 60))
+                write_rgb(root / "trainX_e" / f"e_{pair_id}.png", (20 + index, 40, 60))
+
+            report = run_calibration(root, output, limit=2, seed=1)
+
+            report_path = output / "msemb-calibration-report.json"
+            self.assertTrue(report_path.exists())
+            self.assertEqual(report["evaluated_pairs"], 2)
+            self.assertEqual(report["audit"]["total_pairs"], 3)
+            self.assertIn("identity_preview", report["profiles"])
+            self.assertIn("overall", report["profiles"]["identity_preview"]["average"])
+            self.assertFalse((root / "msemb-calibration-report.json").exists())
