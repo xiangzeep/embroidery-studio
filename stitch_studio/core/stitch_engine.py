@@ -972,7 +972,7 @@ class StitchEngine:
                 closed=True,
             )
         else:
-            points = self._chaikin_smooth(points, closed=True, iterations=2)
+            points = self._chaikin_smooth(points, closed=True, iterations=3)
             points = self._resample_run_path(
                 points,
                 stitch_length,

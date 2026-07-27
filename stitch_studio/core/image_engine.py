@@ -1517,7 +1517,7 @@ class ImageEngine:
                     thread_match_delta_e=(max(deltas) if deltas else None),
                     is_detail_region=is_detail,
                     stitch_settings=(
-                        ImageEngine._feature_outline_stitch_settings()
+                        ImageEngine._feature_outline_stitch_settings_for_mask(region_mask)
                         if mode == "run" and is_feature_part
                         else mode_settings[mode]
                     ),
@@ -1810,6 +1810,75 @@ class ImageEngine:
             run_trace_contour=True,
             run_corner_mode="adaptive",
         )
+
+    @staticmethod
+    def _feature_outline_stitch_settings_for_mask(mask: np.ndarray) -> StitchSettings:
+        """Use smooth closed runs for round features and adaptive runs for pointed art."""
+        settings = ImageEngine._feature_outline_stitch_settings()
+        binary = (np.asarray(mask) > 0).astype(np.uint8)
+        if not np.any(binary):
+            return settings
+
+        contours, _ = cv2.findContours(
+            binary,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_NONE,
+        )
+        if not contours:
+            return settings
+        contour = max(contours, key=lambda item: cv2.arcLength(item, True))
+        perimeter = float(cv2.arcLength(contour, True))
+        area = float(cv2.contourArea(contour))
+        if perimeter <= 1.0 or area <= 1.0:
+            return settings
+
+        x, y, width, height = cv2.boundingRect(contour)
+        aspect = width / max(1, height)
+        circularity = 4.0 * np.pi * area / max(1.0, perimeter * perimeter)
+        extent = area / max(1.0, float(width * height))
+        epsilon = max(1.0, 0.035 * perimeter)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        has_supported_tip = ImageEngine._contour_has_supported_tip(
+            approx[:, 0, :],
+            min_edge=max(3.0, min(width, height) * 0.12),
+        )
+        is_round_feature = (
+            not has_supported_tip
+            and 0.40 <= aspect <= 2.25
+            and circularity >= 0.42
+            and extent >= 0.28
+        )
+        if is_round_feature:
+            settings.run_corner_mode = "smooth"
+            settings.run_passes = 1
+            settings.stitch_length_mm = 0.65
+            settings.stitch_length_min_mm = 0.45
+            settings.stitch_length_max_mm = 1.0
+        return settings
+
+    @staticmethod
+    def _contour_has_supported_tip(points: np.ndarray, min_edge: float) -> bool:
+        pts = np.asarray(points, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 4:
+            return False
+        for index, current in enumerate(pts):
+            previous = pts[index - 1]
+            following = pts[(index + 1) % len(pts)]
+            incoming = previous - current
+            outgoing = following - current
+            left = float(np.linalg.norm(incoming))
+            right = float(np.linalg.norm(outgoing))
+            if min(left, right) < min_edge:
+                continue
+            cosine = np.clip(
+                np.dot(incoming, outgoing) / max(1e-6, left * right),
+                -1.0,
+                1.0,
+            )
+            angle = float(np.degrees(np.arccos(cosine)))
+            if angle <= 72.0:
+                return True
+        return False
 
     @staticmethod
     def _satin_outline_stitch_settings() -> StitchSettings:

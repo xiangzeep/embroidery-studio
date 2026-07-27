@@ -22,6 +22,22 @@ from stitch_studio.core.project import QuantizationSettings
 from stitch_studio.core.thread_db import ThreadColor
 
 
+def _polyline_turn_angles(path):
+    points = np.asarray(path, dtype=np.float64)
+    if len(points) < 4:
+        return np.zeros(1, dtype=np.float64)
+    vectors = np.diff(points, axis=0)
+    lengths = np.linalg.norm(vectors, axis=1)
+    valid = lengths > 1e-6
+    vectors = vectors[valid]
+    lengths = lengths[valid]
+    if len(vectors) < 2:
+        return np.zeros(1, dtype=np.float64)
+    unit = vectors / lengths[:, None]
+    dots = np.sum(unit[:-1] * unit[1:], axis=1)
+    return np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
+
+
 def synthetic_face_fixture(scale=1):
     """Return the deterministic Task 5 face and color-aware semantic truth."""
     blue_rgb = (60, 130, 210)
@@ -1716,7 +1732,7 @@ class ThreadSuggestionTests(unittest.TestCase):
             for region in black.regions
             if (
                 region.stitch_settings.fill_mode == "run"
-                and region.stitch_settings.run_passes == 3
+                and region.stitch_settings.run_trace_contour
             )
         ]
         self.assertEqual(len(feature_regions), 3)
@@ -1726,7 +1742,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
         self.assertIs(layers[0], black)
 
-    def test_feature_outline_profile_uses_adaptive_mode_for_each_local_group(self):
+    def test_feature_outline_profile_smooths_round_eyes_and_preserves_pointed_mouth(self):
         design_map = np.zeros((88, 112), dtype=np.int32)
         eye = np.zeros_like(design_map, dtype=np.uint8)
         mouth = np.zeros_like(design_map, dtype=np.uint8)
@@ -1781,9 +1797,9 @@ class ThreadSuggestionTests(unittest.TestCase):
             if np.count_nonzero((region.mask > 0) & (mouth > 0))
         )
 
-        self.assertEqual(eye_region.stitch_settings.run_corner_mode, "adaptive")
+        self.assertEqual(eye_region.stitch_settings.run_corner_mode, "smooth")
         self.assertEqual(mouth_region.stitch_settings.run_corner_mode, "adaptive")
-        self.assertEqual(eye_region.stitch_settings.run_passes, 3)
+        self.assertEqual(eye_region.stitch_settings.run_passes, 1)
         self.assertEqual(mouth_region.stitch_settings.run_passes, 3)
 
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -1803,8 +1819,26 @@ class ThreadSuggestionTests(unittest.TestCase):
                     float(np.max(distances)),
                     3.0 * region.stitch_settings.stitch_length_mm * 10.0,
                 )
-                self.assertGreaterEqual(len(path), 50)
+                self.assertGreaterEqual(len(path), 45)
                 self.assertLessEqual(len(path), 500)
+
+        eye_path = stitch_engine.generate_region_paths(eye_region)[0]
+        eye_turns = _polyline_turn_angles(eye_path)
+        self.assertLessEqual(float(np.percentile(eye_turns, 90)), 22.0)
+
+        mouth_path = stitch_engine.generate_region_paths(mouth_region)[0]
+        unit_scale = 10.0 / stitch_engine.px_per_mm
+        left_tip = np.array([60.0 * unit_scale, 25.0 * unit_scale])
+        right_tip = np.array([100.0 * unit_scale, 33.0 * unit_scale])
+        mouth_points = np.asarray(mouth_path, dtype=np.float64)
+        self.assertLessEqual(
+            float(np.min(np.linalg.norm(mouth_points - left_tip, axis=1))),
+            6.0,
+        )
+        self.assertLessEqual(
+            float(np.min(np.linalg.norm(mouth_points - right_tip, axis=1))),
+            6.0,
+        )
 
     def test_feature_run_owns_same_color_antialias_halo(self):
         design_map = np.zeros((48, 48), dtype=np.int32)
@@ -1844,7 +1878,7 @@ class ThreadSuggestionTests(unittest.TestCase):
             for region in black.regions
             if (
                 region.stitch_settings.fill_mode == "run"
-                and region.stitch_settings.run_passes == 3
+                and region.stitch_settings.run_trace_contour
             )
         ]
         self.assertEqual(len(feature_regions), 1)
@@ -1897,14 +1931,14 @@ class ThreadSuggestionTests(unittest.TestCase):
         feature_regions = [
             region
             for region in black.regions
-            if region.stitch_settings.run_passes == 3
+            if region.stitch_settings.run_trace_contour
         ]
         normal_runs = [
             region
             for region in black.regions
             if (
                 region.stitch_settings.fill_mode == "run"
-                and region.stitch_settings.run_passes == 1
+                and not region.stitch_settings.run_trace_contour
             )
         ]
         self.assertEqual(len(feature_regions), 1)
@@ -2089,7 +2123,7 @@ class ThreadSuggestionTests(unittest.TestCase):
             for region in black.regions
             if (
                 region.stitch_settings.fill_mode == "run"
-                and region.stitch_settings.run_passes == 3
+                and region.stitch_settings.run_trace_contour
             )
         ]
         self.assertEqual(len(satin_masks), 1)
