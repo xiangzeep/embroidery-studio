@@ -49,6 +49,8 @@ class RecognitionResult:
 class RecognitionEngine:
     """Extract design colors without collapsing them into the thread library."""
 
+    _SUBJECT_GRABCUT_MAX_SIDE = 192
+    _SUBJECT_GRABCUT_ITERATIONS = 2
     _AUTO_BUDGETS = (24, 32, 48, 64, 96, 128)
     _EDGE_SAMPLE_WEIGHT = 4.0
 
@@ -712,7 +714,10 @@ class RecognitionEngine:
             return np.ones(rgb.shape[:2], dtype=bool)
 
         height, width = rgb.shape[:2]
-        scale = min(1.0, 512.0 / max(height, width))
+        scale = min(
+            1.0,
+            RecognitionEngine._SUBJECT_GRABCUT_MAX_SIDE / max(height, width),
+        )
         if scale < 1.0:
             work = cv2.resize(
                 rgb[:, :, :3],
@@ -754,7 +759,7 @@ class RecognitionEngine:
                 None,
                 background_model,
                 foreground_model,
-                5,
+                RecognitionEngine._SUBJECT_GRABCUT_ITERATIONS,
                 cv2.GC_INIT_WITH_MASK,
             )
             subject = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.uint8)

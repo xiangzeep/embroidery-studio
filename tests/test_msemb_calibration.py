@@ -130,4 +130,55 @@ class MSEmbCalibrationRunnerTests(unittest.TestCase):
             self.assertEqual(report["audit"]["total_pairs"], 3)
             self.assertIn("identity_preview", report["profiles"])
             self.assertIn("overall", report["profiles"]["identity_preview"]["average"])
+            self.assertEqual(report["profiles"]["product_photo_stitch"]["samples"], 2)
+            self.assertEqual(report["profiles"]["product_cross_stitch"]["samples"], 2)
+            self.assertEqual(report["pipeline_failures"], [])
             self.assertFalse((root / "msemb-calibration-report.json").exists())
+
+    def test_runner_evaluates_actual_photo_and_cross_product_pipelines(self):
+        class FakePipelineRunner:
+            def __init__(self):
+                self.calls = []
+
+            def evaluate(self, source, target, generation_mode):
+                self.calls.append(generation_mode)
+                return {
+                    "preview": source.copy(),
+                    "scores": measure_msemb_fidelity(source, target).as_dict(),
+                    "timings": {
+                        "recognition_seconds": 0.01,
+                        "layer_seconds": 0.02,
+                        "stitch_seconds": 0.03,
+                    },
+                    "layer_count": 3,
+                    "region_count": 5,
+                    "semantic_part_count": 4,
+                    "stitch_count": 120,
+                    "jump_count": 6,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dataset"
+            output = Path(directory) / "report"
+            write_rgb(root / "trainX_c" / "c_00001.png", (60, 120, 180))
+            write_rgb(root / "trainX_e" / "e_00001.png", (60, 120, 180))
+            runner = FakePipelineRunner()
+
+            report = run_calibration(
+                root,
+                output,
+                limit=1,
+                pipeline_runner=runner,
+                generation_modes=("photo_stitch", "cross_stitch"),
+            )
+
+            self.assertEqual(runner.calls, ["photo_stitch", "cross_stitch"])
+            self.assertIn("product_photo_stitch", report["profiles"])
+            self.assertIn("product_cross_stitch", report["profiles"])
+            self.assertEqual(
+                report["profiles"]["product_photo_stitch"]["diagnostics"][
+                    "average_stitch_count"
+                ],
+                120.0,
+            )
+            self.assertEqual(report["pipeline_failures"], [])

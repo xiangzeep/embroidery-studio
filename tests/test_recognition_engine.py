@@ -2306,6 +2306,30 @@ class PatrickRegressionTests(unittest.TestCase):
         "codex-clipboard-8db3b55f-c71c-497e-9c3e-45a029756fe6.png"
     )
 
+    def test_primary_subject_detection_uses_a_bounded_grabcut_budget(self):
+        image = np.full((720, 1280, 3), (35, 105, 180), dtype=np.uint8)
+        image[90:690, 430:850] = (245, 120, 95)
+        observed = {}
+
+        def capture_grabcut(
+            work,
+            mask,
+            rect,
+            background_model,
+            foreground_model,
+            iterations,
+            mode,
+        ):
+            observed["shape"] = work.shape[:2]
+            observed["iterations"] = iterations
+
+        with mock.patch.object(cv2, "grabCut", side_effect=capture_grabcut):
+            subject = RecognitionEngine.detect_primary_subject(image)
+
+        self.assertEqual(subject.shape, image.shape[:2])
+        self.assertLessEqual(max(observed["shape"]), 192)
+        self.assertLessEqual(observed["iterations"], 2)
+
     def test_primary_subject_mask_prefers_center_character(self):
         if not os.path.exists(self.SOURCE_PATH):
             self.skipTest("Supplied Patrick regression image is not available")
