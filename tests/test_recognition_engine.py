@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 import hashlib
 import importlib
 import os
@@ -154,6 +155,7 @@ def build_synthetic_face_pipeline(
     recognition = RecognitionEngine.recognize(image, threads, settings)
     overlay_builder_mock_calls = 0
     if full_cross_baseline:
+        recognition = replace(recognition, semantic_parts=())
         with mock.patch.object(
             ImageEngine,
             "_append_cross_stitch_detail_overlays",

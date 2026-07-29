@@ -55,6 +55,9 @@ class StitchSettings:
     randomize_length: float = 0.0  # 0-1, amount of length randomization
     run_passes: int = 1  # odd pass counts retrace a run without changing its endpoint
     run_trace_contour: bool = False  # trace one closed contour instead of a branched skeleton
+    run_centerline_contour: bool = False  # trace the center of a closed stroke mask
+    run_preserve_short_branches: bool = False  # retain short semantic tips and marks
+    run_endpoint_extension_mm: float = 0.0  # recover pointed antialias tips on open runs
     run_preserve_corners: bool = False  # retain high-curvature vertices in closed runs
     run_corner_mode: str = "legacy"  # legacy, smooth, preserve, or adaptive
     flow_strength: float = 1.0  # how much flow field influences direction
@@ -94,6 +97,10 @@ class Region:
     thread_match_delta_e: Optional[float] = None
     is_detail_region: bool = False
     is_cross_stitch_overlay: bool = False
+    semantic_part_id: Optional[str] = None
+    semantic_kind: Optional[str] = None
+    semantic_role: Optional[str] = None
+    semantic_parent_id: Optional[str] = None
     # Generated stitch data (populated by engine)
     stitch_points: Optional[List[Tuple[float, float]]] = None
     stitch_paths: Optional[List[List[Tuple[float, float]]]] = None
@@ -180,6 +187,10 @@ class Region:
             'thread_match_delta_e': self.thread_match_delta_e,
             'is_detail_region': self.is_detail_region,
             'is_cross_stitch_overlay': self.is_cross_stitch_overlay,
+            'semantic_part_id': self.semantic_part_id,
+            'semantic_kind': self.semantic_kind,
+            'semantic_role': self.semantic_role,
+            'semantic_parent_id': self.semantic_parent_id,
         }
         if self.mask is not None:
             # Store mask as RLE-encoded base64
@@ -210,6 +221,10 @@ class Region:
             thread_match_delta_e=d.get('thread_match_delta_e'),
             is_detail_region=d.get('is_detail_region', False),
             is_cross_stitch_overlay=d.get('is_cross_stitch_overlay', False),
+            semantic_part_id=d.get('semantic_part_id'),
+            semantic_kind=d.get('semantic_kind'),
+            semantic_role=d.get('semantic_role'),
+            semantic_parent_id=d.get('semantic_parent_id'),
         )
         if mask_rle and mask_shape:
             r.mask = _rle_decode(mask_rle, tuple(mask_shape))

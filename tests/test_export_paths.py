@@ -1110,6 +1110,32 @@ class ExportPathTests(unittest.TestCase):
             high_frequency_turn_energy(preserve_path) * 0.72,
         )
 
+    def test_semantic_closed_run_uses_one_centerline_instead_of_outer_mask_edge(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((96, 96), dtype=np.uint8)
+        cv2.circle(mask, (48, 48), 28, 255, 7)
+        settings = project_mod.StitchSettings(
+            fill_mode="run",
+            stitch_length_mm=0.55,
+            underlay=False,
+            run_trace_contour=True,
+            run_centerline_contour=True,
+            run_corner_mode="adaptive",
+            run_passes=1,
+        )
+
+        paths = engine._generate_closed_contour_run(mask, settings)
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0][0], paths[0][-1])
+        points = np.asarray(paths[0][:-1], dtype=np.float64)
+        radii = np.linalg.norm(points - np.asarray((48.0, 48.0)), axis=1)
+        self.assertAlmostEqual(float(np.mean(radii)), 28.0, delta=1.25)
+        self.assertLess(float(np.std(radii)), 0.9)
+
     def test_legacy_corner_mode_matches_explicit_smooth_and_preserve_profiles(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")

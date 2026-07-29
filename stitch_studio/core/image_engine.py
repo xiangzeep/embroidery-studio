@@ -16,6 +16,7 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from .project import ImageSettings, QuantizationSettings, Layer, Region, StitchSettings
 from .thread_db import ThreadColor
 from .geometry_engine import GeometryEngine
+from .semantic_parts import SemanticPartKind
 
 
 class ImageEngine:
@@ -668,19 +669,33 @@ class ImageEngine:
                 )
             layer.add_region(region)
 
+        semantic_parts = tuple(getattr(recognition, "semantic_parts", ()))
         if generation_mode == "cross_stitch":
-            ImageEngine._append_cross_stitch_detail_overlays(
-                layer_map,
-                recognition,
-                source_image,
-            )
+            if semantic_parts:
+                ImageEngine._append_semantic_parts(
+                    layer_map,
+                    semantic_parts,
+                    physical_threads,
+                    generation_mode,
+                    foreground,
+                )
+            else:
+                ImageEngine._append_cross_stitch_detail_overlays(
+                    layer_map,
+                    recognition,
+                    source_image,
+                )
         else:
             subject_mask = getattr(recognition, "subject_mask", None)
-            feature_outline_mask = getattr(recognition, "feature_outline_mask", None)
-            feature_outline_groups = getattr(
-                recognition,
-                "feature_outline_groups",
-                (),
+            feature_outline_mask = (
+                None
+                if semantic_parts
+                else getattr(recognition, "feature_outline_mask", None)
+            )
+            feature_outline_groups = (
+                ()
+                if semantic_parts
+                else getattr(recognition, "feature_outline_groups", ())
             )
             for layer in layer_map.values():
                 ImageEngine._reclassify_photo_layer_components(
@@ -691,10 +706,201 @@ class ImageEngine:
                 )
             ImageEngine._suppress_satin_border_halos(layer_map.values())
             ImageEngine._underpaint_run_details(layer_map.values())
+            if semantic_parts:
+                ImageEngine._append_semantic_parts(
+                    layer_map,
+                    semantic_parts,
+                    physical_threads,
+                    generation_mode,
+                    foreground,
+                )
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
         for order, layer in enumerate(layers):
             layer.order = order
         return layers
+
+    @staticmethod
+    def _append_semantic_parts(
+        layer_map,
+        semantic_parts,
+        physical_threads: List[ThreadColor],
+        generation_mode: str,
+        foreground: np.ndarray,
+    ) -> None:
+        """Convert typed recognition parts into non-overlapping editable regions."""
+        image_area = int(foreground.size)
+        supported = []
+        for part in semantic_parts:
+            area = int(np.count_nonzero(part.mask))
+            if area <= 0:
+                continue
+            ratio = area / max(1, image_area)
+            if part.kind == SemanticPartKind.OPEN_LINE and ratio <= 0.08:
+                supported.append(part)
+            elif part.kind == SemanticPartKind.CLOSED_CONTOUR and ratio <= 0.12:
+                supported.append(part)
+            elif (
+                part.kind == SemanticPartKind.COMPACT_FILL
+                and generation_mode != "cross_stitch"
+                and ratio <= 0.035
+            ):
+                supported.append(part)
+            elif (
+                part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
+                and ratio <= 0.015
+            ):
+                supported.append(part)
+        supported.sort(key=lambda part: (part.z_order, part.part_id))
+
+        seen_masks = []
+        for part in supported[:96]:
+            mask = np.asarray(part.mask, dtype=bool) & foreground
+            if not np.any(mask):
+                continue
+            if part.kind != SemanticPartKind.PROTECTED_HIGHLIGHT and any(
+                existing.shape == mask.shape
+                and np.count_nonzero(existing & mask)
+                / max(1, np.count_nonzero(mask)) >= 0.92
+                for existing in seen_masks
+            ):
+                continue
+
+            thread_index = part.thread_index
+            matched_thread = (
+                physical_threads[thread_index]
+                if thread_index is not None
+                and 0 <= thread_index < len(physical_threads)
+                else None
+            )
+            key = (
+                ("thread", matched_thread.uid)
+                if matched_thread
+                else ("design", tuple(part.source_color_rgb))
+            )
+            layer = layer_map.get(key)
+            if layer is None:
+                physical_rgb = (
+                    tuple(matched_thread.color_rgb)
+                    if matched_thread
+                    else tuple(part.source_color_rgb)
+                )
+                layer = Layer(
+                    name=matched_thread.name if matched_thread else part.role,
+                    thread_uid=matched_thread.uid if matched_thread else "",
+                    thread_color_rgb=physical_rgb,
+                    thread_name=matched_thread.name if matched_thread else "Design color",
+                    design_color_id=part.design_color_id,
+                    design_color_rgb=tuple(part.source_color_rgb),
+                    matched_thread_rgb=physical_rgb if matched_thread else None,
+                    is_detail_layer=True,
+                )
+                layer_map[key] = layer
+
+            ImageEngine._carve_semantic_mask_from_layer(
+                layer,
+                mask,
+                include_semantic=(
+                    part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
+                ),
+            )
+            settings = ImageEngine._semantic_stitch_settings(
+                part.kind,
+                mask,
+                generation_mode,
+            )
+            region_mask = mask.astype(np.uint8) * 255
+            region = Region(
+                name=f"{layer.name} {part.role}",
+                mask=region_mask,
+                design_color_id=part.design_color_id,
+                design_color_rgb=tuple(part.source_color_rgb),
+                is_detail_region=True,
+                is_cross_stitch_overlay=generation_mode == "cross_stitch",
+                semantic_part_id=part.part_id,
+                semantic_kind=part.kind.value,
+                semantic_role=part.role,
+                semantic_parent_id=part.parent_id,
+                stitch_settings=settings,
+            )
+            region.polygon = GeometryEngine.reconstruct_region_polygon(region_mask)
+            layer.add_region(region)
+            seen_masks.append(mask.copy())
+
+    @staticmethod
+    def _carve_semantic_mask_from_layer(
+        layer: Layer,
+        semantic_mask: np.ndarray,
+        *,
+        include_semantic: bool = False,
+    ) -> None:
+        retained = []
+        for region in layer.regions:
+            if (
+                (region.semantic_part_id is not None and not include_semantic)
+                or region.mask is None
+            ):
+                retained.append(region)
+                continue
+            mask = np.asarray(region.mask) > 0
+            if mask.shape != semantic_mask.shape:
+                retained.append(region)
+                continue
+            mask &= ~semantic_mask
+            if not np.any(mask):
+                continue
+            region.mask = mask.astype(np.uint8) * 255
+            region.polygon = GeometryEngine.reconstruct_region_polygon(region.mask)
+            retained.append(region)
+        layer.regions = retained
+
+    @staticmethod
+    def _semantic_stitch_settings(
+        kind: SemanticPartKind,
+        mask: np.ndarray,
+        generation_mode: str,
+    ) -> StitchSettings:
+        if kind == SemanticPartKind.OPEN_LINE:
+            settings = ImageEngine._running_stitch_settings()
+            settings.run_corner_mode = "adaptive"
+            settings.run_passes = 1
+            settings.run_preserve_short_branches = True
+            settings.run_endpoint_extension_mm = 0.35
+            return settings
+        if kind == SemanticPartKind.CLOSED_CONTOUR:
+            settings = ImageEngine._feature_outline_stitch_settings_for_mask(mask)
+            settings.run_centerline_contour = True
+            settings.run_corner_mode = "adaptive"
+            settings.run_passes = 1
+            return settings
+        if kind == SemanticPartKind.PROTECTED_HIGHLIGHT:
+            return StitchSettings(
+                fill_mode="scanline",
+                stitch_length_mm=0.45,
+                stitch_length_min_mm=0.2,
+                stitch_length_max_mm=0.7,
+                row_spacing_mm=0.16,
+                density=1.5,
+                underlay=False,
+                contour_count=0,
+            )
+        if generation_mode == "cross_stitch":
+            settings = ImageEngine._running_stitch_settings()
+            settings.stitch_length_mm = 0.8
+            settings.stitch_length_min_mm = 0.35
+            settings.stitch_length_max_mm = 1.2
+            settings.run_passes = 1
+            return settings
+        return StitchSettings(
+            fill_mode="scanline",
+            stitch_length_mm=1.2,
+            stitch_length_min_mm=0.5,
+            stitch_length_max_mm=1.8,
+            row_spacing_mm=0.16,
+            density=1.35,
+            underlay=False,
+            contour_count=0,
+            pull_compensation_mm=0.08,
+        )
 
     @staticmethod
     def _append_cross_stitch_detail_overlays(

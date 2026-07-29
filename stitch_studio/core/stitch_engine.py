@@ -839,10 +839,11 @@ class StitchEngine:
 
         skeleton = skeletonize(mask > 0).astype(np.uint8)
         skeleton[loop_exclusion > 0] = 0
-        skeleton = self._prune_short_skeleton_branches(
-            skeleton,
-            min_branch_px=max(1.5, 0.7 * self.px_per_mm),
-        )
+        if not getattr(settings, "run_preserve_short_branches", False):
+            skeleton = self._prune_short_skeleton_branches(
+                skeleton,
+                min_branch_px=max(1.5, 0.7 * self.px_per_mm),
+            )
         n_labels, labels = cv2.connectedComponents(skeleton, connectivity=8)
         stitch_len_px = settings.stitch_length_mm * self.px_per_mm
         min_len_px = max(1.5, 0.45 * self.px_per_mm)
@@ -886,6 +887,17 @@ class StitchEngine:
 
             if closed and resampled:
                 resampled = self._ensure_closed_path(resampled)
+            elif len(resampled) >= 2:
+                extension = max(
+                    0.0,
+                    float(getattr(settings, "run_endpoint_extension_mm", 0.0))
+                    * self.px_per_mm,
+                )
+                if extension > 0.0:
+                    resampled = self._extend_open_run_endpoints(
+                        resampled,
+                        extension,
+                    )
 
             if len(resampled) >= 2:
                 pass_count = max(1, int(getattr(settings, "run_passes", 1)))
@@ -901,6 +913,27 @@ class StitchEngine:
                 paths.append(repeated)
 
         return paths
+
+    @staticmethod
+    def _extend_open_run_endpoints(
+        path: List[Tuple[float, float]],
+        distance: float,
+    ) -> List[Tuple[float, float]]:
+        if len(path) < 2 or distance <= 0.0:
+            return list(path)
+        points = np.asarray(path, dtype=np.float64)
+        start_vector = points[1] - points[0]
+        end_vector = points[-1] - points[-2]
+        start_length = float(np.linalg.norm(start_vector))
+        end_length = float(np.linalg.norm(end_vector))
+        if start_length > 1e-6:
+            points[0] -= start_vector / start_length * distance
+        if end_length > 1e-6:
+            points[-1] += end_vector / end_length * distance
+        return [
+            (float(point[0]), float(point[1]))
+            for point in points
+        ]
 
     @staticmethod
     def _resolved_run_corner_mode(settings: StitchSettings) -> str:
@@ -937,8 +970,11 @@ class StitchEngine:
 
         corner_mode = self._resolved_run_corner_mode(settings)
         preserve_corners = corner_mode == "preserve"
+        use_centerline = bool(
+            getattr(settings, "run_centerline_contour", False)
+        )
         points = []
-        if preserve_corners:
+        if preserve_corners or use_centerline:
             from skimage.morphology import thin
 
             thinned = thin(binary > 0)

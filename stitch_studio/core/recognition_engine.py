@@ -8,6 +8,8 @@ import numpy as np
 from skimage.color import deltaE_ciede2000, lab2rgb, rgb2lab
 from sklearn.cluster import KMeans, MiniBatchKMeans
 
+from .semantic_parts import SemanticPart, SemanticPartExtractor
+
 
 @dataclass(frozen=True)
 class DesignColor:
@@ -41,6 +43,7 @@ class RecognitionResult:
     subject_metrics: Optional[RecognitionMetrics] = None
     feature_outline_mask: Optional[np.ndarray] = None
     feature_outline_groups: Tuple[np.ndarray, ...] = ()
+    semantic_parts: Tuple[SemanticPart, ...] = ()
 
 
 class RecognitionEngine:
@@ -160,6 +163,18 @@ class RecognitionEngine:
                 nearest_thread_index=nearest_idx,
                 nearest_thread_delta_e=nearest_delta,
             ))
+        semantic_parts = SemanticPartExtractor().extract(
+            image=rgb,
+            design_map=design_map,
+            design_colors=design_colors,
+            detail_mask=detail_mask,
+            subject_mask=subject_mask,
+            thread_matches={
+                color.design_id: color.nearest_thread_index
+                for color in design_colors
+                if color.nearest_thread_index is not None
+            },
+        )
 
         metrics = cls.measure_fidelity(
             rgb,
@@ -227,6 +242,7 @@ class RecognitionEngine:
             subject_metrics=subject_metrics,
             feature_outline_mask=feature_outline_mask,
             feature_outline_groups=feature_outline_groups,
+            semantic_parts=semantic_parts,
         )
 
     @staticmethod
