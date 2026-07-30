@@ -93,6 +93,12 @@ def real_synthetic_roundtrip_metrics():
             for region in layer.regions
             if region.is_cross_stitch_overlay
         ),
+        "coarse_fill_regions": sum(
+            region.stitch_settings.fill_mode == "cross_stitch"
+            and region.stitch_settings.cross_pattern_size_mm > 1.8
+            for layer in result["layers"]
+            for region in layer.regions
+        ),
     }
     with tempfile.TemporaryDirectory() as directory:
         for extension in ("pes", "dst"):
@@ -159,6 +165,70 @@ def real_selected_layer_dst_roundtrip():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_same_thread_grouping_preserves_overlapping_color_dependency(self):
+        install_fake_pyembroidery()
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        from stitch_studio.core.project import Layer, Region
+
+        def drawable(name, color, thread_uid, bounds):
+            x0, y0, x1, y1 = bounds
+            region = Region(
+                name=name,
+                stitch_paths=[[(x0, y0), (x1, y1)]],
+            )
+            layer = Layer(
+                name=name,
+                thread_uid=thread_uid,
+                thread_color_rgb=color,
+                matched_thread_rgb=color,
+                regions=[region],
+            )
+            return layer, [(region, region.stitch_paths)]
+
+        first_red = drawable("red base", (220, 20, 20), "red", (0, 0, 20, 20))
+        blue = drawable("blue overlap", (20, 40, 220), "blue", (10, 10, 30, 30))
+        second_red = drawable("red detail", (220, 20, 20), "red", (15, 15, 25, 25))
+
+        grouped = export_mod.ExportEngine()._group_drawable_layers(
+            [first_red, blue, second_red]
+        )
+
+        self.assertEqual(
+            [layer.name for layer, _ in grouped],
+            ["red base", "blue overlap", "red detail"],
+        )
+
+    def test_same_thread_grouping_merges_disjoint_objects_across_colors(self):
+        install_fake_pyembroidery()
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        from stitch_studio.core.project import Layer, Region
+
+        def drawable(name, color, thread_uid, bounds):
+            x0, y0, x1, y1 = bounds
+            region = Region(
+                name=name,
+                stitch_paths=[[(x0, y0), (x1, y1)]],
+            )
+            layer = Layer(
+                name=name,
+                thread_uid=thread_uid,
+                thread_color_rgb=color,
+                matched_thread_rgb=color,
+                regions=[region],
+            )
+            return layer, [(region, region.stitch_paths)]
+
+        first_red = drawable("red left", (220, 20, 20), "red", (0, 0, 5, 5))
+        blue = drawable("blue center", (20, 40, 220), "blue", (20, 20, 25, 25))
+        second_red = drawable("red right", (220, 20, 20), "red", (40, 40, 45, 45))
+
+        grouped = export_mod.ExportEngine()._group_drawable_layers(
+            [first_red, blue, second_red]
+        )
+
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual(len(grouped[0][1]), 2)
+
     def test_synthetic_face_cross_fidelity_stays_within_stitch_and_jump_budget(
         self,
     ):
@@ -189,13 +259,19 @@ class ExportPathTests(unittest.TestCase):
             for region in layer.regions
             if region.is_cross_stitch_overlay
         )
+        coarse_fill_regions = sum(
+            region.stitch_settings.fill_mode == "cross_stitch"
+            and region.stitch_settings.cross_pattern_size_mm > 1.8
+            for layer in enhanced["layers"]
+            for region in layer.regions
+        )
 
         self.assertGreater(enhanced_stitches, 0)
         self.assertGreater(baseline_stitches, 0)
         self.assertLessEqual(enhanced_stitches, int(baseline_stitches * 1.35))
         self.assertLessEqual(
             enhanced_jumps,
-            baseline_jumps + overlay_paths + 8,
+            baseline_jumps + overlay_paths + coarse_fill_regions + 8,
         )
         self.assertLessEqual(len(enhanced_pattern.threadlist), 8)
 
@@ -277,7 +353,12 @@ class ExportPathTests(unittest.TestCase):
             )
             self.assertLessEqual(
                 enhanced["jump_commands"],
-                baseline["jump_commands"] + metrics["overlay_paths"] + 8,
+                (
+                    baseline["jump_commands"]
+                    + metrics["overlay_paths"]
+                    + metrics["coarse_fill_regions"]
+                    + 8
+                ),
             )
 
     def test_real_selected_layer_dst_roundtrip_is_valid(self):
@@ -2119,6 +2200,44 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(window._image_opacity_timer.starts, 1)
         self.assertEqual(window.canvas.applied, [0.9])
 
+    def test_canvas_opacity_interaction_flattens_and_restores_expensive_foreground(self):
+        qt_widgets = importlib.import_module("PySide6.QtWidgets")
+        canvas_mod = importlib.import_module("stitch_studio.ui.canvas")
+
+        app = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+        canvas = canvas_mod.EmbroideryCanvas()
+        canvas.resize(480, 320)
+        canvas.set_background_image(
+            np.full((120, 180, 3), 180, dtype=np.uint8),
+            (90, 60),
+        )
+        canvas.set_layer_stitches(
+            "layer-1",
+            [{
+                "uid": "region-1",
+                "paths": [[
+                    (float(x), 300.0 + float(np.sin(x / 12.0) * 40.0))
+                    for x in range(0, 900, 2)
+                ]],
+                "color": (20, 80, 180),
+            }],
+        )
+        canvas.show()
+        app.processEvents()
+
+        canvas.begin_image_opacity_interaction()
+
+        self.assertIsNotNone(canvas._image_opacity_preview_item)
+        self.assertFalse(canvas._layer_groups["layer-1"].isVisible())
+
+        canvas.set_image_opacity(0.15)
+        app.processEvents()
+        canvas.end_image_opacity_interaction()
+
+        self.assertIsNone(canvas._image_opacity_preview_item)
+        self.assertTrue(canvas._layer_groups["layer-1"].isVisible())
+        self.assertAlmostEqual(canvas._bg_item.opacity(), 0.15)
+
     def test_canvas_region_preview_uses_vector_polygon_when_available(self):
         from shapely.geometry import Polygon
 
@@ -2806,6 +2925,60 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(layers[0].thread_name, "Thread Green")
         self.assertEqual(layers[0].thread_color_rgb, (95, 158, 88))
 
+    def test_large_thread_mismatch_uses_source_color_for_preview_and_export(self):
+        pyembroidery = install_fake_pyembroidery()
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        recognition_mod = importlib.import_module("stitch_studio.core.recognition_engine")
+        thread_mod = importlib.import_module("stitch_studio.core.thread_db")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+
+        source_rgb = (248, 132, 116)
+        physical_rgb = (205, 84, 61)
+        source = np.full((24, 24, 3), source_rgb, dtype=np.uint8)
+        design_map = np.zeros((24, 24), dtype=np.int32)
+        metrics = recognition_mod.RecognitionMetrics(1.0, 1.0, 1.0, 1.0)
+        recognition = recognition_mod.RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                recognition_mod.DesignColor(0, source_rgb, design_map.size, 0, 18.0)
+            ],
+            reconstructed_rgb=source.copy(),
+            detail_mask=np.zeros(design_map.shape, dtype=bool),
+            detail_design_ids=(),
+            metrics=metrics,
+            subject_mask=np.ones(design_map.shape, dtype=bool),
+            thread_map=design_map.copy(),
+            thread_reconstructed_rgb=np.full_like(source, physical_rgb),
+            thread_metrics=metrics,
+            subject_metrics=metrics,
+        )
+        layers = image_mod.ImageEngine.build_layers_from_recognition(
+            recognition,
+            [thread_mod.ThreadColor(name="Nearest Coral", color_rgb=physical_rgb)],
+            source,
+            generation_mode="photo_stitch",
+            quant_settings=project_mod.QuantizationSettings(include_background=True),
+        )
+        layer = layers[0]
+        region = layer.regions[0]
+        region.stitch_points = [(0.0, 0.0), (10.0, 0.0)]
+        region.stitch_paths = [region.stitch_points]
+
+        preview = main_mod.MainWindow._layer_regions_data(layer)
+        project = project_mod.Project()
+        project.layers = layers
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(layer.thread_color_rgb, source_rgb)
+        self.assertGreater(layer.thread_match_delta_e, 8.0)
+        self.assertEqual(preview[0]["color"], source_rgb)
+        self.assertEqual(
+            pattern.threadlist[0].color,
+            (source_rgb[0] << 16) | (source_rgb[1] << 8) | source_rgb[2],
+        )
+
     def test_scanline_fill_chains_rows_to_reduce_jumps(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
@@ -2844,7 +3017,7 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(cells), 2)
 
-    def test_owned_cross_cell_uses_original_mask_for_half_direction(self):
+    def test_owned_boundary_cross_cell_uses_confined_three_quarter_stitch(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -2859,10 +3032,42 @@ class ExportPathTests(unittest.TestCase):
             cross_coverage=0.5,
         )
 
-        cells = engine._cross_stitch_cell_specs(ownership, original, settings)
+        cells = engine._cross_stitch_cell_specs(
+            ownership,
+            original,
+            settings,
+            ownership_override=True,
+        )
 
         self.assertEqual(len(cells), 1)
-        self.assertEqual(cells[0].method_override, "half")
+        self.assertEqual(cells[0].method_override, "three_quarter_bl")
+
+    def test_owned_interior_cross_cell_repairs_isolated_half_stitch(self):
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=10.0)
+        ownership = np.full((30, 30), 255, dtype=np.uint8)
+        original = np.full((30, 30), 255, dtype=np.uint8)
+        original[10:20, 10:20] = 0
+        original[10:20, 10:20][np.tril_indices(10)] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=1.0,
+            cross_coverage=0.5,
+        )
+
+        cells = engine._cross_stitch_cell_specs(
+            ownership,
+            original,
+            settings,
+            ownership_override=True,
+        )
+
+        self.assertEqual(len(cells), 9)
+        center = next(cell for cell in cells if cell.bounds[:2] == (10.0, 10.0))
+        self.assertIsNone(center.method_override)
 
     def test_owned_full_cell_retains_configured_cross_method(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -2882,7 +3087,7 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(cells), 1)
         self.assertIsNone(cells[0].method_override)
 
-    def test_owned_cross_cells_use_grid_coordinates_for_tie_breaks(self):
+    def test_unowned_cross_cells_use_grid_coordinates_for_tie_breaks(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -2928,7 +3133,7 @@ class ExportPathTests(unittest.TestCase):
             ["half_flipped", "half"],
         )
 
-    def test_owned_cross_paths_keep_source_boundary_instead_of_full_cross(self):
+    def test_owned_cross_paths_keep_quarter_leg_inside_color_boundary(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         project_mod = importlib.import_module("stitch_studio.core.project")
 
@@ -2952,8 +3157,9 @@ class ExportPathTests(unittest.TestCase):
         )
         paths = engine.generate_region_paths(region, ownership_context=context)
 
-        self.assertEqual(len(paths), 1)
+        self.assertEqual(len(paths), 2)
         self.assertEqual(paths[0], [(0.0, 0.0), (10.0, 10.0)])
+        self.assertEqual(paths[1], [(0.0, 10.0), (5.0, 5.0)])
 
     def test_mask_override_without_ownership_context_rejects_low_source_coverage(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
@@ -3363,7 +3569,18 @@ class ExportPathTests(unittest.TestCase):
 
         cross_paths = first.stitch_paths + second.stitch_paths
         self.assertIsNone(worker.failure_message)
-        self.assertEqual(len(cross_paths), 9)
+        # Same-thread regions form one continuous source field, so their
+        # internal ownership boundaries still use two complete diagonals.
+        self.assertEqual(len(cross_paths), 18)
+        squared_lengths = {
+            round(
+                (path[-1][0] - path[0][0]) ** 2
+                + (path[-1][1] - path[0][1]) ** 2,
+                6,
+            )
+            for path in cross_paths
+        }
+        self.assertEqual(squared_lengths, {800.0})
         self.assertEqual(len(cross_paths), len({tuple(path) for path in cross_paths}))
 
     def test_resize_and_boundary_edit_rasterize_masks_and_confine_cross_paths(self):
@@ -3751,6 +3968,53 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertIsNotNone(context)
         self.assertEqual(engine.shifts, [(0.0, 0.0)])
+
+    def test_cross_context_merges_source_continuity_by_physical_thread(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=1.0)
+        left_mask = np.zeros((4, 4), dtype=np.uint8)
+        right_mask = np.zeros((4, 4), dtype=np.uint8)
+        left_mask[:, :2] = 255
+        right_mask[:, 2:] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_method="cross",
+            cross_pattern_size_mm=2.0,
+            underlay=False,
+        )
+        left_region = project_mod.Region(mask=left_mask, stitch_settings=settings)
+        right_region = project_mod.Region(
+            mask=right_mask,
+            stitch_settings=project_mod.StitchSettings.from_dict(settings.to_dict()),
+        )
+        left_layer = project_mod.Layer(
+            thread_uid="physical-blue",
+            thread_color_rgb=(30, 60, 150),
+            regions=[left_region],
+        )
+        right_layer = project_mod.Layer(
+            thread_uid="physical-blue",
+            thread_color_rgb=(40, 70, 160),
+            regions=[right_region],
+        )
+
+        context = main_mod.StitchWorker._build_cross_stitch_ownership_context(
+            engine,
+            [(left_layer, left_region), (right_layer, right_region)],
+        )
+
+        expected = np.full((4, 4), 255, dtype=np.uint8)
+        np.testing.assert_array_equal(
+            context.source_mask_for(left_region.uid),
+            expected,
+        )
+        np.testing.assert_array_equal(
+            context.source_mask_for(right_region.uid),
+            expected,
+        )
 
     def test_keyboard_move_updates_mask_and_survives_regeneration(self):
         from shapely.geometry import Polygon
@@ -5153,6 +5417,54 @@ class ExportPathTests(unittest.TestCase):
         commands = [cmd for _, _, cmd in pattern.stitches]
 
         self.assertEqual(commands.count(pyembroidery.JUMP), 1)
+
+    def test_export_connects_adjacent_coarse_cross_stitch_cells(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_pattern_size_mm=2.6,
+        )
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(36.0, 26.0), (46.0, 26.0)],
+        ]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [cmd for _, _, cmd in pattern.stitches]
+
+        self.assertEqual(commands.count(pyembroidery.JUMP), 1)
+
+    def test_export_jumps_between_distant_coarse_cross_stitch_islands(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        layer = project_mod.Layer(thread_color_rgb=(0, 0, 0), order=0)
+        region = project_mod.Region()
+        region.stitch_settings = project_mod.StitchSettings(
+            fill_mode="cross_stitch",
+            cross_pattern_size_mm=2.6,
+        )
+        region.stitch_paths = [
+            [(0.0, 0.0), (10.0, 0.0)],
+            [(110.0, 0.0), (120.0, 0.0)],
+        ]
+        layer.regions = [region]
+        project.layers = [layer]
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+        commands = [cmd for _, _, cmd in pattern.stitches]
+
+        self.assertEqual(commands.count(pyembroidery.JUMP), 2)
 
     def test_export_run_paths_jump_instead_of_sewing_across_blank_space(self):
         pyembroidery = install_fake_pyembroidery()

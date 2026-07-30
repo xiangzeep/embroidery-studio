@@ -92,6 +92,7 @@ class SemanticPartExtractor:
         threads = dict(thread_matches or {})
         candidates = []
         image_area = labels.size
+        grouped_ids = {}
         for design_id in sorted(int(value) for value in np.unique(labels)):
             color = colors.get(design_id)
             if color is None:
@@ -101,7 +102,24 @@ class SemanticPartExtractor:
                 color = tuple(
                     int(round(value)) for value in np.median(pixels, axis=0)
                 )
-            binary = (labels == design_id).astype(np.uint8)
+            thread_index = threads.get(design_id)
+            key = (
+                ("thread-color", thread_index, tuple(color))
+                if thread_index is not None
+                else ("design", design_id)
+            )
+            grouped_ids.setdefault(key, []).append((design_id, tuple(color)))
+
+        for grouped in grouped_ids.values():
+            design_ids = [item[0] for item in grouped]
+            binary = np.isin(labels, design_ids).astype(np.uint8)
+            pixel_counts = [
+                int(np.count_nonzero(labels == design_id))
+                for design_id in design_ids
+            ]
+            dominant_index = int(np.argmax(pixel_counts))
+            design_id, color = grouped[dominant_index]
+            thread_index = threads.get(design_id)
             count, components, stats, _ = cv2.connectedComponentsWithStats(
                 binary,
                 connectivity=8,
@@ -115,11 +133,19 @@ class SemanticPartExtractor:
                 detail_ratio = float(np.mean(detail[component]))
                 if subject_ratio < 0.05 and detail_ratio < 0.25:
                     continue
+                if self._is_tiny_antialias_blend(
+                    component,
+                    color=color,
+                    labels=labels,
+                    colors=colors,
+                    excluded_design_ids=design_ids,
+                ):
+                    continue
                 part = self._build_part(
                     component,
                     design_id=design_id,
                     color=color,
-                    thread_index=threads.get(design_id),
+                    thread_index=thread_index,
                     sequence=len(candidates),
                     detail_ratio=detail_ratio,
                     subject_ratio=subject_ratio,
@@ -134,6 +160,9 @@ class SemanticPartExtractor:
 
         candidates.sort(key=lambda item: (-item[0], item[1].part_id))
         parts = [part for _, part in candidates[: self.max_parts]]
+        parts = list(self._merge_same_thread_line_parts(source, detail, parts))
+        parts = list(self._suppress_redundant_same_thread_fragments(parts))
+        parts = list(self._assign_nested_parents(parts))
         parts = list(self._assign_highlight_parents(parts))
         parts.extend(
             self._recover_nested_highlights(
@@ -146,6 +175,247 @@ class SemanticPartExtractor:
         )
         parts.sort(key=lambda item: (item.z_order, item.part_id))
         return tuple(parts[: self.max_parts])
+
+    @staticmethod
+    def _is_tiny_antialias_blend(
+        component: np.ndarray,
+        *,
+        color: Tuple[int, int, int],
+        labels: np.ndarray,
+        colors: Mapping[int, Tuple[int, int, int]],
+        excluded_design_ids: Sequence[int],
+    ) -> bool:
+        """Reject tiny boundary colors explained by a blend of two neighbors."""
+        area = int(np.count_nonzero(component))
+        max_area = max(12, int(round(labels.size * 0.0002)))
+        if area > max_area:
+            return False
+
+        ring = cv2.dilate(
+            component.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        ring &= ~component
+        neighbor_labels = labels[ring]
+        if not neighbor_labels.size:
+            return False
+
+        excluded = {int(value) for value in excluded_design_ids}
+        values, counts = np.unique(neighbor_labels, return_counts=True)
+        ranked = sorted(
+            (
+                (int(count), int(value))
+                for value, count in zip(values, counts)
+                if int(value) not in excluded and int(value) in colors
+            ),
+            reverse=True,
+        )
+        neighbor_colors = []
+        for _, design_id in ranked[:6]:
+            candidate = np.asarray(colors[design_id], dtype=np.float64)
+            if any(
+                np.linalg.norm(candidate - existing) < 4.0
+                for existing in neighbor_colors
+            ):
+                continue
+            neighbor_colors.append(candidate)
+        if len(neighbor_colors) < 2:
+            return False
+
+        mixed = np.asarray(color, dtype=np.float64)
+        for index, start in enumerate(neighbor_colors[:-1]):
+            for end in neighbor_colors[index + 1 :]:
+                direction = end - start
+                length_squared = float(np.dot(direction, direction))
+                if length_squared < 64.0:
+                    continue
+                ratio = float(np.dot(mixed - start, direction) / length_squared)
+                if ratio <= 0.05 or ratio >= 0.95:
+                    continue
+                projected = start + direction * ratio
+                residual = float(np.linalg.norm(mixed - projected))
+                endpoint_distance = min(
+                    float(np.linalg.norm(mixed - start)),
+                    float(np.linalg.norm(mixed - end)),
+                )
+                if residual <= 18.0 and endpoint_distance >= 8.0:
+                    return True
+        return False
+
+    def _merge_same_thread_line_parts(
+        self,
+        source: np.ndarray,
+        detail_mask: np.ndarray,
+        parts: Sequence[SemanticPart],
+    ) -> Tuple[SemanticPart, ...]:
+        """Rejoin antialiased fragments that resolve to one physical thread."""
+        by_thread = {}
+        for part in parts:
+            if (
+                part.kind == SemanticPartKind.OPEN_LINE
+                and part.thread_index is not None
+            ):
+                by_thread.setdefault(part.thread_index, []).append(part)
+
+        removed = set()
+        merged_parts = []
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        for thread_index, candidates in by_thread.items():
+            if len(candidates) < 2:
+                continue
+            union = np.zeros(source.shape[:2], dtype=np.uint8)
+            for candidate in candidates:
+                union[np.asarray(candidate.mask, dtype=bool)] = 1
+
+            # Close only one-pixel gaps that the source detail detector also
+            # supports. This reconnects antialias shades without bridging
+            # unrelated nearby marks.
+            closed = cv2.morphologyEx(union, cv2.MORPH_CLOSE, kernel)
+            supported_bridge = (
+                (closed > 0)
+                & (union == 0)
+                & np.asarray(detail_mask, dtype=bool)
+            )
+            supported = union.copy()
+            supported[supported_bridge] = 1
+            count, labels = cv2.connectedComponents(supported, connectivity=8)
+            for component_id in range(1, count):
+                component = labels == component_id
+                contributors = [
+                    part
+                    for part in candidates
+                    if np.any(component & np.asarray(part.mask, dtype=bool))
+                ]
+                if len(contributors) < 2:
+                    continue
+                dominant = max(contributors, key=lambda part: part.area)
+                pixels = source[component, :3]
+                color = tuple(
+                    int(round(value))
+                    for value in np.median(pixels.astype(np.float64), axis=0)
+                )
+                merged = self._build_part(
+                    component,
+                    design_id=dominant.design_color_id,
+                    color=color,
+                    thread_index=thread_index,
+                    sequence=len(merged_parts),
+                    detail_ratio=max(
+                        part.detail_confidence for part in contributors
+                    ),
+                    subject_ratio=max(
+                        part.subject_confidence for part in contributors
+                    ),
+                )
+                if merged is None or merged.kind != SemanticPartKind.OPEN_LINE:
+                    continue
+                contributor_ids = sorted(part.part_id for part in contributors)
+                merged_parts.append(
+                    replace(
+                        merged,
+                        part_id=(
+                            f"t{thread_index}-line-"
+                            f"{contributor_ids[0]}-{len(contributor_ids)}"
+                        ),
+                        confidence=max(part.confidence for part in contributors),
+                    )
+                )
+                removed.update(contributor_ids)
+
+        result = [part for part in parts if part.part_id not in removed]
+        result.extend(merged_parts)
+        return tuple(sorted(result, key=lambda item: (item.z_order, item.part_id)))
+
+    def _suppress_redundant_same_thread_fragments(
+        self,
+        parts: Sequence[SemanticPart],
+    ) -> Tuple[SemanticPart, ...]:
+        """Drop antialias rims already represented by a larger same-thread part."""
+        containers = [
+            part
+            for part in parts
+            if (
+                part.thread_index is not None
+                and part.kind in (
+                    SemanticPartKind.COMPACT_FILL,
+                    SemanticPartKind.CLOSED_CONTOUR,
+                )
+            )
+        ]
+        dilated = {}
+        retained = []
+        for part in parts:
+            if (
+                part.thread_index is None
+                or part.kind not in (
+                    SemanticPartKind.OPEN_LINE,
+                    SemanticPartKind.CLOSED_CONTOUR,
+                )
+            ):
+                retained.append(part)
+                continue
+            redundant = False
+            candidate_mask = np.asarray(part.mask, dtype=bool)
+            for parent in containers:
+                if (
+                    parent.part_id == part.part_id
+                    or parent.thread_index != part.thread_index
+                    or parent.area < part.area * 6
+                ):
+                    continue
+                parent_neighborhood = dilated.get(parent.part_id)
+                if parent_neighborhood is None:
+                    parent_neighborhood = cv2.dilate(
+                        np.asarray(parent.mask, dtype=np.uint8),
+                        np.ones((3, 3), dtype=np.uint8),
+                        iterations=1,
+                    ).astype(bool)
+                    dilated[parent.part_id] = parent_neighborhood
+                overlap = np.count_nonzero(
+                    candidate_mask & parent_neighborhood
+                ) / max(1, part.area)
+                if overlap >= 0.92:
+                    redundant = True
+                    break
+            if not redundant:
+                retained.append(part)
+        return tuple(retained)
+
+    def _assign_nested_parents(
+        self,
+        parts: Sequence[SemanticPart],
+    ) -> Tuple[SemanticPart, ...]:
+        """Preserve painter order for pupils, tongues, and other nested fills."""
+        containers = [
+            part
+            for part in parts
+            if part.kind in (
+                SemanticPartKind.COMPACT_FILL,
+                SemanticPartKind.CLOSED_CONTOUR,
+            )
+            and part.paths
+        ]
+        result = []
+        for part in parts:
+            possible = []
+            for parent in containers:
+                if parent.part_id == part.part_id:
+                    continue
+                if parent.area <= part.area * 1.15:
+                    continue
+                if not self._contains_point(parent.paths[0], part.centroid):
+                    continue
+                possible.append(parent)
+            if possible:
+                parent = min(possible, key=lambda item: item.area)
+                part = replace(
+                    part,
+                    parent_id=parent.part_id,
+                    z_order=max(part.z_order, parent.z_order + 1),
+                )
+            result.append(part)
+        return tuple(sorted(result, key=lambda item: (item.z_order, item.part_id)))
 
     def _build_part(
         self,

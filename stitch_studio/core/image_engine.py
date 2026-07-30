@@ -571,14 +571,19 @@ class ImageEngine:
                             axis=0,
                         )
                         exact_rgb = tuple(int(round(value)) for value in representative)
+                        match_delta_e = ImageEngine._color_delta_e(
+                            exact_rgb,
+                            physical_threads[thread_index].color_rgb,
+                        )
                     else:
                         exact_rgb = tuple(physical_threads[thread_index].color_rgb)
+                        match_delta_e = 0.0
                     design_colors.append(SimpleNamespace(
                         design_id=thread_index,
                         color_rgb=exact_rgb,
                         pixel_count=int(np.count_nonzero(mask)),
                         nearest_thread_index=thread_index,
-                        nearest_thread_delta_e=0.0,
+                        nearest_thread_delta_e=match_delta_e,
                     ))
                     if np.mean(detail_pixels[mask]) >= 0.5:
                         detail_design_ids.add(thread_index)
@@ -623,7 +628,7 @@ class ImageEngine:
                         if matched_thread else f"Design color {design_color.design_id + 1}"
                     ),
                     thread_uid=matched_thread.uid if matched_thread else "",
-                    thread_color_rgb=physical_rgb,
+                    thread_color_rgb=exact_rgb,
                     thread_name=matched_thread.name if matched_thread else "Design color",
                     design_color_id=design_color.design_id,
                     design_color_rgb=exact_rgb,
@@ -641,33 +646,62 @@ class ImageEngine:
                     )
 
             # A design color can contain thousands of disconnected antialias
-            # islands. Keep one multi-island mask so the layer tree and stitch
-            # worker scale with colors instead of connected-component count.
+            # islands. Keep one multi-island mask per density zone so the layer
+            # tree and stitch worker scale with colors instead of components.
             mask = binary * 255
-            region_index = len(layer.regions) + 1
-            region = Region(
-                name=(
-                    f"{layer.name} detail {region_index}"
-                    if is_detail_layer else f"{layer.name} region {region_index}"
-                ),
-                mask=mask,
-                design_color_id=design_color.design_id,
-                design_color_rgb=exact_rgb,
-                thread_match_delta_e=design_color.nearest_thread_delta_e,
-                is_detail_region=is_detail_layer,
-            )
-            region.polygon = GeometryEngine.reconstruct_region_polygon(mask)
             if generation_mode == "cross_stitch":
-                region.stitch_settings = ImageEngine._default_cross_stitch_settings_for_mask(
+                density_zones = ImageEngine._cross_stitch_density_zones(
                     mask,
-                    source_image,
+                    recognition,
                 )
             else:
-                region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
-                    mask,
-                    exact_rgb,
+                subject_mask = getattr(recognition, "subject_mask", None)
+                if settings.include_background:
+                    density_zones = tuple(
+                        (plane, plane_mask, None)
+                        for plane, plane_mask in ImageEngine._scene_plane_masks(
+                            mask,
+                            subject_mask,
+                        )
+                    )
+                else:
+                    density_zones = (("subject_base", mask, None),)
+
+            for zone_name, zone_mask, pattern_size_mm in density_zones:
+                scene_plane = {
+                    "background": "background_base",
+                    "subject": "subject_base",
+                    "feature": "subject_detail",
+                }.get(zone_name, zone_name)
+                region_index = len(layer.regions) + 1
+                region = Region(
+                    name=(
+                        f"{layer.name} detail {region_index}"
+                        if is_detail_layer
+                        else f"{layer.name} {zone_name} {region_index}"
+                    ),
+                    mask=zone_mask,
+                    design_color_id=design_color.design_id,
+                    design_color_rgb=exact_rgb,
+                    thread_match_delta_e=design_color.nearest_thread_delta_e,
+                    is_detail_region=is_detail_layer,
+                    scene_plane=scene_plane,
                 )
-            layer.add_region(region)
+                region.polygon = GeometryEngine.reconstruct_region_polygon(zone_mask)
+                if generation_mode == "cross_stitch":
+                    region.stitch_settings = (
+                        ImageEngine._default_cross_stitch_settings_for_mask(
+                            zone_mask,
+                            source_image,
+                        )
+                    )
+                    region.stitch_settings.cross_pattern_size_mm = pattern_size_mm
+                else:
+                    region.stitch_settings = ImageEngine._default_stitch_settings_for_mask(
+                        zone_mask,
+                        exact_rgb,
+                    )
+                layer.add_region(region)
 
         semantic_parts = tuple(getattr(recognition, "semantic_parts", ()))
         if generation_mode == "cross_stitch":
@@ -678,6 +712,9 @@ class ImageEngine:
                     physical_threads,
                     generation_mode,
                     foreground,
+                )
+                ImageEngine._underpaint_same_layer_semantic_details(
+                    layer_map.values(),
                 )
             else:
                 ImageEngine._append_cross_stitch_detail_overlays(
@@ -714,10 +751,46 @@ class ImageEngine:
                     generation_mode,
                     foreground,
                 )
+                ImageEngine._underpaint_same_layer_semantic_details(
+                    layer_map.values(),
+                )
+            for layer in layer_map.values():
+                for region in layer.regions:
+                    ImageEngine._apply_scene_plane_stitch_policy(
+                        region,
+                        settings.background_detail_level,
+                    )
         layers = sorted(layer_map.values(), key=ImageEngine._layer_sort_key)
         for order, layer in enumerate(layers):
             layer.order = order
         return layers
+
+    @staticmethod
+    def _scene_plane_masks(
+        mask: np.ndarray,
+        subject_mask: Optional[np.ndarray],
+    ):
+        """Split a color mask into complementary subject/background planes."""
+        source = np.asarray(mask) > 0
+        if (
+            subject_mask is None
+            or np.asarray(subject_mask).shape != source.shape
+        ):
+            return (("subject_base", source.astype(np.uint8) * 255),)
+
+        subject = np.asarray(subject_mask, dtype=bool)
+        planes = []
+        subject_pixels = source & subject
+        background_pixels = source & ~subject
+        if np.any(subject_pixels):
+            planes.append(
+                ("subject_base", subject_pixels.astype(np.uint8) * 255)
+            )
+        if np.any(background_pixels):
+            planes.append(
+                ("background_base", background_pixels.astype(np.uint8) * 255)
+            )
+        return tuple(planes)
 
     @staticmethod
     def _append_semantic_parts(
@@ -729,25 +802,17 @@ class ImageEngine:
     ) -> None:
         """Convert typed recognition parts into non-overlapping editable regions."""
         image_area = int(foreground.size)
+        parent_ids = {
+            part.parent_id
+            for part in semantic_parts
+            if part.parent_id is not None
+        }
         supported = []
         for part in semantic_parts:
-            area = int(np.count_nonzero(part.mask))
-            if area <= 0:
-                continue
-            ratio = area / max(1, image_area)
-            if part.kind == SemanticPartKind.OPEN_LINE and ratio <= 0.08:
-                supported.append(part)
-            elif part.kind == SemanticPartKind.CLOSED_CONTOUR and ratio <= 0.12:
-                supported.append(part)
-            elif (
-                part.kind == SemanticPartKind.COMPACT_FILL
-                and generation_mode != "cross_stitch"
-                and ratio <= 0.035
-            ):
-                supported.append(part)
-            elif (
-                part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
-                and ratio <= 0.015
+            if ImageEngine._should_append_semantic_part(
+                part,
+                foreground.shape,
+                generation_mode,
             ):
                 supported.append(part)
         supported.sort(key=lambda part: (part.z_order, part.part_id))
@@ -787,11 +852,18 @@ class ImageEngine:
                 layer = Layer(
                     name=matched_thread.name if matched_thread else part.role,
                     thread_uid=matched_thread.uid if matched_thread else "",
-                    thread_color_rgb=physical_rgb,
+                    thread_color_rgb=tuple(part.source_color_rgb),
                     thread_name=matched_thread.name if matched_thread else "Design color",
                     design_color_id=part.design_color_id,
                     design_color_rgb=tuple(part.source_color_rgb),
                     matched_thread_rgb=physical_rgb if matched_thread else None,
+                    thread_match_delta_e=(
+                        ImageEngine._color_delta_e(
+                            part.source_color_rgb,
+                            physical_rgb,
+                        )
+                        if matched_thread else None
+                    ),
                     is_detail_layer=True,
                 )
                 layer_map[key] = layer
@@ -809,6 +881,13 @@ class ImageEngine:
                 generation_mode,
             )
             region_mask = mask.astype(np.uint8) * 255
+            guide_paths = [list(path) for path in part.paths]
+            if (
+                part.kind == SemanticPartKind.CLOSED_CONTOUR
+                and part.part_id not in parent_ids
+            ):
+                guide_paths.extend(list(path) for path in part.hole_paths)
+            path_count = len(guide_paths)
             region = Region(
                 name=f"{layer.name} {part.role}",
                 mask=region_mask,
@@ -820,11 +899,62 @@ class ImageEngine:
                 semantic_kind=part.kind.value,
                 semantic_role=part.role,
                 semantic_parent_id=part.parent_id,
+                semantic_z_order=part.z_order,
+                scene_plane=(
+                    "subject_detail"
+                    if float(getattr(part, "subject_confidence", 0.0)) >= 0.35
+                    else "background_detail"
+                ),
+                guide_paths_px=guide_paths,
+                guide_paths_closed=[
+                    part.kind == SemanticPartKind.CLOSED_CONTOUR
+                ] * path_count,
+                guide_corner_indices=(
+                    [list(part.locked_corner_indices)]
+                    + [[] for _ in range(max(0, path_count - 1))]
+                    if part.kind == SemanticPartKind.CLOSED_CONTOUR
+                    else [[] for _ in range(path_count)]
+                ),
                 stitch_settings=settings,
             )
             region.polygon = GeometryEngine.reconstruct_region_polygon(region_mask)
             layer.add_region(region)
             seen_masks.append(mask.copy())
+
+    @staticmethod
+    def _should_append_semantic_part(
+        part,
+        image_shape,
+        generation_mode: str,
+    ) -> bool:
+        """Keep subject geometry explicit while simplifying broad background art."""
+        area = int(np.count_nonzero(part.mask))
+        if area <= 0:
+            return False
+        image_area = max(1, int(np.prod(image_shape[:2])))
+        ratio = area / image_area
+
+        if part.kind == SemanticPartKind.OPEN_LINE:
+            return ratio <= 0.08
+        if part.kind == SemanticPartKind.CLOSED_CONTOUR:
+            ys, xs = np.where(np.asarray(part.mask, dtype=bool))
+            if not xs.size:
+                return False
+            height, width = image_shape[:2]
+            span = max(
+                (int(xs.max()) - int(xs.min()) + 1) / max(1, width),
+                (int(ys.max()) - int(ys.min()) + 1) / max(1, height),
+            )
+            broad_background = (
+                float(getattr(part, "subject_confidence", 0.0)) < 0.12
+                and span >= 0.72
+            )
+            return ratio <= 0.12 and not broad_background
+        if part.kind == SemanticPartKind.COMPACT_FILL:
+            return generation_mode != "cross_stitch" and ratio <= 0.035
+        if part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT:
+            return ratio <= 0.015
+        return False
 
     @staticmethod
     def _carve_semantic_mask_from_layer(
@@ -860,11 +990,16 @@ class ImageEngine:
         generation_mode: str,
     ) -> StitchSettings:
         if kind == SemanticPartKind.OPEN_LINE:
+            binary = (np.asarray(mask) > 0).astype(np.uint8)
+            distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+            stroke_width_px = float(distance.max() * 2.0)
+            if stroke_width_px > 3.5:
+                return ImageEngine._satin_outline_stitch_settings()
             settings = ImageEngine._running_stitch_settings()
             settings.run_corner_mode = "adaptive"
-            settings.run_passes = 1
+            settings.run_passes = 3
             settings.run_preserve_short_branches = True
-            settings.run_endpoint_extension_mm = 0.35
+            settings.run_endpoint_extension_mm = 0.45
             return settings
         if kind == SemanticPartKind.CLOSED_CONTOUR:
             settings = ImageEngine._feature_outline_stitch_settings_for_mask(mask)
@@ -1283,6 +1418,67 @@ class ImageEngine:
         return support.astype(bool)
 
     @staticmethod
+    def _cross_stitch_density_zones(
+        mask: np.ndarray,
+        recognition,
+    ) -> List[Tuple[str, np.ndarray, float]]:
+        """Split semantic zones while keeping one globally aligned fabric grid."""
+        source = np.asarray(mask) > 0
+        if not np.any(source):
+            return []
+
+        subject_mask = getattr(recognition, "subject_mask", None)
+        if subject_mask is None:
+            return [("subject", source.astype(np.uint8) * 255, 2.1)]
+        subject = np.asarray(subject_mask, dtype=bool)
+        if subject.shape != source.shape:
+            return [("subject", source.astype(np.uint8) * 255, 2.1)]
+
+        feature_groups = []
+        for group in getattr(recognition, "feature_outline_groups", ()):
+            feature_group = np.asarray(group, dtype=bool)
+            if feature_group.shape == source.shape and np.any(feature_group):
+                feature_groups.append(feature_group)
+        feature_support = ImageEngine._feature_outline_support_mask(
+            feature_groups,
+            source.shape,
+        )
+
+        feature = source & feature_support
+        subject_support = subject | feature_support
+        subject_zone = source & subject_support & ~feature
+        background = source & ~subject_support
+
+        zones = (
+            ("background", background, 2.1),
+            ("subject", subject_zone, 2.1),
+            ("feature", feature, 2.1),
+        )
+        source_area = int(np.count_nonzero(source))
+        minimum_zone_area = max(8, int(round(source_area * 0.005)))
+        populated = [
+            [name, np.array(zone, copy=True), pattern_size_mm]
+            for name, zone, pattern_size_mm in zones
+            if np.any(zone)
+        ]
+        if len(populated) > 1:
+            largest = max(populated, key=lambda item: np.count_nonzero(item[1]))
+            retained = []
+            for zone in populated:
+                if (
+                    zone is not largest
+                    and np.count_nonzero(zone[1]) < minimum_zone_area
+                ):
+                    largest[1] |= zone[1]
+                else:
+                    retained.append(zone)
+            populated = retained
+        return [
+            (name, zone.astype(np.uint8) * 255, pattern_size_mm)
+            for name, zone, pattern_size_mm in populated
+        ]
+
+    @staticmethod
     def _append_cross_stitch_detail_overlay(
         layer: Layer,
         contributor: Region,
@@ -1385,15 +1581,33 @@ class ImageEngine:
                 )
 
     @staticmethod
-    def _layer_sort_key(layer: Layer) -> Tuple[int, int, int]:
+    def _color_delta_e(
+        source_rgb: Tuple[int, int, int],
+        target_rgb: Tuple[int, int, int],
+    ) -> float:
+        colors = np.asarray([[source_rgb, target_rgb]], dtype=np.float64) / 255.0
+        lab = rgb2lab(colors.reshape(1, 2, 3))[0]
+        return float(deltaE_ciede2000(lab[0], lab[1]))
+
+    @staticmethod
+    def _layer_sort_key(layer: Layer) -> Tuple[int, int, int, int]:
         area = int(sum(np.count_nonzero(r.mask) for r in layer.regions if r.mask is not None))
         is_black_detail = ImageEngine._is_near_black_rgb(layer.thread_color_rgb)
         has_run_detail = any(
             region.stitch_settings.fill_mode in ("run", "satin")
             for region in layer.regions
         )
+        semantic_z_order = max(
+            (
+                int(region.semantic_z_order)
+                for region in layer.regions
+                if region.semantic_part_id is not None
+            ),
+            default=0,
+        )
         return (
             0 if layer.is_detail_layer else 1,
+            -semantic_z_order,
             0 if has_run_detail or is_black_detail else 1,
             area,
         )
@@ -1417,6 +1631,43 @@ class ImageEngine:
             if region.mask is not None and region.mask.shape == shape
         ]
         if not source_regions:
+            return
+
+        planes = sorted(
+            {region.scene_plane for region in source_regions},
+            key=ImageEngine._scene_plane_rank,
+        )
+        if len(planes) > 1:
+            rebuilt = []
+            source_region_ids = {id(region) for region in source_regions}
+            untouched = [
+                region
+                for region in layer.regions
+                if id(region) not in source_region_ids
+            ]
+            for plane in planes:
+                plane_layer = Layer(
+                    name=layer.name,
+                    thread_color_rgb=layer.thread_color_rgb,
+                    regions=[
+                        region
+                        for region in source_regions
+                        if region.scene_plane == plane
+                    ],
+                )
+                ImageEngine._reclassify_photo_layer_components(
+                    plane_layer,
+                    subject_mask,
+                    feature_outline_mask,
+                    feature_outline_groups,
+                )
+                for region in plane_layer.regions:
+                    region.scene_plane = plane
+                rebuilt.extend(plane_layer.regions)
+            layer.regions = untouched + rebuilt
+            layer.is_detail_layer = any(
+                region.is_detail_region for region in layer.regions
+            )
             return
 
         combined = np.zeros(shape, dtype=np.uint8)
@@ -1703,6 +1954,9 @@ class ImageEngine:
                     any(region.is_detail_region for region in contributors)
                     or is_feature_part
                 )
+                contributor_planes = {
+                    region.scene_plane for region in contributors
+                }
                 region = Region(
                     name=(
                         f"{layer.name} fill"
@@ -1722,6 +1976,11 @@ class ImageEngine:
                     ),
                     thread_match_delta_e=(max(deltas) if deltas else None),
                     is_detail_region=is_detail,
+                    scene_plane=(
+                        next(iter(contributor_planes))
+                        if len(contributor_planes) == 1
+                        else "subject_base"
+                    ),
                     stitch_settings=(
                         ImageEngine._feature_outline_stitch_settings_for_mask(region_mask)
                         if mode == "run" and is_feature_part
@@ -1736,6 +1995,43 @@ class ImageEngine:
             layer.is_detail_layer = any(
                 region.is_detail_region for region in rebuilt_regions
             )
+
+    @staticmethod
+    def _scene_plane_rank(scene_plane: str) -> int:
+        return {
+            "background_base": 0,
+            "background_detail": 1,
+            "subject_base": 2,
+            "subject_detail": 3,
+        }.get(scene_plane, 2)
+
+    @staticmethod
+    def _apply_scene_plane_stitch_policy(
+        region: Region,
+        background_detail_level: float = 0.75,
+    ) -> None:
+        """Keep background geometry while lowering only its stitch coverage."""
+        if (
+            region.scene_plane != "background_base"
+            or region.stitch_settings.fill_mode != "scanline"
+        ):
+            return
+        detail = float(np.clip(background_detail_level, 0.0, 1.0))
+        settings = region.stitch_settings
+        settings.stitch_length_mm = max(
+            settings.stitch_length_mm,
+            2.8 - 0.6 * detail,
+        )
+        settings.row_spacing_mm = max(
+            settings.row_spacing_mm,
+            0.36 - 0.16 * detail,
+        )
+        settings.density = min(settings.density, 0.75 + 0.4 * detail)
+        settings.pull_compensation_mm = min(
+            settings.pull_compensation_mm,
+            0.16,
+        )
+        settings.underlay = False
 
     @staticmethod
     def _suppress_satin_border_halos(layers):
@@ -1775,6 +2071,7 @@ class ImageEngine:
                     or region.mask.shape != shape
                     or region.stitch_settings.fill_mode != "run"
                     or region.stitch_settings.run_passes > 1
+                    or region.semantic_part_id is not None
                 ):
                     kept_regions.append(region)
                     continue
@@ -1849,6 +2146,67 @@ class ImageEngine:
                 target.mask,
                 simplify=False,
             )
+
+    @staticmethod
+    def _underpaint_same_layer_semantic_details(layers):
+        """Restore only same-color fill beneath carved semantic line work."""
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        for layer in layers:
+            semantic_regions = [
+                region
+                for region in layer.regions
+                if (
+                    region.semantic_part_id is not None
+                    and region.semantic_kind in (
+                        SemanticPartKind.OPEN_LINE.value,
+                        SemanticPartKind.CLOSED_CONTOUR.value,
+                    )
+                    and region.mask is not None
+                    and region.stitch_settings.fill_mode in ("run", "satin")
+                )
+            ]
+            fill_regions = [
+                region
+                for region in layer.regions
+                if (
+                    region.semantic_part_id is None
+                    and region.mask is not None
+                    and region.stitch_settings.fill_mode in (
+                        "scanline",
+                        "cross_stitch",
+                    )
+                )
+            ]
+            if not semantic_regions or not fill_regions:
+                continue
+
+            shape = semantic_regions[0].mask.shape
+            semantic_union = np.zeros(shape, dtype=np.uint8)
+            for region in semantic_regions:
+                if region.mask.shape == shape:
+                    semantic_union[region.mask > 0] = 255
+
+            for region in fill_regions:
+                if region.mask.shape != shape:
+                    continue
+                adjacent = (
+                    cv2.dilate(
+                        (region.mask > 0).astype(np.uint8),
+                        kernel,
+                        iterations=2,
+                    )
+                    > 0
+                ) & (semantic_union > 0)
+                if not np.any(adjacent):
+                    continue
+                region.mask = np.maximum(
+                    region.mask,
+                    adjacent.astype(np.uint8) * 255,
+                )
+                region.polygon = GeometryEngine.reconstruct_region_polygon(
+                    region.mask,
+                    simplify=False,
+                )
 
     @staticmethod
     def _merge_tiny_similar_layers(layer_map: Dict[int, Layer], image_area: int):

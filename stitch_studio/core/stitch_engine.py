@@ -16,7 +16,11 @@ from shapely.affinity import rotate as shapely_rotate
 from shapely.ops import unary_union
 
 from .contour_geometry import adaptive_closed_contour
-from .cross_stitch_geometry import CrossStitchCell, classify_cross_stitch_cell
+from .cross_stitch_geometry import (
+    CrossStitchCell,
+    choose_boundary_three_quarter_method,
+    classify_cross_stitch_cell,
+)
 from .project import Region, StitchSettings
 
 
@@ -41,6 +45,7 @@ class CrossStitchOwnershipContext:
     immutable: bool = True
     dense_masks: Optional[Mapping[str, np.ndarray]] = None
     dense_grid_origin_px: Optional[Tuple[float, float]] = None
+    source_masks: Optional[Mapping[str, np.ndarray]] = None
     shared: bool = True
 
     def __post_init__(self):
@@ -58,10 +63,21 @@ class CrossStitchOwnershipContext:
             )
         if self.dense_masks is not None and not self.dense_masks:
             raise ValueError("Cross stitch dense ownership context requires masks")
+        if self.source_masks is not None:
+            if not self.source_masks:
+                raise ValueError("Cross stitch source continuity requires masks")
+            missing_source_masks = set(self.base_masks) - set(self.source_masks)
+            if missing_source_masks:
+                raise ValueError(
+                    "Cross stitch source continuity has no masks for regions: "
+                    + ", ".join(sorted(missing_source_masks))
+                )
 
         object.__setattr__(self, "base_masks", self._freeze_masks(self.base_masks))
         if self.dense_masks is not None:
             object.__setattr__(self, "dense_masks", self._freeze_masks(self.dense_masks))
+        if self.source_masks is not None:
+            object.__setattr__(self, "source_masks", self._freeze_masks(self.source_masks))
 
     @staticmethod
     def _freeze_masks(masks: Mapping[str, np.ndarray]) -> Mapping[str, np.ndarray]:
@@ -76,6 +92,7 @@ class CrossStitchOwnershipContext:
         cls,
         base_masks: Mapping[str, np.ndarray],
         dense_masks: Optional[Mapping[str, np.ndarray]] = None,
+        source_masks: Optional[Mapping[str, np.ndarray]] = None,
     ) -> "CrossStitchOwnershipContext":
         """Build a context from builder output, requiring its grid metadata."""
         try:
@@ -105,6 +122,7 @@ class CrossStitchOwnershipContext:
             base_grid_origin_px=base_origin,
             dense_masks=dense_masks,
             dense_grid_origin_px=dense_origin,
+            source_masks=source_masks,
         )
 
     def base_mask_for(self, region_uid: str) -> np.ndarray:
@@ -123,6 +141,17 @@ class CrossStitchOwnershipContext:
         except KeyError as exc:
             raise ValueError(
                 f"Cross stitch ownership context has no dense mask for region {region_uid}"
+            ) from exc
+
+    def source_mask_for(self, region_uid: str) -> Optional[np.ndarray]:
+        """Return the same-thread source union used only for cell completeness."""
+        if self.source_masks is None:
+            return None
+        try:
+            return self.source_masks[region_uid]
+        except KeyError as exc:
+            raise ValueError(
+                f"Cross stitch source continuity has no mask for region {region_uid}"
             ) from exc
 
 
@@ -156,6 +185,7 @@ class StitchEngine:
         """Generate separated stitch paths for preview and export."""
         original_mask = region.mask
         settings = region.stitch_settings
+        cross_source_mask = original_mask
         if ownership_context is not None:
             if not isinstance(ownership_context, CrossStitchOwnershipContext):
                 raise TypeError("ownership_context must be a CrossStitchOwnershipContext")
@@ -166,12 +196,23 @@ class StitchEngine:
                     "Cross stitch ownership context cannot be combined with mask_override"
                 )
             source_mask = ownership_context.base_mask_for(region.uid)
+            shared_source_mask = ownership_context.source_mask_for(region.uid)
+            if shared_source_mask is not None:
+                cross_source_mask = shared_source_mask
             # Ownership allocation is authoritative and must not be expanded by
             # morphology; original_mask below still fits the source boundary.
             mask = (source_mask > 0).astype(np.uint8) * 255
         else:
             source_mask = mask_override if mask_override is not None else original_mask
-            mask = self._prepare_mask(source_mask, settings) if source_mask is not None else None
+            mask = (
+                self._prepare_mask(
+                    source_mask,
+                    settings,
+                    preserve_small=region.semantic_part_id is not None,
+                )
+                if source_mask is not None
+                else None
+            )
         if source_mask is None:
             return []
         if mask is None or np.count_nonzero(mask) == 0:
@@ -196,17 +237,30 @@ class StitchEngine:
         if settings.contour_count > 0 and settings.fill_mode not in ("run", "cross_stitch"):
             paths.extend(self._generate_contour_paths(mask, settings, getattr(region, "polygon", None)))
 
-        fill_paths = self._dispatch_fill_paths(
-            mask,
-            settings,
-            image,
-            flow_field,
-            getattr(region, "polygon", None),
-            getattr(region, "design_color_rgb", None),
-            cross_source_mask=original_mask,
-            ownership_context=ownership_context,
-            cross_region_uid=region.uid,
-        )
+        guide_paths = getattr(region, "guide_paths_px", ())
+        if settings.fill_mode == "run" and guide_paths:
+            fill_paths = self._generate_guided_run_paths(
+                guide_paths,
+                settings,
+                closed_flags=getattr(region, "guide_paths_closed", ()),
+                corner_indices=getattr(region, "guide_corner_indices", ()),
+            )
+        else:
+            fill_paths = self._dispatch_fill_paths(
+                mask,
+                settings,
+                image,
+                flow_field,
+                getattr(region, "polygon", None),
+                getattr(region, "design_color_rgb", None),
+                cross_source_mask=cross_source_mask,
+                ownership_context=ownership_context,
+                cross_region_uid=region.uid,
+            )
+        if not fill_paths and region.semantic_part_id is not None:
+            micro_path = self._generate_micro_detail_path(mask)
+            if micro_path:
+                fill_paths = [micro_path]
         paths.extend(fill_paths)
         if settings.fill_mode == "scanline" and self._needs_detail_reinforcement(mask):
             reinforce_settings = StitchSettings(
@@ -820,6 +874,187 @@ class StitchEngine:
         return paths
 
     # ========== RUN STITCH ==========
+
+    def _generate_micro_detail_path(
+        self,
+        mask: np.ndarray,
+    ) -> List[Tuple[float, float]]:
+        """Keep a tiny mark visible without inventing a chord through empty space."""
+        from skimage.morphology import skeletonize
+
+        binary = np.asarray(mask) > 0
+        if np.count_nonzero(binary) < 2:
+            return []
+        skeleton = skeletonize(binary)
+        candidates = self._trace_skeleton_component(skeleton)
+        candidates = [
+            path
+            for path in candidates
+            if len(path) >= 2
+        ]
+        if not candidates:
+            return []
+        path = max(
+            candidates,
+            key=self._polyline_length,
+        )
+        return [(float(x), float(y)) for x, y in path]
+
+    def _generate_guided_run_paths(
+        self,
+        guide_paths,
+        settings: StitchSettings,
+        closed_flags=(),
+        corner_indices=(),
+    ) -> List[List[Tuple[float, float]]]:
+        """Generate stable running stitches from recognition-time geometry."""
+        stitch_len_px = max(1.0, settings.stitch_length_mm * self.px_per_mm)
+        corner_mode = self._resolved_run_corner_mode(settings)
+        result = []
+        for path_index, guide in enumerate(guide_paths):
+            try:
+                points = np.asarray(guide, dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            if (
+                points.ndim != 2
+                or points.shape[1] != 2
+                or len(points) < 2
+            ):
+                continue
+            points = points[np.isfinite(points).all(axis=1)]
+            if len(points) < 2:
+                continue
+            raw = [
+                (float(point[0]), float(point[1]))
+                for point in points
+            ]
+            closed = (
+                bool(closed_flags[path_index])
+                if path_index < len(closed_flags)
+                else len(raw) > 2 and np.allclose(raw[0], raw[-1])
+            )
+            locked = (
+                tuple(int(index) for index in corner_indices[path_index])
+                if path_index < len(corner_indices)
+                else ()
+            )
+            simplified = self._simplify_run_path(raw, closed=closed)
+            if closed and locked:
+                # Recognition already smoothed the spans between supported
+                # corners. Preserve that geometry and every locked tip instead
+                # of tracing the lower-resolution raster mask again.
+                sampled = self._resample_polyline_preserving_vertices(
+                    raw,
+                    stitch_len_px,
+                    closed=True,
+                )
+            elif closed:
+                sampled = self._resample_run_path(
+                    simplified,
+                    stitch_len_px,
+                    closed=True,
+                )
+            elif corner_mode == "preserve":
+                sampled = self._resample_polyline_preserving_vertices(
+                    simplified,
+                    stitch_len_px,
+                    closed=False,
+                )
+            elif corner_mode == "adaptive":
+                sampled = self._adaptive_open_run_path(
+                    simplified,
+                    stitch_len_px,
+                )
+            else:
+                smooth = self._chaikin_smooth(
+                    simplified,
+                    closed=False,
+                    iterations=1,
+                )
+                sampled = self._resample_run_path(
+                    smooth,
+                    stitch_len_px,
+                    closed=False,
+                )
+
+            extension = max(
+                0.0,
+                float(getattr(settings, "run_endpoint_extension_mm", 0.0))
+                * self.px_per_mm,
+            )
+            if not closed and extension > 0.0 and len(sampled) >= 2:
+                sampled = self._extend_open_run_endpoints(sampled, extension)
+            if len(sampled) < 2:
+                continue
+
+            pass_count = max(1, int(getattr(settings, "run_passes", 1)))
+            repeated = list(sampled)
+            for pass_index in range(1, pass_count):
+                traversal = (
+                    list(reversed(sampled))
+                    if pass_index % 2 == 1
+                    else sampled
+                )
+                repeated.extend(traversal[1:])
+            result.append(repeated)
+        return result
+
+    def _adaptive_open_run_path(
+        self,
+        points: List[Tuple[float, float]],
+        stitch_len_px: float,
+    ) -> List[Tuple[float, float]]:
+        """Smooth open curves while retaining supported high-deflection vertices."""
+        if len(points) < 3:
+            return self._resample_polyline_preserving_vertices(
+                points,
+                stitch_len_px,
+                closed=False,
+            )
+
+        array = np.asarray(points, dtype=np.float64)
+        anchors = [0]
+        for index in range(1, len(array) - 1):
+            incoming = array[index - 1] - array[index]
+            outgoing = array[index + 1] - array[index]
+            left = float(np.linalg.norm(incoming))
+            right = float(np.linalg.norm(outgoing))
+            if min(left, right) < 1.5:
+                continue
+            cosine = float(
+                np.clip(
+                    np.dot(incoming, outgoing) / max(1e-6, left * right),
+                    -1.0,
+                    1.0,
+                )
+            )
+            deflection = 180.0 - float(np.degrees(np.arccos(cosine)))
+            if deflection >= 42.0:
+                anchors.append(index)
+        anchors.append(len(array) - 1)
+
+        output = []
+        for start, end in zip(anchors, anchors[1:]):
+            span = [
+                (float(x), float(y))
+                for x, y in array[start : end + 1]
+            ]
+            if end - start > 1:
+                span = self._chaikin_smooth(
+                    span,
+                    closed=False,
+                    iterations=1,
+                )
+            sampled = self._resample_polyline_preserving_vertices(
+                span,
+                stitch_len_px,
+                closed=False,
+            )
+            if output and sampled:
+                sampled = sampled[1:]
+            output.extend(sampled)
+        return output
 
     def _generate_run_paths(
         self,
@@ -1554,7 +1789,7 @@ class StitchEngine:
         grid_origin_px: Optional[Tuple[float, float]] = None,
     ) -> List[CrossStitchCell]:
         """Describe owned cells using source occupancy to fit boundary stitches."""
-        specs: List[CrossStitchCell] = []
+        classified = []
         for cell, slices, grid_row, grid_col in self._iter_cross_grid_cells(
             ownership_mask,
             settings,
@@ -1580,15 +1815,45 @@ class StitchEngine:
                 grid_row=grid_row,
                 grid_col=grid_col,
             )
-            # Shared ownership has already rejected isolated color noise. Its
-            # full-cell assignment keeps connected one-pixel details stitchable.
-            if (
-                override == "reject"
-                and ownership_override
-                and np.count_nonzero(ownership_patch)
-            ):
+            if ownership_override and override in ("half", "half_flipped"):
+                override = choose_boundary_three_quarter_method(
+                    source_patch,
+                    override,
+                )
+            classified.append(
+                (
+                    CrossStitchCell(cell, coverage, override),
+                    grid_row,
+                    grid_col,
+                )
+            )
+
+        if not ownership_override:
+            return [spec for spec, _, _ in classified]
+
+        owned_cells = {(row, col) for _, row, col in classified}
+        specs: List[CrossStitchCell] = []
+        for spec, grid_row, grid_col in classified:
+            override = spec.method_override
+            if override == "reject":
+                # Ownership already rejected isolated noise and selected this
+                # connected detail as the cell's authoritative color.
                 override = None
-            specs.append(CrossStitchCell(cell, coverage, override))
+            elif (
+                override is not None
+                and override.startswith("three_quarter_")
+            ):
+                orthogonal_neighbors = (
+                    (grid_row - 1, grid_col),
+                    (grid_row + 1, grid_col),
+                    (grid_row, grid_col - 1),
+                    (grid_row, grid_col + 1),
+                )
+                if all(neighbor in owned_cells for neighbor in orthogonal_neighbors):
+                    # A lone half stitch fully surrounded by the same color is
+                    # an occupancy artifact, not a real contour boundary.
+                    override = None
+            specs.append(CrossStitchCell(spec.bounds, spec.coverage, override))
         return specs
 
     def _cross_stitch_cells(
@@ -1618,6 +1883,7 @@ class StitchEngine:
         mt = (x + w / 2.0, y)
         mr = (x + w, y + h / 2.0)
         mb = (x + w / 2.0, y + h)
+        center = (x + w / 2.0, y + h / 2.0)
 
         diagonal_a = [tl, br]
         diagonal_b = [tr, bl]
@@ -1627,6 +1893,18 @@ class StitchEngine:
         upright_paths = [[ml, mr], [mt, mb]]
         cross_paths = [diagonal_a, diagonal_b]
 
+        if method.startswith("three_quarter_"):
+            corner_name = method.removeprefix("three_quarter_")
+            corners = {"tl": tl, "tr": tr, "br": br, "bl": bl}
+            if corner_name not in corners:
+                raise ValueError(f"Unknown three-quarter corner: {corner_name}")
+            full_diagonal = (
+                diagonal_a
+                if corner_name in ("tr", "bl")
+                else diagonal_b
+            )
+            paths = [full_diagonal, [corners[corner_name], center]]
+            return [self._segmentized_path(path, max_segment_px) for path in paths]
         if method.startswith("half"):
             return [self._segmentized_path(diagonal_a, max_segment_px)]
         if method.startswith("upright") and "double" not in method and "smyrna" not in method:
@@ -1822,13 +2100,21 @@ class StitchEngine:
 
     # ========== UTILITIES ==========
 
-    def _prepare_mask(self, mask: np.ndarray, settings: StitchSettings) -> np.ndarray:
+    def _prepare_mask(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+        *,
+        preserve_small: bool = False,
+    ) -> np.ndarray:
         """Normalize masks and remove isolated noise before stitch generation."""
         clean = (mask > 0).astype(np.uint8) * 255
         if np.count_nonzero(clean) == 0:
             return clean
 
-        if settings.fill_mode == "run":
+        if preserve_small:
+            min_area = 2
+        elif settings.fill_mode == "run":
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=1)
             min_area = max(2, int(0.08 * self.px_per_mm * self.px_per_mm))

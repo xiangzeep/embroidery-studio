@@ -101,6 +101,11 @@ class Region:
     semantic_kind: Optional[str] = None
     semantic_role: Optional[str] = None
     semantic_parent_id: Optional[str] = None
+    semantic_z_order: int = 0
+    scene_plane: str = "subject_base"
+    guide_paths_px: List[List[Tuple[float, float]]] = field(default_factory=list)
+    guide_paths_closed: List[bool] = field(default_factory=list)
+    guide_corner_indices: List[List[int]] = field(default_factory=list)
     # Generated stitch data (populated by engine)
     stitch_points: Optional[List[Tuple[float, float]]] = None
     stitch_paths: Optional[List[List[Tuple[float, float]]]] = None
@@ -191,6 +196,19 @@ class Region:
             'semantic_kind': self.semantic_kind,
             'semantic_role': self.semantic_role,
             'semantic_parent_id': self.semantic_parent_id,
+            'semantic_z_order': int(self.semantic_z_order),
+            'scene_plane': self.scene_plane,
+            'guide_paths_px': [
+                [[float(x), float(y)] for x, y in path]
+                for path in self.guide_paths_px
+            ],
+            'guide_paths_closed': [
+                bool(closed) for closed in self.guide_paths_closed
+            ],
+            'guide_corner_indices': [
+                [int(index) for index in indices]
+                for indices in self.guide_corner_indices
+            ],
         }
         if self.mask is not None:
             # Store mask as RLE-encoded base64
@@ -225,6 +243,19 @@ class Region:
             semantic_kind=d.get('semantic_kind'),
             semantic_role=d.get('semantic_role'),
             semantic_parent_id=d.get('semantic_parent_id'),
+            semantic_z_order=int(d.get('semantic_z_order', 0)),
+            scene_plane=d.get('scene_plane', 'subject_base'),
+            guide_paths_px=[
+                [(float(x), float(y)) for x, y in path]
+                for path in d.get('guide_paths_px', ())
+            ],
+            guide_paths_closed=[
+                bool(closed) for closed in d.get('guide_paths_closed', ())
+            ],
+            guide_corner_indices=[
+                [int(index) for index in indices]
+                for indices in d.get('guide_corner_indices', ())
+            ],
         )
         if mask_rle and mask_shape:
             r.mask = _rle_decode(mask_rle, tuple(mask_shape))
@@ -267,6 +298,17 @@ class Layer:
     def __post_init__(self):
         if not self.uid:
             self.uid = str(uuid.uuid4())[:8]
+
+    def effective_color_rgb(self) -> Tuple[int, int, int]:
+        """Use source-faithful RGB when the nearest catalog thread is visibly off."""
+        if (
+            self.matched_thread_rgb is not None
+            and self.design_color_rgb is not None
+            and self.thread_match_delta_e is not None
+            and self.thread_match_delta_e > 6.0
+        ):
+            return tuple(self.thread_color_rgb)
+        return tuple(self.matched_thread_rgb or self.thread_color_rgb)
 
     def add_region(self, region: Region):
         self.regions.append(region)
@@ -424,6 +466,7 @@ class QuantizationSettings:
     method: str = "kmeans_lab"  # "kmeans_lab", "median_cut", "octree"
     dither: bool = False
     include_background: bool = False
+    background_detail_level: float = 0.75
     preserve_details: bool = True
     design_color_budget: int = 0
     auto_design_colors: bool = True

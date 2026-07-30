@@ -181,6 +181,7 @@ def build_synthetic_face_pipeline(
             for region in layer.regions:
                 if region.stitch_settings.fill_mode == "cross_stitch":
                     region.stitch_settings.cross_method = "cross"
+                    region.stitch_settings.cross_pattern_size_mm = 1.8
 
     project = Project()
     project.name = f"Synthetic face {generation_mode}"
@@ -387,6 +388,162 @@ class DesignPaletteTests(unittest.TestCase):
 
 
 class DetailRecognitionTests(unittest.TestCase):
+    def test_cross_stitch_zones_preserve_mask_and_share_one_global_grid_size(self):
+        color_mask = np.ones((48, 64), dtype=np.uint8)
+        subject = np.zeros_like(color_mask, dtype=bool)
+        subject[8:44, 18:52] = True
+        feature_outline = np.zeros_like(color_mask, dtype=np.uint8)
+        cv2.ellipse(feature_outline, (34, 23), (7, 10), 0, 0, 360, 1, 1)
+        recognition = RecognitionResult(
+            design_map=np.zeros_like(color_mask, dtype=np.int32),
+            design_colors=[],
+            reconstructed_rgb=np.zeros((48, 64, 3), dtype=np.uint8),
+            detail_mask=feature_outline.astype(bool),
+            detail_design_ids=(),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+            feature_outline_mask=feature_outline.astype(bool),
+            feature_outline_groups=(feature_outline.astype(bool),),
+        )
+
+        zones = ImageEngine._cross_stitch_density_zones(color_mask, recognition)
+
+        self.assertEqual(
+            {name for name, _, _ in zones},
+            {"background", "subject", "feature"},
+        )
+        by_name = {name: (mask, size) for name, mask, size in zones}
+        self.assertAlmostEqual(by_name["background"][1], 2.1)
+        self.assertAlmostEqual(by_name["subject"][1], 2.1)
+        self.assertAlmostEqual(by_name["feature"][1], 2.1)
+        overlap = np.sum(
+            [zone_mask > 0 for _, zone_mask, _ in zones],
+            axis=0,
+        )
+        self.assertLessEqual(int(overlap.max()), 1)
+        union = np.logical_or.reduce(
+            [zone_mask > 0 for _, zone_mask, _ in zones]
+        )
+        self.assertTrue(np.array_equal(union, color_mask > 0))
+
+    def test_photo_layers_keep_subject_and_background_planes_with_distinct_density(self):
+        height, width = 36, 48
+        design_map = np.zeros((height, width), dtype=np.int32)
+        subject = np.zeros_like(design_map, dtype=bool)
+        subject[8:32, 14:35] = True
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (70, 130, 210), design_map.size, 0, 0.0),
+            ],
+            reconstructed_rgb=np.full(
+                (height, width, 3),
+                (70, 130, 210),
+                dtype=np.uint8,
+            ),
+            detail_mask=np.zeros_like(subject),
+            detail_design_ids=(),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+        )
+        threads = [
+            ThreadColor(name="Blue", color_rgb=(70, 130, 210)),
+        ]
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            recognition.reconstructed_rgb,
+            "photo_stitch",
+            QuantizationSettings(include_background=True),
+        )
+
+        self.assertEqual(len(layers), 1)
+        by_plane = {
+            region.scene_plane: region
+            for region in layers[0].regions
+            if region.stitch_settings.fill_mode == "scanline"
+        }
+        self.assertEqual(
+            set(by_plane),
+            {"subject_base", "background_base"},
+        )
+        self.assertGreater(
+            by_plane["background_base"].stitch_settings.row_spacing_mm,
+            by_plane["subject_base"].stitch_settings.row_spacing_mm,
+        )
+        union = np.logical_or.reduce(
+            [region.mask > 0 for region in by_plane.values()]
+        )
+        overlap = np.sum(
+            [region.mask > 0 for region in by_plane.values()],
+            axis=0,
+        )
+        self.assertTrue(np.all(union))
+        self.assertLessEqual(int(overlap.max()), 1)
+
+    def test_cross_stitch_layer_builds_aligned_regions_without_extra_thread_layer(self):
+        height, width = 48, 64
+        design_map = np.zeros((height, width), dtype=np.int32)
+        subject = np.zeros_like(design_map, dtype=bool)
+        subject[8:44, 18:52] = True
+        feature_outline = np.zeros_like(design_map, dtype=np.uint8)
+        cv2.ellipse(feature_outline, (34, 23), (7, 10), 0, 0, 360, 1, 1)
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (240, 120, 100), design_map.size, 0, 0.0),
+            ],
+            reconstructed_rgb=np.full(
+                (height, width, 3),
+                (240, 120, 100),
+                dtype=np.uint8,
+            ),
+            detail_mask=feature_outline.astype(bool),
+            detail_design_ids=(),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=subject,
+            feature_outline_mask=feature_outline.astype(bool),
+            feature_outline_groups=(feature_outline.astype(bool),),
+        )
+        threads = [ThreadColor(name="Coral", color_rgb=(240, 120, 100))]
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            threads,
+            generation_mode="cross_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        self.assertEqual(len(layers), 1)
+        fills = [
+            region
+            for region in layers[0].regions
+            if region.stitch_settings.fill_mode == "cross_stitch"
+        ]
+        self.assertEqual(len(fills), 3)
+        self.assertEqual(
+            sorted(
+                round(region.stitch_settings.cross_pattern_size_mm, 2)
+                for region in fills
+            ),
+            [2.1, 2.1, 2.1],
+        )
+        union = np.logical_or.reduce([region.mask > 0 for region in fills])
+        self.assertTrue(np.array_equal(union, np.ones_like(subject)))
+        self.assertEqual(
+            len(
+                {
+                    (
+                        region.design_color_id,
+                        region.design_color_rgb,
+                    )
+                    for region in fills
+                }
+            ),
+            1,
+        )
+
     def test_synthetic_face_cross_pipeline_recalls_semantic_details_with_bounded_layers(
         self,
     ):
@@ -522,8 +679,12 @@ class DetailRecognitionTests(unittest.TestCase):
                     grid_origin_px=context.base_grid_origin_px,
                 )
             )
+        self.assertTrue(boundary_methods)
         self.assertTrue(
-            any(method in ("half", "half_flipped") for method in boundary_methods)
+            any(
+                method is not None and method.startswith("three_quarter_")
+                for method in boundary_methods
+            )
         )
 
         background_uids = {thread.uid for thread in result["threads"][:2]}
@@ -1448,6 +1609,25 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(cleaned[4, 4], 2)
         self.assertEqual(cleaned[2, 2], 3)
 
+    def test_scene_plane_masks_partition_every_source_pixel(self):
+        source = np.zeros((8, 10), dtype=np.uint8)
+        source[1:7, 1:9] = 255
+        subject = np.zeros(source.shape, dtype=bool)
+        subject[2:6, 4:8] = True
+
+        planes = dict(ImageEngine._scene_plane_masks(source, subject))
+
+        self.assertEqual(set(planes), {"subject_base", "background_base"})
+        subject_pixels = planes["subject_base"] > 0
+        background_pixels = planes["background_base"] > 0
+        self.assertFalse(np.any(subject_pixels & background_pixels))
+        self.assertTrue(
+            np.array_equal(
+                subject_pixels | background_pixels,
+                source > 0,
+            )
+        )
+
     def test_thread_map_removes_neutral_antialias_from_subject_silhouette(self):
         subject = np.zeros((15, 15), dtype=bool)
         subject[2:13, 2:13] = True
@@ -1539,7 +1719,7 @@ class ThreadSuggestionTests(unittest.TestCase):
         darkest = min(result.design_colors, key=lambda color: sum(color.color_rgb))
         self.assertEqual(darkest.nearest_thread_index, 0)
 
-    def test_close_design_colors_share_one_thread_layer_and_geometry_region(self):
+    def test_close_design_colors_share_one_thread_layer_and_cover_all_scene_planes(self):
         image = np.zeros((20, 20, 3), dtype=np.uint8)
         image[:, :10] = (30, 140, 205)
         image[:, 10:] = (38, 149, 212)
@@ -1563,9 +1743,22 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertEqual(len(result.design_colors), 2)
         self.assertEqual(len(layers), 1)
         self.assertEqual(layers[0].thread_uid, threads[0].uid)
-        self.assertEqual(len(layers[0].regions), 1)
-        self.assertTrue(np.all(layers[0].regions[0].mask > 0))
-        self.assertEqual(layers[0].regions[0].stitch_settings.fill_mode, "scanline")
+        self.assertGreaterEqual(len(layers[0].regions), 1)
+        union = np.logical_or.reduce(
+            [region.mask > 0 for region in layers[0].regions]
+        )
+        overlap = np.sum(
+            [region.mask > 0 for region in layers[0].regions],
+            axis=0,
+        )
+        self.assertTrue(np.all(union))
+        self.assertLessEqual(int(overlap.max()), 1)
+        self.assertTrue(
+            all(
+                region.stitch_settings.fill_mode == "scanline"
+                for region in layers[0].regions
+            )
+        )
 
     def test_recognition_photo_layers_underpaint_outline_pixels(self):
         design_map = np.zeros((30, 40), dtype=np.int32)
@@ -2266,7 +2459,7 @@ class ThreadSuggestionTests(unittest.TestCase):
             layer.regions[0].is_detail_region,
         )
 
-    def test_disconnected_pixels_of_one_design_color_share_one_region(self):
+    def test_disconnected_pixels_of_one_design_color_share_density_regions(self):
         image = np.full((16, 16, 3), (240, 120, 80), dtype=np.uint8)
         image[1:3, 1:3] = (20, 90, 180)
         image[1:3, 12:14] = (20, 90, 180)
@@ -2293,10 +2486,21 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(layers), 2)
-        self.assertTrue(all(len(layer.regions) == 1 for layer in layers))
+        self.assertTrue(all(1 <= len(layer.regions) <= 3 for layer in layers))
+        self.assertTrue(
+            all(
+                {
+                    round(region.stitch_settings.cross_pattern_size_mm, 2)
+                    for region in layer.regions
+                }
+                == {2.1}
+                for layer in layers
+            )
+        )
         covered = np.zeros(image.shape[:2], dtype=bool)
         for layer in layers:
-            covered |= layer.regions[0].mask > 0
+            for region in layer.regions:
+                covered |= region.mask > 0
         self.assertTrue(np.all(covered))
 
 

@@ -154,6 +154,15 @@ class RecognitionEngine:
             palette_lab,
             int(getattr(settings, "n_colors", len(physical_threads))),
             subject_pixel_counts=subject_pixel_counts,
+            background_weight=(
+                0.35
+                if not bool(getattr(settings, "include_background", False))
+                else 0.35 + 0.9 * float(np.clip(
+                    getattr(settings, "background_detail_level", 0.75),
+                    0.0,
+                    1.0,
+                ))
+            ),
         )
         design_colors = []
         for design_id, color in enumerate(centers_rgb):
@@ -945,6 +954,7 @@ class RecognitionEngine:
         palette_lab: np.ndarray,
         color_limit: int,
         subject_pixel_counts: Optional[np.ndarray] = None,
+        background_weight: float = 0.35,
     ):
         """Limit physical spools while retaining high-resolution design colors."""
         if palette_lab.size == 0:
@@ -978,7 +988,10 @@ class RecognitionEngine:
                 np.asarray(pixel_counts, dtype=np.float64) - subject_counts,
                 0.0,
             )
-            weighted_counts = subject_counts * 4.0 + background_counts * 0.35
+            weighted_counts = (
+                subject_counts * 4.0
+                + background_counts * max(0.0, float(background_weight))
+            )
             for design_id in detail_ids:
                 weighted_counts[design_id] *= 2.0
 

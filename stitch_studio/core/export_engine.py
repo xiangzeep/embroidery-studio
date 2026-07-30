@@ -69,8 +69,12 @@ class ExportEngine:
             region_paths = sorted(
                 region_paths,
                 key=lambda item: (
+                    self._scene_plane_rank(
+                        getattr(item[0], "scene_plane", "subject_base")
+                    ),
                     bool(getattr(item[0], "is_cross_stitch_overlay", False)),
                     bool(item[0].is_detail_region),
+                    int(getattr(item[0], "semantic_z_order", 0)),
                 ),
             )
             # Add thread for this layer
@@ -85,14 +89,37 @@ class ExportEngine:
                     last_y or 0,
                 )
 
-            if region_paths and all(
-                region.stitch_settings.fill_mode == "cross_stitch"
-                for region, _ in region_paths
-            ):
+            cross_fill_paths = [
+                (region, paths)
+                for region, paths in region_paths
+                if (
+                    region.stitch_settings.fill_mode == "cross_stitch"
+                    and not getattr(region, "is_cross_stitch_overlay", False)
+                )
+            ]
+            remaining_region_paths = [
+                (region, paths)
+                for region, paths in region_paths
+                if not (
+                    region.stitch_settings.fill_mode == "cross_stitch"
+                    and not getattr(region, "is_cross_stitch_overlay", False)
+                )
+            ]
+            if cross_fill_paths:
                 ordered_paths = self._order_cross_stitch_group_paths(
-                    region_paths,
+                    cross_fill_paths,
                     last_x,
                     last_y,
+                )
+                connection_threshold_units = max(
+                    float(self.jump_threshold_units),
+                    max(
+                        float(region.stitch_settings.cross_pattern_size_mm)
+                        * 10.0
+                        * np.sqrt(2.0)
+                        * 1.05
+                        for region, _ in cross_fill_paths
+                    ),
                 )
                 for path in ordered_paths:
                     last_x, last_y = self._write_path(
@@ -101,22 +128,23 @@ class ExportEngine:
                         last_x,
                         last_y,
                         connect_nearby=True,
+                        connection_threshold_units=connection_threshold_units,
                     )
             else:
-                for region, paths in region_paths:
-                    connect_nearby = region.stitch_settings.fill_mode not in (
-                        "run",
-                        "satin",
-                        "contour",
+                remaining_region_paths = region_paths
+            for region, paths in remaining_region_paths:
+                for path in self._order_region_paths(region, paths, last_x, last_y):
+                    last_x, last_y = self._write_path(
+                        pattern,
+                        path,
+                        last_x,
+                        last_y,
+                        connect_nearby=region.stitch_settings.fill_mode not in (
+                            "run",
+                            "satin",
+                            "contour",
+                        ),
                     )
-                    for path in self._order_region_paths(region, paths, last_x, last_y):
-                        last_x, last_y = self._write_path(
-                            pattern,
-                            path,
-                            last_x,
-                            last_y,
-                            connect_nearby=connect_nearby,
-                        )
 
         # END does not encode movement in DST. Keep it at the needle position so
         # in-memory bounds match the file that machines and viewers decode.
@@ -252,7 +280,7 @@ class ExportEngine:
     def _thread_for_layer(self, layer: Layer, index: int) -> pyembroidery.EmbThread:
         """Create a thread with fields used by embroidery writers."""
         thread = pyembroidery.EmbThread()
-        r, g, b = layer.matched_thread_rgb or layer.thread_color_rgb
+        r, g, b = layer.effective_color_rgb()
         thread.color = (r << 16) | (g << 8) | b
 
         label = self._safe_thread_text(
@@ -275,23 +303,66 @@ class ExportEngine:
         return thread
 
     def _group_drawable_layers(self, drawable_layers):
-        """Combine design shades that use the same physical embroidery thread."""
+        """Combine equal threads only when moving them cannot change occlusion."""
         grouped = []
-        indexes = {}
+        latest_indexes = {}
         for layer, region_paths in drawable_layers:
-            color = tuple(layer.matched_thread_rgb or layer.thread_color_rgb)
+            color = layer.effective_color_rgb()
             if layer.thread_uid and layer.matched_thread_rgb:
                 key = ("thread", layer.thread_uid)
             else:
                 key = ("color", color)
 
-            index = indexes.get(key)
-            if index is None:
-                indexes[key] = len(grouped)
+            index = latest_indexes.get(key)
+            can_merge = index is not None and all(
+                not self._drawable_regions_overlap(
+                    region_paths,
+                    intervening_paths,
+                )
+                for _, intervening_paths in grouped[index + 1:]
+            )
+            if not can_merge:
+                latest_indexes[key] = len(grouped)
                 grouped.append((layer, list(region_paths)))
             else:
                 grouped[index][1].extend(region_paths)
         return grouped
+
+    @staticmethod
+    def _scene_plane_rank(scene_plane):
+        return {
+            "background_base": 0,
+            "background_detail": 1,
+            "subject_base": 2,
+            "subject_detail": 3,
+        }.get(scene_plane, 2)
+
+    @classmethod
+    def _drawable_regions_overlap(cls, first, second):
+        """Conservatively detect visual dependency between drawable objects."""
+        first_bounds = cls._drawable_bounds(first)
+        second_bounds = cls._drawable_bounds(second)
+        if first_bounds is None or second_bounds is None:
+            return True
+        return not (
+            first_bounds[2] < second_bounds[0]
+            or second_bounds[2] < first_bounds[0]
+            or first_bounds[3] < second_bounds[1]
+            or second_bounds[3] < first_bounds[1]
+        )
+
+    @staticmethod
+    def _drawable_bounds(region_paths):
+        points = [
+            point
+            for _, paths in region_paths
+            for path in paths
+            for point in path
+        ]
+        if not points:
+            return None
+        xs, ys = zip(*points)
+        return min(xs), min(ys), max(xs), max(ys)
 
     def _embed_compact_dst_metadata(
         self,
@@ -550,16 +621,22 @@ class ExportEngine:
         last_x: Optional[int],
         last_y: Optional[int],
         connect_nearby: bool = True,
+        connection_threshold_units: Optional[float] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
         """Write one path, optionally sewing a short gap from the prior path."""
         if len(path) < 2:
             return last_x, last_y
 
         first_x, first_y = int(round(path[0][0])), int(round(path[0][1]))
+        connection_threshold = (
+            float(self.jump_threshold_units)
+            if connection_threshold_units is None
+            else float(connection_threshold_units)
+        )
         connected_to_previous = False
         if last_x is not None and last_y is not None:
             gap = float(np.hypot(first_x - last_x, first_y - last_y))
-            if connect_nearby and gap <= self.jump_threshold_units:
+            if connect_nearby and gap <= connection_threshold:
                 self._write_stitch_segment(pattern, last_x, last_y, first_x, first_y)
                 connected_to_previous = True
             elif gap > self.trim_threshold_units:

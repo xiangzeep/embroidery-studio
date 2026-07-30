@@ -5,6 +5,7 @@ import numpy as np
 from stitch_studio.core.cross_stitch_geometry import (
     CrossStitchCell,
     choose_boundary_half_method,
+    choose_boundary_three_quarter_method,
     classify_cross_stitch_cell,
 )
 
@@ -28,6 +29,22 @@ class CrossStitchBoundaryGeometryTests(unittest.TestCase):
         mask = np.fliplr(np.tri(12, 12, k=0, dtype=np.uint8)) * 255
 
         self.assertEqual(choose_boundary_half_method(mask), "half_flipped")
+
+    def test_descending_boundary_adds_quarter_from_occupied_lower_corner(self):
+        mask = np.tri(12, 12, k=0, dtype=np.uint8) * 255
+
+        self.assertEqual(
+            choose_boundary_three_quarter_method(mask, "half"),
+            "three_quarter_bl",
+        )
+
+    def test_ascending_boundary_adds_quarter_from_occupied_upper_corner(self):
+        mask = np.fliplr(np.tri(12, 12, k=0, dtype=np.uint8)) * 255
+
+        self.assertEqual(
+            choose_boundary_three_quarter_method(mask, "half_flipped"),
+            "three_quarter_br",
+        )
 
     def test_ninety_degree_rotation_flips_half_direction(self):
         descending = np.tri(12, 12, k=0, dtype=np.uint8) * 255

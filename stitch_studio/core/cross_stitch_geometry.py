@@ -64,6 +64,41 @@ def choose_boundary_half_method(
     return "half" if (grid_row + grid_col) % 2 == 0 else "half_flipped"
 
 
+def choose_boundary_three_quarter_method(
+    cell_mask: np.ndarray,
+    half_method: str,
+) -> str:
+    """Add the missing leg from the most occupied interior corner."""
+
+    binary = np.asarray(cell_mask, dtype=np.uint8) > 0
+    if binary.ndim != 2:
+        raise ValueError("cell_mask must be a two-dimensional array")
+    if binary.size == 0:
+        raise ValueError("cell_mask must not be empty")
+    if half_method not in ("half", "half_flipped"):
+        raise ValueError("half_method must be half or half_flipped")
+
+    height, width = binary.shape
+    mid_y = max(1, (height + 1) // 2)
+    mid_x = max(1, (width + 1) // 2)
+    corner_patches = {
+        "tl": binary[:mid_y, :mid_x],
+        "tr": binary[:mid_y, width // 2:],
+        "br": binary[height // 2:, width // 2:],
+        "bl": binary[height // 2:, :mid_x],
+    }
+    candidates = ("tr", "bl") if half_method == "half" else ("tl", "br")
+    corner = max(
+        candidates,
+        key=lambda name: (
+            float(np.mean(corner_patches[name])),
+            int(np.count_nonzero(corner_patches[name])),
+            -candidates.index(name),
+        ),
+    )
+    return f"three_quarter_{corner}"
+
+
 def classify_cross_stitch_cell(
     cell_mask: np.ndarray,
     coverage_threshold: float,

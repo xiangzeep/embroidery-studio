@@ -242,6 +242,28 @@ class StitchWorker(QThread):
         if not base_masks:
             return None
 
+        source_groups = {}
+        source_keys = {}
+        for layer, region in region_jobs:
+            if layer.thread_uid:
+                physical_key = ("thread", layer.thread_uid)
+            else:
+                physical_key = ("color", tuple(layer.effective_color_rgb()))
+            source_keys[region.uid] = physical_key
+            source_region = (region.mask > 0).astype(np.uint8) * 255
+            if physical_key in source_groups:
+                np.maximum(
+                    source_groups[physical_key],
+                    source_region,
+                    out=source_groups[physical_key],
+                )
+            else:
+                source_groups[physical_key] = np.array(source_region, copy=True)
+        source_masks = {
+            region.uid: source_groups[source_keys[region.uid]]
+            for _, region in region_jobs
+        }
+
         dense_masks = None
         if any(
             region.stitch_settings.cross_method == "auto"
@@ -260,6 +282,7 @@ class StitchWorker(QThread):
         return CrossStitchOwnershipContext.from_ownership_masks(
             base_masks,
             dense_masks,
+            source_masks,
         )
 
     @staticmethod
@@ -558,12 +581,24 @@ class MainWindow(QMainWindow):
         self._pending_image_opacity = None
         self._image_opacity_timer = QTimer(self)
         self._image_opacity_timer.setSingleShot(True)
-        self._image_opacity_timer.setInterval(24)
+        self._image_opacity_timer.setInterval(33)
         self._image_opacity_timer.timeout.connect(self._flush_image_opacity)
         self.toolbar_opacity.valueChanged.connect(self._queue_image_opacity)
-        self.toolbar_opacity.sliderPressed.connect(self.canvas.cancel_boundary_edit)
-        self.toolbar_opacity.sliderReleased.connect(self._flush_image_opacity)
+        self.toolbar_opacity.sliderPressed.connect(
+            self._begin_image_opacity_interaction
+        )
+        self.toolbar_opacity.sliderReleased.connect(
+            self._finish_image_opacity_interaction
+        )
         toolbar.addWidget(self.toolbar_opacity)
+
+    def _begin_image_opacity_interaction(self):
+        self.canvas.cancel_boundary_edit()
+        self.canvas.begin_image_opacity_interaction()
+
+    def _finish_image_opacity_interaction(self):
+        self._flush_image_opacity()
+        self.canvas.end_image_opacity_interaction()
 
     def _queue_image_opacity(self, value: int):
         self._pending_image_opacity = max(0.0, min(1.0, float(value) / 100.0))
@@ -1707,7 +1742,7 @@ class MainWindow(QMainWindow):
                     'uid': region.uid,
                     'points': region.stitch_points,
                     'paths': getattr(region, 'stitch_paths', None),
-                    'color': layer.matched_thread_rgb or layer.thread_color_rgb,
+                    'color': layer.effective_color_rgb(),
                 })
         return regions_data
 

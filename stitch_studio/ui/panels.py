@@ -1053,6 +1053,15 @@ class ImagePanel(QWidget):
         self.slider_detail_sensitivity.setValue(65)
         ql.addWidget(self.slider_detail_sensitivity, 9, 1)
 
+        ql.addWidget(QLabel(tr("image.background_detail")), 10, 0)
+        self.slider_background_detail = QSlider(Qt.Horizontal)
+        self.slider_background_detail.setRange(0, 100)
+        self.slider_background_detail.setValue(75)
+        self.slider_background_detail.setToolTip(
+            tr("image.background_detail_tip")
+        )
+        ql.addWidget(self.slider_background_detail, 10, 1)
+
         layout.addWidget(self.grp_quant)
 
         self.lbl_step_generate = QLabel(tr("image.step_generate"))
@@ -1090,6 +1099,9 @@ class ImagePanel(QWidget):
         q.n_colors = self.spin_colors.value()
         q.method = self.combo_method.currentText()
         q.include_background = self.chk_include_background.isChecked()
+        q.background_detail_level = (
+            self.slider_background_detail.value() / 100.0
+        )
         q.preserve_details = self.chk_preserve_details.isChecked()
         q.auto_design_colors = self.chk_auto_design_colors.isChecked()
         q.design_color_budget = (
@@ -1136,6 +1148,9 @@ class ImagePanel(QWidget):
         self.spin_colors.setValue(q.n_colors)
         self.combo_method.setCurrentText(q.method)
         self.chk_include_background.setChecked(q.include_background)
+        self.slider_background_detail.setValue(
+            int(q.background_detail_level * 100)
+        )
         self.chk_preserve_details.setChecked(q.preserve_details)
         self.chk_auto_design_colors.setChecked(q.auto_design_colors)
         if q.design_color_budget > 0:

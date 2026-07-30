@@ -566,6 +566,8 @@ class EmbroideryCanvas(QGraphicsView):
         self._boundary_control_items: List[BoundaryHandleItem] = []
         self._boundary_control_lines: List[QGraphicsLineItem] = []
         self._updating_boundary_handles = False
+        self._image_opacity_preview_item: Optional[QGraphicsPixmapItem] = None
+        self._image_opacity_hidden_items: List[Tuple[QGraphicsItem, bool]] = []
 
         # Scale: 1 scene unit = 1/10 mm (matching pyembroidery)
         self._units_per_mm = 10.0
@@ -578,6 +580,7 @@ class EmbroideryCanvas(QGraphicsView):
 
     def set_background_image(self, image: np.ndarray, output_size_mm: Tuple[float, float]):
         """Set the source image as canvas background."""
+        self.end_image_opacity_interaction()
         if self._bg_item:
             self.scene.removeItem(self._bg_item)
             self._bg_item = None
@@ -690,6 +693,7 @@ class EmbroideryCanvas(QGraphicsView):
 
     def clear_all(self):
         """Clear all items from the scene."""
+        self.end_image_opacity_interaction()
         self.cancel_boundary_edit()
         self._clear_selection_box()
         self.scene.clear()
@@ -721,6 +725,71 @@ class EmbroideryCanvas(QGraphicsView):
     def set_image_opacity(self, opacity: float):
         if self._bg_item:
             self._bg_item.setOpacity(opacity)
+
+    def begin_image_opacity_interaction(self):
+        """Flatten visible foreground while the large source image is composited."""
+        if self._bg_item is None or self._image_opacity_preview_item is not None:
+            return
+
+        viewport_rect = self.viewport().rect()
+        if viewport_rect.width() <= 0 or viewport_rect.height() <= 0:
+            return
+        source_rect = self.mapToScene(viewport_rect).boundingRect()
+        if source_rect.isEmpty():
+            return
+
+        image = QImage(
+            viewport_rect.width(),
+            viewport_rect.height(),
+            QImage.Format_ARGB32_Premultiplied,
+        )
+        image.fill(0)
+        background_visible = self._bg_item.isVisible()
+        self._bg_item.setVisible(False)
+        painter = QPainter(image)
+        try:
+            self.scene.render(
+                painter,
+                QRectF(0.0, 0.0, image.width(), image.height()),
+                source_rect,
+                Qt.IgnoreAspectRatio,
+            )
+        finally:
+            painter.end()
+            self._bg_item.setVisible(background_visible)
+
+        hidden_items = []
+        for item in self.scene.items():
+            if item is self._bg_item or item.parentItem() is not None:
+                continue
+            was_visible = item.isVisible()
+            hidden_items.append((item, was_visible))
+            if was_visible:
+                item.setVisible(False)
+
+        preview = QGraphicsPixmapItem(QPixmap.fromImage(image))
+        preview.setPos(source_rect.left(), source_rect.top())
+        preview.setTransform(QTransform.fromScale(
+            source_rect.width() / max(1, image.width()),
+            source_rect.height() / max(1, image.height()),
+        ))
+        preview.setTransformationMode(Qt.SmoothTransformation)
+        preview.setCacheMode(QGraphicsItem.DeviceCoordinateCache)
+        preview.setZValue(1_000_000.0)
+        self.scene.addItem(preview)
+        self._image_opacity_hidden_items = hidden_items
+        self._image_opacity_preview_item = preview
+
+    def end_image_opacity_interaction(self):
+        """Restore vector foreground after an opacity drag."""
+        preview = self._image_opacity_preview_item
+        if preview is not None and preview.scene() is self.scene:
+            self.scene.removeItem(preview)
+        self._image_opacity_preview_item = None
+        for item, was_visible in self._image_opacity_hidden_items:
+            if item.scene() is self.scene:
+                item.setVisible(was_visible)
+        self._image_opacity_hidden_items = []
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         painter.fillRect(rect, QColor(48, 48, 48))
