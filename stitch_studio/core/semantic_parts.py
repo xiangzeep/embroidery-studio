@@ -29,6 +29,21 @@ class SemanticPartKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class FeatureGuide:
+    """Canonical recognition-time geometry for a protected facial feature."""
+
+    guide_id: str
+    role: str
+    design_color_id: int
+    source_color_rgb: Tuple[int, int, int]
+    thread_index: Optional[int]
+    mask: np.ndarray
+    path: Path
+    kind: SemanticPartKind = SemanticPartKind.CLOSED_CONTOUR
+    locked_corner_indices: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class SemanticPart:
     part_id: str
     kind: SemanticPartKind
@@ -75,6 +90,7 @@ class SemanticPartExtractor:
         detail_mask: np.ndarray,
         subject_mask: np.ndarray,
         thread_matches: Optional[Mapping[int, int]] = None,
+        feature_guides: Sequence[FeatureGuide] = (),
     ) -> Tuple[SemanticPart, ...]:
         source = np.asarray(image, dtype=np.uint8)
         labels = np.asarray(design_map)
@@ -90,10 +106,34 @@ class SemanticPartExtractor:
 
         colors = self._color_lookup(design_colors)
         threads = dict(thread_matches or {})
+        guides = tuple(
+            guide
+            for guide in feature_guides
+            if (
+                np.asarray(guide.mask).shape == labels.shape
+                and len(guide.path) >= 3
+            )
+        )
+        guide_exclusion = np.zeros(labels.shape, dtype=np.uint8)
+        for guide in guides:
+            if guide.kind not in (
+                SemanticPartKind.OPEN_LINE,
+                SemanticPartKind.CLOSED_CONTOUR,
+            ):
+                continue
+            guide_exclusion[np.asarray(guide.mask, dtype=bool)] = 1
+        if np.any(guide_exclusion):
+            guide_exclusion = cv2.dilate(
+                guide_exclusion,
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=1,
+            ).astype(bool)
         candidates = []
         image_area = labels.size
         grouped_ids = {}
         for design_id in sorted(int(value) for value in np.unique(labels)):
+            if design_id < 0:
+                continue
             color = colors.get(design_id)
             if color is None:
                 pixels = source[labels == design_id, :3]
@@ -112,7 +152,6 @@ class SemanticPartExtractor:
 
         for grouped in grouped_ids.values():
             design_ids = [item[0] for item in grouped]
-            binary = np.isin(labels, design_ids).astype(np.uint8)
             pixel_counts = [
                 int(np.count_nonzero(labels == design_id))
                 for design_id in design_ids
@@ -120,6 +159,16 @@ class SemanticPartExtractor:
             dominant_index = int(np.argmax(pixel_counts))
             design_id, color = grouped[dominant_index]
             thread_index = threads.get(design_id)
+            binary = np.isin(labels, design_ids).astype(np.uint8)
+            for guide in guides:
+                if (
+                    guide.design_color_id in design_ids
+                    or (
+                        guide.thread_index is not None
+                        and guide.thread_index == thread_index
+                    )
+                ):
+                    binary[np.asarray(guide.mask, dtype=bool)] = 0
             count, components, stats, _ = cv2.connectedComponentsWithStats(
                 binary,
                 connectivity=8,
@@ -162,6 +211,13 @@ class SemanticPartExtractor:
         parts = [part for _, part in candidates[: self.max_parts]]
         parts = list(self._merge_same_thread_line_parts(source, detail, parts))
         parts = list(self._suppress_redundant_same_thread_fragments(parts))
+        parts = list(
+            self._suppress_antialias_enclosure_rims(
+                parts,
+                labels=labels,
+                colors=colors,
+            )
+        )
         parts = list(self._assign_nested_parents(parts))
         parts = list(self._assign_highlight_parents(parts))
         parts.extend(
@@ -173,8 +229,99 @@ class SemanticPartExtractor:
                 parts,
             )
         )
-        parts.sort(key=lambda item: (item.z_order, item.part_id))
-        return tuple(parts[: self.max_parts])
+        guide_parts = list(self._parts_from_feature_guides(guides))
+        guide_ids = {part.part_id for part in guide_parts}
+        regular_parts = [
+            part
+            for part in parts
+            if (
+                part.part_id not in guide_ids
+                and not self._duplicates_guide_corridor(
+                    part,
+                    guide_exclusion,
+                )
+            )
+        ]
+        regular_budget = max(0, self.max_parts - len(guide_parts))
+        regular_parts.sort(key=lambda item: (item.z_order, item.part_id))
+        selected = regular_parts[:regular_budget] + guide_parts
+        selected.sort(key=lambda item: (item.z_order, item.part_id))
+        return tuple(selected[: self.max_parts])
+
+    @staticmethod
+    def _duplicates_guide_corridor(
+        part: SemanticPart,
+        guide_exclusion: np.ndarray,
+    ) -> bool:
+        if part.kind not in (
+            SemanticPartKind.OPEN_LINE,
+            SemanticPartKind.CLOSED_CONTOUR,
+        ):
+            return False
+        mask = np.asarray(part.mask, dtype=bool)
+        if mask.shape != guide_exclusion.shape or not np.any(mask):
+            return False
+        overlap = np.count_nonzero(mask & guide_exclusion)
+        return overlap / max(1, np.count_nonzero(mask)) >= 0.35
+
+    @staticmethod
+    def _parts_from_feature_guides(
+        guides: Sequence[FeatureGuide],
+    ) -> Tuple[SemanticPart, ...]:
+        parts = []
+        for guide in guides:
+            mask = np.array(guide.mask, dtype=bool, copy=True)
+            if not np.any(mask):
+                continue
+            path = tuple(
+                (float(point[0]), float(point[1]))
+                for point in guide.path
+            )
+            if len(path) < 3:
+                continue
+            if (
+                guide.kind == SemanticPartKind.CLOSED_CONTOUR
+                and path[0] != path[-1]
+            ):
+                path = (*path, path[0])
+            mask.setflags(write=False)
+            parts.append(
+                SemanticPart(
+                    part_id=str(guide.guide_id),
+                    kind=guide.kind,
+                    role=str(guide.role),
+                    design_color_id=int(guide.design_color_id),
+                    source_color_rgb=tuple(
+                        int(channel) for channel in guide.source_color_rgb
+                    ),
+                    thread_index=guide.thread_index,
+                    mask=mask,
+                    paths=(path,),
+                    locked_corner_indices=(
+                        tuple(
+                            int(index)
+                            for index in guide.locked_corner_indices
+                            if 0 <= int(index) < len(path) - 1
+                        )
+                        if guide.kind == SemanticPartKind.CLOSED_CONTOUR
+                        else ()
+                    ),
+                    z_order=(
+                        80
+                        if guide.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
+                        else 50
+                    ),
+                    confidence=1.0,
+                    detail_confidence=1.0,
+                    subject_confidence=1.0,
+                    stitch_intent=(
+                        "protected_highlight"
+                        if guide.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
+                        else "canonical_closed_run"
+                    ),
+                )
+            )
+        return tuple(parts)
 
     @staticmethod
     def _is_tiny_antialias_blend(
@@ -382,6 +529,84 @@ class SemanticPartExtractor:
                 retained.append(part)
         return tuple(retained)
 
+    def _suppress_antialias_enclosure_rims(
+        self,
+        parts: Sequence[SemanticPart],
+        *,
+        labels: np.ndarray,
+        colors: Mapping[int, Tuple[int, int, int]],
+    ) -> Tuple[SemanticPart, ...]:
+        """Drop near-background color rings created around solid dark marks."""
+        compact = [
+            part
+            for part in parts
+            if part.kind == SemanticPartKind.COMPACT_FILL
+        ]
+        retained = []
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        for part in parts:
+            if (
+                part.kind != SemanticPartKind.CLOSED_CONTOUR
+                or not part.hole_paths
+            ):
+                retained.append(part)
+                continue
+
+            enclosed = [
+                child
+                for child in compact
+                if child.area < part.area
+                and any(
+                    self._contains_point(hole, child.centroid)
+                    for hole in part.hole_paths
+                )
+            ]
+            if not enclosed:
+                retained.append(part)
+                continue
+
+            part_luminance = self._luminance(part.source_color_rgb)
+            if not any(
+                part_luminance - self._luminance(child.source_color_rgb) >= 45.0
+                for child in enclosed
+            ):
+                retained.append(part)
+                continue
+
+            mask = np.asarray(part.mask, dtype=bool)
+            neighborhood = cv2.dilate(
+                mask.astype(np.uint8),
+                kernel,
+                iterations=1,
+            ).astype(bool)
+            neighborhood &= ~mask
+            for child in enclosed:
+                neighborhood &= ~np.asarray(child.mask, dtype=bool)
+            neighbor_labels = labels[neighborhood]
+            if not neighbor_labels.size:
+                retained.append(part)
+                continue
+
+            values, counts = np.unique(neighbor_labels, return_counts=True)
+            ranked = sorted(
+                (
+                    (int(count), int(design_id))
+                    for design_id, count in zip(values, counts)
+                    if int(design_id) != part.design_color_id
+                    and int(design_id) in colors
+                ),
+                reverse=True,
+            )
+            if not ranked:
+                retained.append(part)
+                continue
+            exterior_color = np.asarray(colors[ranked[0][1]], dtype=np.float64)
+            rim_color = np.asarray(part.source_color_rgb, dtype=np.float64)
+            if float(np.linalg.norm(exterior_color - rim_color)) > 18.0:
+                retained.append(part)
+
+        return tuple(retained)
+
     def _assign_nested_parents(
         self,
         parts: Sequence[SemanticPart],
@@ -457,6 +682,13 @@ class SemanticPartExtractor:
         stroke_width = float(distance.max() * 2.0)
         elongation = max(width, height) / max(1, min(width, height))
         hole_contours = self._child_contours(contours, hierarchy, outer_index)
+        (_, _), (rotated_width, rotated_height), _ = cv2.minAreaRect(
+            outer.astype(np.float32).reshape(-1, 1, 2)
+        )
+        rotated_fill_ratio = float(np.count_nonzero(component)) / max(
+            1.0,
+            float(rotated_width * rotated_height),
+        )
 
         is_open_line = (
             not hole_contours
@@ -490,8 +722,11 @@ class SemanticPartExtractor:
             )
             is_compact = fill_ratio >= 0.68 or (
                 not hole_contours
-                and fill_ratio >= 0.58
                 and stroke_width >= 5.0
+                and (
+                    fill_ratio >= 0.58
+                    or rotated_fill_ratio >= 0.74
+                )
             )
             kind = (
                 SemanticPartKind.COMPACT_FILL

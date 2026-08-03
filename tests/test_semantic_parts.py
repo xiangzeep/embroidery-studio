@@ -17,12 +17,25 @@ from stitch_studio.core.recognition_engine import (
     RecognitionResult,
 )
 from stitch_studio.core.semantic_parts import (
+    FeatureGuide,
     SemanticPart,
     SemanticPartExtractor,
     SemanticPartKind,
 )
 from stitch_studio.core.stitch_engine import StitchEngine
 from stitch_studio.core.thread_db import ThreadColor
+
+
+def _polyline_turn_angles(path):
+    points = np.asarray(path, dtype=np.float64)
+    vectors = np.diff(points, axis=0)
+    lengths = np.linalg.norm(vectors, axis=1)
+    vectors = vectors[lengths > 1e-6]
+    if len(vectors) < 2:
+        return np.zeros(1, dtype=np.float64)
+    units = vectors / np.linalg.norm(vectors, axis=1)[:, None]
+    dots = np.sum(units[:-1] * units[1:], axis=1)
+    return np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
 
 
 class SemanticPartExtractorTests(unittest.TestCase):
@@ -87,6 +100,183 @@ class SemanticPartExtractorTests(unittest.TestCase):
         self.assertEqual(eye.kind, SemanticPartKind.COMPACT_FILL)
         self.assertEqual(eye.locked_corner_indices, ())
         self.assertTrue(eye.paths[0][0] == eye.paths[0][-1])
+
+    def test_feature_guide_is_the_single_geometry_source_for_a_mouth_outline(self):
+        shape = (72, 96)
+        design_map = np.zeros(shape, dtype=np.int32)
+        guide_mask = np.zeros(shape, dtype=np.uint8)
+        guide_path = (
+            (22.25, 26.75),
+            (28.5, 31.0),
+            (45.0, 37.25),
+            (66.5, 29.5),
+            (74.75, 25.25),
+            (70.0, 52.0),
+            (47.0, 61.5),
+            (25.0, 50.0),
+            (22.25, 26.75),
+        )
+        cv2.polylines(
+            guide_mask,
+            [np.rint(np.asarray(guide_path)).astype(np.int32)],
+            True,
+            1,
+            1,
+            lineType=cv2.LINE_8,
+        )
+        design_map[guide_mask > 0] = 1
+        image = np.full((*shape, 3), (245, 142, 122), dtype=np.uint8)
+        image[guide_mask > 0] = (18, 12, 10)
+        guide = FeatureGuide(
+            guide_id="mouth-outline",
+            role="mouth_outline",
+            design_color_id=1,
+            source_color_rgb=(18, 12, 10),
+            thread_index=1,
+            mask=guide_mask.astype(bool),
+            path=guide_path,
+            locked_corner_indices=(0, 4, 5, 7),
+        )
+
+        parts = self.extractor.extract(
+            image=image,
+            design_map=design_map,
+            design_colors={0: (245, 142, 122), 1: (18, 12, 10)},
+            detail_mask=guide_mask.astype(bool),
+            subject_mask=np.ones(shape, dtype=bool),
+            thread_matches={0: 0, 1: 1},
+            feature_guides=(guide,),
+        )
+
+        mouth = next(part for part in parts if part.part_id == "mouth-outline")
+        self.assertEqual(mouth.paths, (guide_path,))
+        self.assertEqual(mouth.locked_corner_indices, (0, 4, 5, 7))
+        self.assertEqual(mouth.role, "mouth_outline")
+
+    def test_protected_highlight_guide_remains_an_open_running_stitch(self):
+        shape = (36, 48)
+        design_map = np.zeros(shape, dtype=np.int32)
+        guide_mask = np.zeros(shape, dtype=np.uint8)
+        guide_mask[16:18, 23:26] = 1
+        guide_path = (
+            (23.25, 17.25),
+            (24.5, 16.5),
+            (25.5, 15.75),
+        )
+        guide = FeatureGuide(
+            guide_id="pupil-highlight-left",
+            role="pupil_highlight",
+            design_color_id=1,
+            source_color_rgb=(250, 250, 250),
+            thread_index=1,
+            mask=guide_mask.astype(bool),
+            path=guide_path,
+            kind=SemanticPartKind.PROTECTED_HIGHLIGHT,
+        )
+
+        parts = self.extractor.extract(
+            image=np.full((*shape, 3), 24, dtype=np.uint8),
+            design_map=design_map,
+            design_colors={0: (24, 24, 24), 1: (250, 250, 250)},
+            detail_mask=guide_mask.astype(bool),
+            subject_mask=np.ones(shape, dtype=bool),
+            thread_matches={0: 0, 1: 1},
+            feature_guides=(guide,),
+        )
+
+        highlight = next(
+            part for part in parts if part.part_id == "pupil-highlight-left"
+        )
+        self.assertEqual(highlight.paths, (guide_path,))
+        self.assertNotEqual(highlight.paths[0][0], highlight.paths[0][-1])
+
+    def test_rotated_solid_eyebrow_is_compact_fill_not_closed_outline(self):
+        shape = (64, 72)
+        design_map = np.zeros(shape, dtype=np.int32)
+        eyebrow = cv2.boxPoints(((38, 20), (20, 6), -28)).astype(np.int32)
+        cv2.fillConvexPoly(design_map, eyebrow, 1, lineType=cv2.LINE_8)
+        image = np.full((*shape, 3), (250, 140, 119), dtype=np.uint8)
+        image[design_map == 1] = (12, 8, 6)
+
+        parts = self.extractor.extract(
+            image=image,
+            design_map=design_map,
+            design_colors={0: (250, 140, 119), 1: (12, 8, 6)},
+            detail_mask=design_map == 1,
+            subject_mask=np.ones(shape, dtype=bool),
+        )
+
+        eyebrow_part = next(part for part in parts if part.design_color_id == 1)
+        self.assertEqual(eyebrow_part.kind, SemanticPartKind.COMPACT_FILL)
+        self.assertEqual(eyebrow_part.role, "compact_feature")
+        self.assertEqual(eyebrow_part.stitch_intent, "compact_fill")
+
+    def test_tapered_solid_eyebrow_is_compact_fill_not_closed_outline(self):
+        shape = (64, 72)
+        design_map = np.zeros(shape, dtype=np.int32)
+        eyebrow = np.array(
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0],
+                [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0],
+                [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0],
+                [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+                [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+                [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+                [0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ],
+            dtype=np.uint8,
+        )
+        design_map[17:28, 24:36] = eyebrow
+        image = np.full((*shape, 3), (250, 140, 119), dtype=np.uint8)
+        image[design_map == 1] = (12, 8, 6)
+
+        parts = self.extractor.extract(
+            image=image,
+            design_map=design_map,
+            design_colors={0: (250, 140, 119), 1: (12, 8, 6)},
+            detail_mask=design_map == 1,
+            subject_mask=np.ones(shape, dtype=bool),
+        )
+
+        eyebrow_part = next(part for part in parts if part.design_color_id == 1)
+        self.assertEqual(eyebrow_part.kind, SemanticPartKind.COMPACT_FILL)
+        self.assertEqual(eyebrow_part.stitch_intent, "compact_fill")
+
+    def test_near_background_antialias_ring_around_solid_mark_is_suppressed(self):
+        shape = (72, 88)
+        design_map = np.zeros(shape, dtype=np.int32)
+        outer = cv2.boxPoints(((46, 28), (28, 13), -30)).astype(np.int32)
+        eyebrow = cv2.boxPoints(((46, 28), (21, 7), -30)).astype(np.int32)
+        cv2.fillConvexPoly(design_map, outer, 2, lineType=cv2.LINE_8)
+        cv2.fillConvexPoly(design_map, eyebrow, 1, lineType=cv2.LINE_8)
+        image = np.full((*shape, 3), (250, 140, 119), dtype=np.uint8)
+        image[design_map == 2] = (247, 137, 116)
+        image[design_map == 1] = (12, 8, 6)
+
+        parts = self.extractor.extract(
+            image=image,
+            design_map=design_map,
+            design_colors={
+                0: (250, 140, 119),
+                1: (12, 8, 6),
+                2: (247, 137, 116),
+            },
+            detail_mask=design_map != 0,
+            subject_mask=np.ones(shape, dtype=bool),
+        )
+
+        self.assertTrue(
+            any(
+                part.design_color_id == 1
+                and part.kind == SemanticPartKind.COMPACT_FILL
+                for part in parts
+            )
+        )
+        self.assertFalse(any(part.design_color_id == 2 for part in parts))
 
     def test_open_line_is_one_continuous_non_closed_path(self):
         shape = (64, 96)
@@ -863,6 +1053,75 @@ class SemanticPartExtractorTests(unittest.TestCase):
         self.assertTrue(np.any(run_mask))
         self.assertTrue(np.all(fill_mask[run_mask]))
 
+    def test_closed_contour_overlays_broad_same_color_fill_without_carving_it(self):
+        shape = (100, 100)
+        source_rgb = (242, 132, 116)
+        image = np.full((*shape, 3), source_rgb, dtype=np.uint8)
+        design_map = np.zeros(shape, dtype=np.int32)
+        contour_mask = np.zeros(shape, dtype=bool)
+        contour_mask[25:45, 30:70] = True
+        part = SemanticPart(
+            part_id="d0-broad-contour",
+            kind=SemanticPartKind.CLOSED_CONTOUR,
+            role="feature_outline",
+            design_color_id=0,
+            source_color_rgb=source_rgb,
+            thread_index=0,
+            mask=contour_mask,
+            paths=(
+                (
+                    (30.0, 25.0),
+                    (69.0, 25.0),
+                    (69.0, 44.0),
+                    (30.0, 44.0),
+                    (30.0, 25.0),
+                ),
+            ),
+            subject_confidence=1.0,
+        )
+        thread = ThreadColor(name="Coral", color_rgb=source_rgb)
+        metrics = RecognitionMetrics(1.0, 1.0, 1.0, 1.0)
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[DesignColor(0, source_rgb, design_map.size, 0, 0.0)],
+            reconstructed_rgb=image.copy(),
+            detail_mask=np.zeros(shape, dtype=bool),
+            detail_design_ids=(),
+            metrics=metrics,
+            subject_mask=np.ones(shape, dtype=bool),
+            thread_map=design_map.copy(),
+            thread_reconstructed_rgb=image.copy(),
+            thread_metrics=metrics,
+            subject_metrics=metrics,
+            semantic_parts=(part,),
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            [thread],
+            image,
+            generation_mode="photo_stitch",
+            quant_settings=QuantizationSettings(include_background=True),
+        )
+
+        semantic_region = next(
+            region
+            for layer in layers
+            for region in layer.regions
+            if region.semantic_part_id == part.part_id
+        )
+        fill_union = np.zeros(shape, dtype=bool)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.semantic_part_id is None
+                    and region.stitch_settings.fill_mode == "scanline"
+                ):
+                    fill_union |= region.mask > 0
+
+        self.assertEqual(semantic_region.stitch_settings.fill_mode, "run")
+        self.assertTrue(np.all(fill_union[contour_mask]))
+
     def test_semantic_underpaint_stays_inside_its_own_color_layer(self):
         shape = (32, 48)
         detail_mask = np.zeros(shape, dtype=np.uint8)
@@ -905,7 +1164,7 @@ class SemanticPartExtractorTests(unittest.TestCase):
         self.assertTrue(np.all(layers[0].regions[0].mask[detail_mask > 0] > 0))
         self.assertTrue(np.array_equal(layers[1].regions[0].mask, other_before))
 
-    def test_semantic_open_lines_choose_reinforced_run_or_satin_by_width(self):
+    def test_semantic_single_rail_lines_remain_running_stitch_at_any_width(self):
         hairline = np.zeros((48, 72), dtype=np.uint8)
         hairline[24, 10:62] = 255
         narrow_band = np.zeros((48, 72), dtype=np.uint8)
@@ -915,16 +1174,32 @@ class SemanticPartExtractorTests(unittest.TestCase):
             SemanticPartKind.OPEN_LINE,
             hairline,
             "photo_stitch",
+            stitch_intent="continuous_run",
         )
         narrow_band_settings = ImageEngine._semantic_stitch_settings(
             SemanticPartKind.OPEN_LINE,
             narrow_band,
             "photo_stitch",
+            stitch_intent="continuous_run",
         )
 
         self.assertEqual(hairline_settings.fill_mode, "run")
         self.assertEqual(hairline_settings.run_passes, 3)
-        self.assertEqual(narrow_band_settings.fill_mode, "satin")
+        self.assertEqual(narrow_band_settings.fill_mode, "run")
+        self.assertEqual(narrow_band_settings.run_passes, 3)
+
+    def test_semantic_satin_requires_explicit_two_rail_intent(self):
+        narrow_band = np.zeros((48, 72), dtype=np.uint8)
+        narrow_band[22:26, 10:62] = 255
+
+        settings = ImageEngine._semantic_stitch_settings(
+            SemanticPartKind.OPEN_LINE,
+            narrow_band,
+            "photo_stitch",
+            stitch_intent="satin_column",
+        )
+
+        self.assertEqual(settings.fill_mode, "satin")
 
     def test_open_line_uses_recognition_guide_instead_of_reskeletonizing_mask(self):
         mask = np.zeros((56, 72), dtype=np.uint8)
@@ -1001,6 +1276,54 @@ class SemanticPartExtractorTests(unittest.TestCase):
             min(np.linalg.norm(point - (72.0, 36.0)) for point in path_px),
             0.25,
         )
+        self.assertLessEqual(np.linalg.norm(path_px[0] - path_px[-1]), 0.01)
+
+    def test_rounded_closed_contour_smooths_subpixel_guide_jitter(self):
+        guide = [[
+            (18.2, 30.0),
+            (19.1, 24.4),
+            (22.8, 19.7),
+            (28.3, 17.2),
+            (34.6, 18.1),
+            (39.25, 22.65),
+            (40.1, 29.2),
+            (38.4, 35.6),
+            (33.2, 39.3),
+            (26.7, 39.0),
+            (21.4, 35.7),
+            (18.2, 30.0),
+        ]]
+        region = Region(
+            mask=np.ones((52, 60), dtype=np.uint8) * 255,
+            semantic_part_id="eye-outline",
+            semantic_kind=SemanticPartKind.CLOSED_CONTOUR.value,
+            guide_paths_px=guide,
+            guide_paths_closed=[True],
+            guide_corner_indices=[[]],
+            stitch_settings=StitchSettings(
+                fill_mode="run",
+                stitch_length_mm=0.75,
+                run_passes=1,
+                run_trace_contour=True,
+            ),
+        )
+
+        engine = StitchEngine(px_per_mm=4.0)
+        path = engine.generate_region_paths(region)[0]
+        scale = 10.0 / engine.px_per_mm
+        path_px = np.asarray(path, dtype=np.float64) / scale
+
+        exact_guide_hits = sum(
+            min(np.linalg.norm(point - vertex) for point in path_px) <= 1e-6
+            for vertex in guide[0][:-1]
+        )
+        self.assertLessEqual(
+            exact_guide_hits,
+            2,
+            "rounded contours must not preserve every noisy recognition vertex",
+        )
+        turns = _polyline_turn_angles(path_px)
+        self.assertLessEqual(float(np.percentile(turns, 90)), 20.0)
         self.assertLessEqual(np.linalg.norm(path_px[0] - path_px[-1]), 0.01)
 
     def test_satin_halo_cleanup_does_not_erase_semantic_closed_contour(self):

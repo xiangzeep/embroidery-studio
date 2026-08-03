@@ -7,6 +7,7 @@ from PIL import Image
 
 from stitch_studio.calibration.msemb_dataset import MSEmbDataset
 from stitch_studio.calibration.msemb_metrics import measure_msemb_fidelity
+from stitch_studio.calibration.pipeline_runner import MSEmbPipelineRunner
 from stitch_studio.tools.msemb_calibrate import run_calibration
 
 
@@ -113,6 +114,29 @@ class MSEmbMetricTests(unittest.TestCase):
 
 
 class MSEmbCalibrationRunnerTests(unittest.TestCase):
+    def test_patrick_photo_pipeline_keeps_subject_fill_and_quality_floor(self):
+        source_path = (
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "patrick-source.png"
+        )
+        source = np.array(Image.open(source_path).convert("RGB"))
+
+        result = MSEmbPipelineRunner(
+            max_colors=15,
+            max_dimension=512,
+        ).evaluate(source, source, "photo_stitch")
+
+        self.assertGreaterEqual(result["scores"]["overall"], 0.72)
+        self.assertGreaterEqual(result["scores"]["color_similarity"], 0.86)
+        self.assertLess(
+            np.linalg.norm(
+                result["preview"][170, 160].astype(np.float32)
+                - source[170, 160].astype(np.float32)
+            ),
+            16.0,
+        )
+
     def test_runner_writes_report_without_modifying_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "dataset"

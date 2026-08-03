@@ -17,9 +17,9 @@ def install_fake_pyembroidery():
     fake.STITCH = 0
     fake.JUMP = 1
     fake.TRIM = 2
-    fake.COLOR_BREAK = 3
-    fake.COLOR_CHANGE = 4
-    fake.END = 5
+    fake.END = 4
+    fake.COLOR_CHANGE = 5
+    fake.COLOR_BREAK = 226
 
     class EmbThread:
         def __init__(self):
@@ -165,6 +165,16 @@ def real_selected_layer_dst_roundtrip():
 
 
 class ExportPathTests(unittest.TestCase):
+    def test_fake_pyembroidery_uses_real_command_ids(self):
+        pyembroidery = install_fake_pyembroidery()
+
+        self.assertEqual(pyembroidery.STITCH, 0)
+        self.assertEqual(pyembroidery.JUMP, 1)
+        self.assertEqual(pyembroidery.TRIM, 2)
+        self.assertEqual(pyembroidery.END, 4)
+        self.assertEqual(pyembroidery.COLOR_CHANGE, 5)
+        self.assertEqual(pyembroidery.COLOR_BREAK, 226)
+
     def test_same_thread_grouping_preserves_overlapping_color_dependency(self):
         install_fake_pyembroidery()
         export_mod = importlib.import_module("stitch_studio.core.export_engine")
@@ -464,7 +474,10 @@ class ExportPathTests(unittest.TestCase):
         ]
         commands = [command for _, _, command in pattern.stitches]
 
-        self.assertEqual(sewing, [(10, 0), (110, 0), (210, 0)])
+        self.assertEqual(
+            sewing,
+            [(0, 0), (10, 0), (100, 0), (110, 0), (200, 0), (210, 0)],
+        )
         self.assertEqual(commands.count(pyembroidery.JUMP), 3)
 
     def test_selected_layer_export_keeps_fill_first_and_jumps_between_overlays(self):
@@ -497,7 +510,10 @@ class ExportPathTests(unittest.TestCase):
             if command == pyembroidery.STITCH
         ]
         commands = [command for _, _, command in pattern.stitches]
-        self.assertEqual(sewing, [(10, 0), (25, 0), (35, 0)])
+        self.assertEqual(
+            sewing,
+            [(0, 0), (10, 0), (20, 0), (25, 0), (30, 0), (35, 0)],
+        )
         self.assertEqual(commands.count(pyembroidery.JUMP), 3)
 
     def test_selected_layer_pes_export_uses_safe_version_and_thread_fixup(self):
@@ -782,11 +798,13 @@ class ExportPathTests(unittest.TestCase):
         commands = [cmd for _, _, cmd in pattern.stitches]
 
         self.assertEqual(
-            commands[:4],
+            commands[:6],
             [
                 pyembroidery.JUMP,
                 pyembroidery.STITCH,
+                pyembroidery.STITCH,
                 pyembroidery.JUMP,
+                pyembroidery.STITCH,
                 pyembroidery.STITCH,
             ],
         )
@@ -2679,6 +2697,25 @@ class ExportPathTests(unittest.TestCase):
         )
 
         self.assertEqual(len(work_items), 2)
+
+    def test_photo_worker_keeps_disconnected_pupil_highlights_separate(self):
+        main_mod = importlib.import_module("stitch_studio.ui.main_window")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        layer = project_mod.Layer(thread_uid="white", order=0)
+        first = project_mod.Region(mask=np.zeros((16, 24), dtype=np.uint8))
+        second = project_mod.Region(mask=np.zeros((16, 24), dtype=np.uint8))
+        first.mask[5:8, 5:8] = 255
+        second.mask[5:8, 16:19] = 255
+        for region in (first, second):
+            region.semantic_kind = "protected_highlight"
+            region.semantic_role = "pupil_highlight"
+
+        work_items = main_mod.StitchWorker._photo_stitch_work_items(
+            [(layer, first), (layer, second)]
+        )
+
+        self.assertEqual(len(work_items), 2)
+        self.assertTrue(all(len(item[2]) == 1 for item in work_items))
 
     def test_stitch_worker_uses_qthread_finished_after_run_returns(self):
         import inspect

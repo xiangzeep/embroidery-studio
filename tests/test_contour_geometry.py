@@ -46,6 +46,23 @@ class LocalContourGeometryTests(unittest.TestCase):
         )
         self.assertTrue(np.all(distances > _EPSILON), distances)
 
+    def test_explicit_mouth_corner_anchors_survive_when_raster_steps_hide_them(self):
+        points = [
+            (4, 12), (5, 10), (7, 8), (10, 6), (16, 5), (22, 6),
+            (27, 9), (30, 12), (28, 12), (25, 11), (20, 10), (15, 10),
+            (10, 11), (6, 12),
+        ]
+
+        rebuilt = adaptive_closed_contour(
+            points,
+            spacing_px=1.0,
+            locked_corner_indices=(0, 7),
+        )
+
+        self.assertIn((4.0, 12.0), rebuilt)
+        self.assertIn((30.0, 12.0), rebuilt)
+        self.assertEqual(rebuilt[0], rebuilt[-1])
+
     def test_rounded_eye_does_not_lock_pixel_stair_steps(self):
         angles = np.linspace(0.0, 2.0 * np.pi, 48, endpoint=False)
         points = [

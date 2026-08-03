@@ -77,6 +77,10 @@ def _resize_to_target(generated: np.ndarray, target: np.ndarray) -> np.ndarray:
 
 def _edge_mask(image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    # Compare design structure rather than the high-frequency thread texture
+    # introduced by a physically faithful embroidery renderer.
+    sigma = float(np.clip(min(gray.shape[:2]) / 100.0, 0.7, 2.4))
+    gray = cv2.GaussianBlur(gray, (0, 0), sigma)
     high = max(40, int(np.percentile(gray, 75)))
     low = max(15, high // 2)
     return cv2.Canny(gray, low, high) > 0

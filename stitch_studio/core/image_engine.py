@@ -4,6 +4,8 @@ Handles image loading, adjustment, color quantization to thread palette,
 segmentation into regions, and flow field computation.
 """
 
+import copy
+
 import numpy as np
 import cv2
 from types import SimpleNamespace
@@ -590,6 +592,13 @@ class ImageEngine:
         foreground = np.ones(design_map.shape, dtype=bool)
         if source_image is not None and not settings.include_background:
             foreground = ~ImageEngine._detect_background_mask(source_image)
+        subject_mask = getattr(recognition, "subject_mask", None)
+        if generation_mode != "cross_stitch" and settings.include_background:
+            subject_mask = ImageEngine._feature_aware_subject_mask(
+                subject_mask,
+                getattr(recognition, "feature_guides", ()),
+                design_map.shape,
+            )
 
         layer_map = {}
         detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
@@ -655,7 +664,6 @@ class ImageEngine:
                     recognition,
                 )
             else:
-                subject_mask = getattr(recognition, "subject_mask", None)
                 if settings.include_background:
                     density_zones = tuple(
                         (plane, plane_mask, None)
@@ -723,7 +731,6 @@ class ImageEngine:
                     source_image,
                 )
         else:
-            subject_mask = getattr(recognition, "subject_mask", None)
             feature_outline_mask = (
                 None
                 if semantic_parts
@@ -743,6 +750,10 @@ class ImageEngine:
                 )
             ImageEngine._suppress_satin_border_halos(layer_map.values())
             ImageEngine._underpaint_run_details(layer_map.values())
+            ImageEngine._constrain_protected_feature_fills(
+                layer_map.values(),
+                getattr(recognition, "feature_guides", ()),
+            )
             if semantic_parts:
                 ImageEngine._append_semantic_parts(
                     layer_map,
@@ -750,6 +761,10 @@ class ImageEngine:
                     physical_threads,
                     generation_mode,
                     foreground,
+                )
+                ImageEngine._suppress_authoritative_guide_runs(
+                    layer_map.values(),
+                    semantic_parts,
                 )
                 ImageEngine._underpaint_same_layer_semantic_details(
                     layer_map.values(),
@@ -764,6 +779,34 @@ class ImageEngine:
         for order, layer in enumerate(layers):
             layer.order = order
         return layers
+
+    @staticmethod
+    def _feature_aware_subject_mask(
+        subject_mask: Optional[np.ndarray],
+        feature_guides,
+        shape: Tuple[int, int],
+    ) -> Optional[np.ndarray]:
+        """Keep protected facial fills on the subject side of scene splits."""
+        if subject_mask is None or np.asarray(subject_mask).shape != tuple(shape):
+            return subject_mask
+
+        subject = np.asarray(subject_mask, dtype=bool).copy()
+        for guide in feature_guides or ():
+            if (
+                getattr(guide, "role", "") != "eye_outline"
+                or getattr(guide, "kind", None) != SemanticPartKind.CLOSED_CONTOUR
+            ):
+                continue
+            path = np.asarray(getattr(guide, "path", ()), dtype=np.float64)
+            if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] != 2:
+                continue
+            polygon = np.rint(path).astype(np.int32)
+            polygon[:, 0] = np.clip(polygon[:, 0], 0, shape[1] - 1)
+            polygon[:, 1] = np.clip(polygon[:, 1], 0, shape[0] - 1)
+            protected_fill = np.zeros(shape, dtype=np.uint8)
+            cv2.fillPoly(protected_fill, [polygon], 1)
+            subject |= protected_fill.astype(bool)
+        return subject
 
     @staticmethod
     def _scene_plane_masks(
@@ -837,11 +880,26 @@ class ImageEngine:
                 and 0 <= thread_index < len(physical_threads)
                 else None
             )
-            key = (
-                ("thread", matched_thread.uid)
-                if matched_thread
-                else ("design", tuple(part.source_color_rgb))
-            )
+            if part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT:
+                key = (
+                    (
+                        "protected-highlight-thread",
+                        matched_thread.uid,
+                        part.role,
+                    )
+                    if matched_thread
+                    else (
+                        "protected-highlight-design",
+                        tuple(part.source_color_rgb),
+                        part.role,
+                    )
+                )
+            else:
+                key = (
+                    ("thread", matched_thread.uid)
+                    if matched_thread
+                    else ("design", tuple(part.source_color_rgb))
+                )
             layer = layer_map.get(key)
             if layer is None:
                 physical_rgb = (
@@ -868,18 +926,34 @@ class ImageEngine:
                 )
                 layer_map[key] = layer
 
-            ImageEngine._carve_semantic_mask_from_layer(
-                layer,
-                mask,
-                include_semantic=(
-                    part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
-                ),
-            )
+            # Lines and contours are top-stitch geometry, not replacement
+            # color areas. Carving their support mask from the base fill
+            # creates transparent holes when a broad component is classified
+            # as a contour.
+            if part.kind in (
+                SemanticPartKind.COMPACT_FILL,
+                SemanticPartKind.PROTECTED_HIGHLIGHT,
+            ):
+                ImageEngine._carve_semantic_mask_from_layer(
+                    layer,
+                    mask,
+                    include_semantic=(
+                        part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
+                    ),
+                )
             settings = ImageEngine._semantic_stitch_settings(
                 part.kind,
                 mask,
                 generation_mode,
+                stitch_intent=getattr(part, "stitch_intent", ""),
             )
+            if (
+                part.role == "eye_outline"
+                and part.kind == SemanticPartKind.OPEN_LINE
+            ):
+                settings.run_passes = 1
+                settings.run_endpoint_extension_mm = 0.0
+                settings.run_corner_mode = "preserve"
             region_mask = mask.astype(np.uint8) * 255
             guide_paths = [list(path) for path in part.paths]
             if (
@@ -984,16 +1058,117 @@ class ImageEngine:
         layer.regions = retained
 
     @staticmethod
+    def _suppress_authoritative_guide_runs(
+        layers,
+        semantic_parts,
+    ) -> None:
+        """Give canonical facial guides exclusive ownership of their paths."""
+        authoritative = [
+            part
+            for part in semantic_parts
+            if (
+                part.role in ("eye_outline", "mouth_outline")
+                and part.kind in (
+                    SemanticPartKind.OPEN_LINE,
+                    SemanticPartKind.CLOSED_CONTOUR,
+                )
+            )
+        ]
+        if not authoritative:
+            return
+        authoritative_ids = {part.part_id for part in authoritative}
+
+        shape = np.asarray(authoritative[0].mask).shape
+        corridor = np.zeros(shape, dtype=np.uint8)
+        for part in authoritative:
+            mask = np.asarray(part.mask, dtype=bool)
+            if mask.shape == shape:
+                corridor[mask] = 1
+        corridor = cv2.dilate(
+            corridor,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+
+        for layer in layers:
+            retained = []
+            for region in layer.regions:
+                if (
+                    region.semantic_part_id in authoritative_ids
+                    or region.mask is None
+                ):
+                    retained.append(region)
+                    continue
+                if region.stitch_settings.fill_mode not in ("run", "satin"):
+                    retained.append(region)
+                    continue
+                mask = np.asarray(region.mask) > 0
+                if mask.shape != shape:
+                    retained.append(region)
+                    continue
+                mask &= ~corridor
+                if not np.any(mask):
+                    continue
+                if region.semantic_part_id is not None:
+                    region.mask = mask.astype(np.uint8) * 255
+                    region.polygon = GeometryEngine.reconstruct_region_polygon(
+                        region.mask
+                    )
+                    retained.append(region)
+                    continue
+                retained.extend(
+                    ImageEngine._split_disconnected_run_region(
+                        region,
+                        mask,
+                    )
+                )
+            layer.regions = retained
+
+    @staticmethod
+    def _split_disconnected_run_region(
+        region: Region,
+        mask: np.ndarray,
+    ) -> List[Region]:
+        """Keep separate residual marks from being joined by visible stitches."""
+        binary = (np.asarray(mask) > 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            binary,
+            connectivity=8,
+        )
+        components = [
+            label
+            for label in range(1, count)
+            if int(stats[label, cv2.CC_STAT_AREA]) >= 2
+        ]
+        fragments = []
+        for index, label in enumerate(components):
+            fragment = copy.deepcopy(region)
+            if index:
+                fragment.uid = f"{region.uid}-{index + 1}"
+                fragment.name = f"{region.name} {index + 1}"
+            fragment.mask = (labels == label).astype(np.uint8) * 255
+            fragment.polygon = GeometryEngine.reconstruct_region_polygon(
+                fragment.mask
+            )
+            fragment.stitch_points = None
+            fragment.stitch_paths = None
+            fragment.guide_paths_px = []
+            fragment.guide_paths_closed = []
+            fragment.guide_corner_indices = []
+            fragment.stitch_settings.run_restore_source_pixels = False
+            fragments.append(fragment)
+        return fragments
+
+    @staticmethod
     def _semantic_stitch_settings(
         kind: SemanticPartKind,
         mask: np.ndarray,
         generation_mode: str,
+        *,
+        stitch_intent: str = "",
     ) -> StitchSettings:
         if kind == SemanticPartKind.OPEN_LINE:
-            binary = (np.asarray(mask) > 0).astype(np.uint8)
-            distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-            stroke_width_px = float(distance.max() * 2.0)
-            if stroke_width_px > 3.5:
+            if stitch_intent == "satin_column":
                 return ImageEngine._satin_outline_stitch_settings()
             settings = ImageEngine._running_stitch_settings()
             settings.run_corner_mode = "adaptive"
@@ -1008,16 +1183,15 @@ class ImageEngine:
             settings.run_passes = 1
             return settings
         if kind == SemanticPartKind.PROTECTED_HIGHLIGHT:
-            return StitchSettings(
-                fill_mode="scanline",
-                stitch_length_mm=0.45,
-                stitch_length_min_mm=0.2,
-                stitch_length_max_mm=0.7,
-                row_spacing_mm=0.16,
-                density=1.5,
-                underlay=False,
-                contour_count=0,
-            )
+            settings = ImageEngine._running_stitch_settings()
+            settings.stitch_length_mm = 0.35
+            settings.stitch_length_min_mm = 0.15
+            settings.stitch_length_max_mm = 0.6
+            settings.run_corner_mode = "preserve"
+            settings.run_passes = 1
+            settings.run_endpoint_extension_mm = 0.0
+            settings.run_trace_contour = False
+            return settings
         if generation_mode == "cross_stitch":
             settings = ImageEngine._running_stitch_settings()
             settings.stitch_length_mm = 0.8
@@ -2101,7 +2275,10 @@ class ImageEngine:
         if shape is None:
             return
 
-        run_union = np.zeros(shape, dtype=np.uint8)
+        run_unions = {
+            "background": np.zeros(shape, dtype=np.uint8),
+            "subject": np.zeros(shape, dtype=np.uint8),
+        }
         for layer in layers:
             for region in layer.regions:
                 if (
@@ -2109,12 +2286,16 @@ class ImageEngine:
                     and region.mask.shape == shape
                     and region.stitch_settings.fill_mode in ("run", "satin")
                 ):
-                    run_union[region.mask > 0] = 255
-        if not np.any(run_union):
+                    family = (
+                        "background"
+                        if region.scene_plane.startswith("background")
+                        else "subject"
+                    )
+                    run_unions[family][region.mask > 0] = 255
+        if not any(np.any(mask) for mask in run_unions.values()):
             return
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        run_pixels = run_union > 0
         for layer in layers:
             fill_regions = [
                 region
@@ -2128,24 +2309,124 @@ class ImageEngine:
             if not fill_regions:
                 continue
 
-            combined = np.zeros(shape, dtype=np.uint8)
-            for region in fill_regions:
-                combined[region.mask > 0] = 255
-            adjacent_underpaint = (
-                cv2.dilate(combined, kernel, iterations=2) > 0
-            ) & run_pixels
-            if not np.any(adjacent_underpaint):
-                continue
+            for family in ("background", "subject"):
+                family_regions = [
+                    region
+                    for region in fill_regions
+                    if (
+                        region.scene_plane.startswith("background")
+                    ) == (family == "background")
+                ]
+                if not family_regions or not np.any(run_unions[family]):
+                    continue
 
-            target = max(fill_regions, key=lambda region: np.count_nonzero(region.mask))
-            target.mask = np.maximum(
-                target.mask,
-                adjacent_underpaint.astype(np.uint8) * 255,
-            )
-            target.polygon = GeometryEngine.reconstruct_region_polygon(
-                target.mask,
-                simplify=False,
-            )
+                combined = np.zeros(shape, dtype=np.uint8)
+                for region in family_regions:
+                    combined[region.mask > 0] = 255
+                adjacent_underpaint = (
+                    cv2.dilate(combined, kernel, iterations=2) > 0
+                ) & (run_unions[family] > 0)
+                if not np.any(adjacent_underpaint):
+                    continue
+
+                target = max(
+                    family_regions,
+                    key=lambda region: np.count_nonzero(region.mask),
+                )
+                target.mask = np.maximum(
+                    target.mask,
+                    adjacent_underpaint.astype(np.uint8) * 255,
+                )
+                target.polygon = GeometryEngine.reconstruct_region_polygon(
+                    target.mask,
+                    simplify=False,
+                )
+
+    @staticmethod
+    def _constrain_protected_feature_fills(layers, feature_guides) -> None:
+        """Keep facial fills beneath their authoritative closed outlines."""
+        layers = list(layers)
+        shape = next(
+            (
+                region.mask.shape
+                for layer in layers
+                for region in layer.regions
+                if region.mask is not None
+            ),
+            None,
+        )
+        if shape is None:
+            return
+
+        protected = np.zeros(shape, dtype=np.uint8)
+        for guide in feature_guides or ():
+            if (
+                getattr(guide, "role", "") != "eye_outline"
+                or getattr(guide, "kind", None) != SemanticPartKind.CLOSED_CONTOUR
+            ):
+                continue
+            path = np.asarray(getattr(guide, "path", ()), dtype=np.float64)
+            if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] != 2:
+                continue
+            polygon = np.rint(path).astype(np.int32)
+            polygon[:, 0] = np.clip(polygon[:, 0], 0, shape[1] - 1)
+            polygon[:, 1] = np.clip(polygon[:, 1], 0, shape[0] - 1)
+            cv2.fillPoly(protected, [polygon], 255)
+        if not np.any(protected):
+            return
+
+        protected_pixels = protected > 0
+        protected_fill_pixels = cv2.erode(
+            protected,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            iterations=1,
+        ) > 0
+        corridor = cv2.dilate(
+            protected,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            iterations=1,
+        ) > 0
+        minimum_overlap = max(
+            4,
+            int(round(np.count_nonzero(protected_pixels) * 0.05)),
+        )
+        for layer in layers:
+            rebuilt = []
+            for region in layer.regions:
+                if (
+                    region.mask is None
+                    or region.semantic_part_id is not None
+                    or region.stitch_settings.fill_mode != "scanline"
+                ):
+                    rebuilt.append(region)
+                    continue
+
+                source = np.asarray(region.mask) > 0
+                feature_fill = source & protected_fill_pixels
+                if np.count_nonzero(feature_fill) < minimum_overlap:
+                    rebuilt.append(region)
+                    continue
+
+                remainder = source & ~corridor
+                if np.any(remainder):
+                    region.mask = remainder.astype(np.uint8) * 255
+                    region.polygon = GeometryEngine.reconstruct_region_polygon(
+                        region.mask,
+                        simplify=False,
+                    )
+                    rebuilt.append(region)
+
+                protected_region = copy.deepcopy(region)
+                protected_region.name = f"{region.name} protected fill"
+                protected_region.mask = feature_fill.astype(np.uint8) * 255
+                protected_region.polygon = GeometryEngine.reconstruct_region_polygon(
+                    protected_region.mask,
+                    simplify=False,
+                )
+                protected_region.scene_plane = "subject_base"
+                protected_region.stitch_settings.pull_compensation_mm = 0.0
+                rebuilt.append(protected_region)
+            layer.regions = rebuilt
 
     @staticmethod
     def _underpaint_same_layer_semantic_details(layers):

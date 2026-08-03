@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict
-from typing import Sequence
 
 import cv2
 import numpy as np
 from PIL import Image
 
 from stitch_studio.calibration.msemb_metrics import measure_msemb_fidelity
+from stitch_studio.core.export_engine import ExportEngine
 from stitch_studio.core.image_engine import ImageEngine
+from stitch_studio.core.pattern_renderer import PatternRenderer
 from stitch_studio.core.project import Project, QuantizationSettings
 from stitch_studio.core.recognition_engine import RecognitionEngine
 from stitch_studio.core.stitch_engine import StitchEngine
@@ -77,26 +78,24 @@ class MSEmbPipelineRunner:
             raise RuntimeError(worker.failure_message)
         stitched_at = time.perf_counter()
 
-        preview = self._render_stitches(
-            layers,
-            target,
-            working_source.shape[:2],
-            engine.px_per_mm,
+        pattern = ExportEngine().build_pattern(project)
+        pattern_stats = PatternRenderer.statistics(pattern)
+        background = self._border_color(target)
+        height, width = working_source.shape[:2]
+        units_per_pixel = 10.0 / float(engine.px_per_mm)
+        preview = PatternRenderer.render(
+            pattern,
+            size=(height, width),
+            padding=0,
+            background_rgb=background,
+            design_bounds=(
+                0.0,
+                0.0,
+                float(width) * units_per_pixel,
+                float(height) * units_per_pixel,
+            ),
         )
         scores = measure_msemb_fidelity(preview, target).as_dict()
-        paths = [
-            path
-            for layer in layers
-            for region in layer.regions
-            for path in (region.stitch_paths or ())
-            if len(path) >= 2
-        ]
-        stitch_count = sum(len(path) - 1 for path in paths)
-        drawable_layers = sum(
-            1
-            for layer in layers
-            if any(region.stitch_paths for region in layer.regions)
-        )
         return {
             "preview": preview,
             "scores": scores,
@@ -109,8 +108,11 @@ class MSEmbPipelineRunner:
             "layer_count": len(layers),
             "region_count": sum(len(layer.regions) for layer in layers),
             "semantic_part_count": len(recognition.semantic_parts),
-            "stitch_count": stitch_count,
-            "jump_count": max(0, len(paths) - drawable_layers),
+            "stitch_count": pattern_stats.stitch_commands,
+            "jump_count": pattern_stats.jump_commands,
+            "trim_count": pattern_stats.trim_commands,
+            "color_change_count": pattern_stats.color_changes,
+            "pattern_statistics": asdict(pattern_stats),
             "recognition_metrics": asdict(recognition.metrics),
             "thread_metrics": asdict(recognition.thread_metrics),
             "subject_metrics": asdict(recognition.subject_metrics),
@@ -164,12 +166,7 @@ class MSEmbPipelineRunner:
         ]
 
     @staticmethod
-    def _render_stitches(
-        layers,
-        target: np.ndarray,
-        shape: Sequence[int],
-        px_per_mm: float,
-    ) -> np.ndarray:
+    def _border_color(target: np.ndarray) -> tuple[int, int, int]:
         target_rgb = np.asarray(target, dtype=np.uint8)[:, :, :3]
         border = np.concatenate(
             (
@@ -180,24 +177,4 @@ class MSEmbPipelineRunner:
             ),
             axis=0,
         )
-        background = tuple(int(round(value)) for value in np.median(border, axis=0))
-        canvas = np.full((int(shape[0]), int(shape[1]), 3), background, dtype=np.uint8)
-        unit_to_pixel = float(px_per_mm) / 10.0
-        for layer in sorted(layers, key=lambda item: item.order):
-            color = tuple(int(channel) for channel in layer.thread_color_rgb)
-            for region in layer.regions:
-                for path in region.stitch_paths or ():
-                    if len(path) < 2:
-                        continue
-                    points = np.rint(
-                        np.asarray(path, dtype=np.float64) * unit_to_pixel
-                    ).astype(np.int32)
-                    cv2.polylines(
-                        canvas,
-                        [points],
-                        False,
-                        color,
-                        1,
-                        lineType=cv2.LINE_AA,
-                    )
-        return canvas
+        return tuple(int(round(value)) for value in np.median(border, axis=0))

@@ -145,11 +145,18 @@ class StitchWorker(QThread):
                 "satin",
                 "contour",
             )
+            preserve_disconnected_detail = (
+                getattr(region, "semantic_kind", "") == "protected_highlight"
+            )
             key = (
                 id(layer),
                 shape,
                 settings_key,
-                region.uid if separate_outline else None,
+                (
+                    region.uid
+                    if separate_outline or preserve_disconnected_detail
+                    else None
+                ),
             )
             groups.setdefault(key, []).append((layer, region))
 

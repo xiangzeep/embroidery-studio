@@ -8,8 +8,10 @@ import pyembroidery
 import numpy as np
 import os
 from copy import copy
+from dataclasses import asdict, dataclass
 from typing import List, Tuple, Optional, Dict
 from .project import Project, Layer, Region
+from .pattern_renderer import PatternRenderer
 
 
 SUPPORTED_FORMATS = {
@@ -25,6 +27,23 @@ SUPPORTED_FORMATS = {
     'csv': 'CSV Debug',
     'json': 'JSON Debug',
 }
+
+
+@dataclass(frozen=True)
+class ExportRoundTripReport:
+    valid: bool
+    source_stitch_commands: int
+    decoded_stitch_commands: int
+    source_jump_commands: int
+    decoded_jump_commands: int
+    source_bounds: Optional[Tuple[float, float, float, float]]
+    decoded_bounds: Optional[Tuple[float, float, float, float]]
+    source_thread_colors: Tuple[Tuple[int, int, int], ...]
+    decoded_thread_colors: Tuple[Tuple[int, int, int], ...]
+    render_similarity: float
+
+    def as_dict(self):
+        return asdict(self)
 
 
 class ExportEngine:
@@ -172,6 +191,8 @@ class ExportEngine:
             write_settings.setdefault("version", 6.0)
         pyembroidery.write(pattern, filepath, write_settings)
         written_files = [filepath]
+        if filepath.lower().endswith(".pes") and os.path.isfile(filepath):
+            self.validate_roundtrip(pattern, filepath)
         if filepath.lower().endswith(".dst"):
             self._embed_compact_dst_metadata(filepath, pattern)
             self._validate_dst_roundtrip(pattern, filepath)
@@ -179,6 +200,79 @@ class ExportEngine:
             pyembroidery.write(pattern, edr_path, {})
             written_files.append(edr_path)
         return written_files
+
+    def validate_roundtrip(
+        self,
+        source_pattern: pyembroidery.EmbPattern,
+        filepath: str,
+    ) -> ExportRoundTripReport:
+        """Decode an export and reject material geometry or color changes."""
+        if not os.path.isfile(filepath):
+            raise ValueError(f"Exported embroidery file does not exist: {filepath}")
+        try:
+            decoded = pyembroidery.EmbPattern(filepath)
+        except Exception as error:
+            raise ValueError(f"Export readback failed: {error}") from error
+
+        source = PatternRenderer.statistics(source_pattern)
+        actual = PatternRenderer.statistics(decoded)
+        if source.sewn_bounds is None or actual.sewn_bounds is None:
+            raise ValueError("Export readback failed: missing sewn stitches")
+
+        tolerance = tuple(
+            max(2.0, abs(source.sewn_bounds[index + 2] - source.sewn_bounds[index]) * 0.01)
+            for index in range(2)
+        )
+        for index, (expected, observed) in enumerate(
+            zip(source.sewn_bounds, actual.sewn_bounds)
+        ):
+            allowed = tolerance[index % 2]
+            if abs(observed - expected) > allowed:
+                raise ValueError(
+                    "Export readback failed: sewn bounds changed from "
+                    f"{source.sewn_bounds} to {actual.sewn_bounds}"
+                )
+
+        stitch_tolerance = max(2, int(round(source.stitch_commands * 0.01)))
+        if abs(actual.stitch_commands - source.stitch_commands) > stitch_tolerance:
+            raise ValueError(
+                "Export readback failed: stitch count changed from "
+                f"{source.stitch_commands} to {actual.stitch_commands}"
+            )
+
+        extension = os.path.splitext(filepath)[1].lower()
+        if extension == ".pes" and actual.thread_colors != source.thread_colors:
+            raise ValueError(
+                "Export readback failed: thread colors changed from "
+                f"{source.thread_colors} to {actual.thread_colors}"
+            )
+
+        source_render = PatternRenderer.render(source_pattern, size=(720, 960))
+        decoded_render = PatternRenderer.render(decoded, size=(720, 960))
+        difference = (
+            source_render.astype(np.float32)
+            - decoded_render.astype(np.float32)
+        )
+        rmse = float(np.sqrt(np.mean(difference * difference)))
+        render_similarity = float(np.clip(1.0 - rmse / 255.0, 0.0, 1.0))
+        if render_similarity < 0.99:
+            raise ValueError(
+                "Export readback failed: rendered stitch similarity "
+                f"{render_similarity:.4f} is below 0.9900"
+            )
+
+        return ExportRoundTripReport(
+            valid=True,
+            source_stitch_commands=source.stitch_commands,
+            decoded_stitch_commands=actual.stitch_commands,
+            source_jump_commands=source.jump_commands,
+            decoded_jump_commands=actual.jump_commands,
+            source_bounds=source.sewn_bounds,
+            decoded_bounds=actual.sewn_bounds,
+            source_thread_colors=source.thread_colors,
+            decoded_thread_colors=actual.thread_colors,
+            render_similarity=render_similarity,
+        )
 
     def _validate_dst_roundtrip(
         self,
@@ -648,6 +742,14 @@ class ExportEngine:
                 pattern,
                 jump_x,
                 jump_y,
+                first_x,
+                first_y,
+            )
+            # Establish the path start as a sewn needle position. Without this
+            # anchor, PES normalization can convert the first visible segment
+            # into travel and silently remove it during write/read round trips.
+            pattern.add_stitch_absolute(
+                pyembroidery.STITCH,
                 first_x,
                 first_y,
             )

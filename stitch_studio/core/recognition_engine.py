@@ -8,7 +8,16 @@ import numpy as np
 from skimage.color import deltaE_ciede2000, lab2rgb, rgb2lab
 from sklearn.cluster import KMeans, MiniBatchKMeans
 
-from .semantic_parts import SemanticPart, SemanticPartExtractor
+from .contour_geometry import (
+    adaptive_closed_contour,
+    detect_locked_corner_indices,
+)
+from .semantic_parts import (
+    FeatureGuide,
+    SemanticPart,
+    SemanticPartExtractor,
+    SemanticPartKind,
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,7 @@ class RecognitionResult:
     subject_metrics: Optional[RecognitionMetrics] = None
     feature_outline_mask: Optional[np.ndarray] = None
     feature_outline_groups: Tuple[np.ndarray, ...] = ()
+    feature_guides: Tuple[FeatureGuide, ...] = ()
     semantic_parts: Tuple[SemanticPart, ...] = ()
 
 
@@ -174,24 +184,14 @@ class RecognitionEngine:
                 nearest_thread_index=nearest_idx,
                 nearest_thread_delta_e=nearest_delta,
             ))
-        semantic_parts = SemanticPartExtractor().extract(
-            image=rgb,
-            design_map=design_map,
-            design_colors=design_colors,
-            detail_mask=detail_mask,
-            subject_mask=subject_mask,
-            thread_matches={
-                color.design_id: color.nearest_thread_index
-                for color in design_colors
-                if color.nearest_thread_index is not None
-            },
-        )
-
         metrics = cls.measure_fidelity(
             rgb,
             reconstructed,
             source_detail_mask=detail_mask,
-            recognized_detail_mask=detail_mask,
+            recognized_detail_mask=cls.extract_observed_detail_mask(
+                reconstructed,
+                sensitivity=sensitivity,
+            ),
         )
         matched_indices = np.asarray(
             [match[0] if match[0] is not None else -1 for match in thread_matches],
@@ -209,12 +209,14 @@ class RecognitionEngine:
                 subject_mask,
                 detail_mask,
                 palette_rgb,
+                rgb,
             )
             (
                 thread_map,
                 feature_outline_mask,
                 feature_outline_groups,
-            ) = cls._restore_subject_features(
+                feature_guides,
+            ) = cls._restore_subject_features_with_guides(
                 thread_map,
                 rgb,
                 subject_mask,
@@ -222,22 +224,59 @@ class RecognitionEngine:
             )
             assigned = thread_map >= 0
             thread_reconstructed[assigned] = palette_rgb[thread_map[assigned]]
+            used_thread_indices = np.unique(thread_map[assigned])
+            physical_design_colors = [
+                DesignColor(
+                    design_id=int(thread_index),
+                    color_rgb=tuple(
+                        int(channel) for channel in palette_rgb[thread_index]
+                    ),
+                    pixel_count=int(np.count_nonzero(thread_map == thread_index)),
+                    nearest_thread_index=int(thread_index),
+                    nearest_thread_delta_e=0.0,
+                )
+                for thread_index in used_thread_indices
+            ]
+            semantic_parts = SemanticPartExtractor(max_parts=96).extract(
+                image=rgb,
+                design_map=thread_map,
+                design_colors=physical_design_colors,
+                detail_mask=detail_mask | feature_outline_mask,
+                subject_mask=subject_mask,
+                thread_matches={
+                    int(thread_index): int(thread_index)
+                    for thread_index in used_thread_indices
+                },
+                feature_guides=feature_guides,
+            )
         else:
             thread_map = None
             feature_outline_mask = np.zeros((height, width), dtype=bool)
             feature_outline_groups = ()
+            feature_guides = ()
+            semantic_parts = SemanticPartExtractor().extract(
+                image=rgb,
+                design_map=design_map,
+                design_colors=design_colors,
+                detail_mask=detail_mask,
+                subject_mask=subject_mask,
+            )
+        thread_detail_mask = cls.extract_observed_detail_mask(
+            thread_reconstructed,
+            sensitivity=sensitivity,
+        )
         thread_metrics = cls.measure_fidelity(
             rgb,
             thread_reconstructed,
             source_detail_mask=detail_mask,
-            recognized_detail_mask=detail_mask,
+            recognized_detail_mask=thread_detail_mask,
         )
         subject_metrics = cls.measure_fidelity(
             rgb,
             thread_reconstructed,
             assigned_mask=subject_mask,
             source_detail_mask=detail_mask & subject_mask,
-            recognized_detail_mask=detail_mask & subject_mask,
+            recognized_detail_mask=thread_detail_mask & subject_mask,
         )
         return RecognitionResult(
             design_map=design_map,
@@ -253,6 +292,7 @@ class RecognitionEngine:
             subject_metrics=subject_metrics,
             feature_outline_mask=feature_outline_mask,
             feature_outline_groups=feature_outline_groups,
+            feature_guides=feature_guides,
             semantic_parts=semantic_parts,
         )
 
@@ -263,6 +303,28 @@ class RecognitionEngine:
         subject_mask: np.ndarray,
         palette_rgb: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, Tuple[np.ndarray, ...]]:
+        restored, outlines, groups, _ = (
+            RecognitionEngine._restore_subject_features_with_guides(
+                thread_map,
+                source_image,
+                subject_mask,
+                palette_rgb,
+            )
+        )
+        return restored, outlines, groups
+
+    @staticmethod
+    def _restore_subject_features_with_guides(
+        thread_map: np.ndarray,
+        source_image: np.ndarray,
+        subject_mask: np.ndarray,
+        palette_rgb: np.ndarray,
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        Tuple[np.ndarray, ...],
+        Tuple[FeatureGuide, ...],
+    ]:
         """Restore cartoon facial outlines after physical thread reduction."""
         restored = np.asarray(thread_map, dtype=np.int32).copy()
         source = np.asarray(source_image, dtype=np.uint8)
@@ -270,28 +332,29 @@ class RecognitionEngine:
         palette = np.asarray(palette_rgb, dtype=np.uint8)
         outlines = np.zeros(restored.shape, dtype=bool)
         outline_groups = []
+        feature_guides = []
         if (
             source.shape[:2] != restored.shape
             or subject.shape != restored.shape
             or palette.ndim != 2
             or palette.shape[1] < 3
         ):
-            return restored, outlines, ()
+            return restored, outlines, (), ()
 
         selected = np.unique(restored[restored >= 0])
         if not selected.size:
-            return restored, outlines
+            return restored, outlines, (), ()
         luminance = (
             palette[:, 0] * 0.299
             + palette[:, 1] * 0.587
             + palette[:, 2] * 0.114
         )
         chroma = palette[:, :3].max(axis=1) - palette[:, :3].min(axis=1)
-        darkest = int(np.argmin(luminance))
+        darkest = int(selected[np.argmin(luminance[selected])])
         light_candidates = [
             int(index)
             for index in selected
-            if luminance[index] >= 235 and chroma[index] <= 28
+            if luminance[index] >= 185 and chroma[index] <= 48
         ]
         highlight_thread = (
             max(light_candidates, key=lambda index: luminance[index])
@@ -302,59 +365,107 @@ class RecognitionEngine:
         image_area = restored.size
         eye_components = []
         eye_masks = []
+        gray = cv2.cvtColor(source[:, :, :3], cv2.COLOR_RGB2GRAY)
 
         def vector_border(
             component_mask: np.ndarray,
             *,
             preserve_tips: bool = False,
-        ) -> np.ndarray:
+        ) -> Tuple[np.ndarray, Tuple[Tuple[float, float], ...], Tuple[int, ...]]:
             contours, _ = cv2.findContours(
                 component_mask.astype(np.uint8),
                 cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_NONE,
             )
             outline = np.zeros(restored.shape, dtype=np.uint8)
-            for contour in contours:
-                area = float(cv2.contourArea(contour))
-                perimeter = float(cv2.arcLength(contour, True))
-                if area < 2.0 or perimeter <= 1.0:
-                    continue
-                if preserve_tips:
-                    epsilon = max(0.8, perimeter * 0.012)
-                    approx = cv2.approxPolyDP(contour, epsilon, True)
-                    if len(approx) >= 3:
-                        cv2.polylines(
-                            outline,
-                            [approx],
-                            True,
-                            255,
-                            thickness=1,
-                            lineType=cv2.LINE_8,
-                        )
-                        continue
-                if len(contour) >= 5 and not preserve_tips:
-                    try:
-                        cv2.ellipse(
-                            outline,
-                            cv2.fitEllipse(contour),
-                            255,
-                            thickness=1,
-                            lineType=cv2.LINE_8,
-                        )
-                        continue
-                    except cv2.error:
-                        pass
-                epsilon = max(0.6, perimeter * 0.01)
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                cv2.polylines(
-                    outline,
-                    [approx],
-                    True,
-                    255,
-                    thickness=1,
-                    lineType=cv2.LINE_8,
+            viable = [
+                contour
+                for contour in contours
+                if cv2.contourArea(contour) >= 2.0
+                and cv2.arcLength(contour, True) > 1.0
+            ]
+            if not viable:
+                return outline > 0, (), ()
+            contour = max(viable, key=cv2.contourArea)
+            raw = contour[:, 0, :].astype(np.float64)
+            locked_source = (
+                detect_locked_corner_indices(
+                    raw,
+                    support=3,
+                    min_deflection_degrees=42.0,
+                    min_support_length=2.0,
                 )
-            return outline > 0
+                if preserve_tips
+                else ()
+            )
+            if preserve_tips and not locked_source:
+                perimeter = float(cv2.arcLength(contour, True))
+                approximated = cv2.approxPolyDP(
+                    contour,
+                    max(0.8, perimeter * 0.01),
+                    True,
+                )[:, 0, :].astype(np.float64)
+                supported = detect_locked_corner_indices(
+                    approximated,
+                    support=1,
+                    min_deflection_degrees=35.0,
+                    min_support_length=2.0,
+                )
+                locked_source = tuple(
+                    sorted(
+                        {
+                            int(
+                                np.argmin(
+                                    np.linalg.norm(
+                                        raw - approximated[index],
+                                        axis=1,
+                                    )
+                                )
+                            )
+                            for index in supported
+                        }
+                    )
+                )
+            path = adaptive_closed_contour(
+                raw,
+                spacing_px=0.85,
+                smoothing_iterations=1 if preserve_tips else 2,
+                locked_corner_indices=(
+                    locked_source if preserve_tips else None
+                ),
+            )
+            if len(path) < 4:
+                return outline > 0, (), ()
+            path_array = np.asarray(path[:-1], dtype=np.float64)
+            locked = tuple(
+                sorted(
+                    {
+                        int(
+                            np.argmin(
+                                np.linalg.norm(
+                                    path_array - raw[index],
+                                    axis=1,
+                                )
+                            )
+                        )
+                        for index in locked_source
+                    }
+                )
+            )
+            raster_path = np.rint(path_array).astype(np.int32)
+            cv2.polylines(
+                outline,
+                [raster_path],
+                True,
+                255,
+                thickness=1,
+                lineType=cv2.LINE_8,
+            )
+            return (
+                outline > 0,
+                tuple((float(x), float(y)) for x, y in path),
+                locked,
+            )
 
         def thin_line_endpoint_support(component_mask: np.ndarray) -> np.ndarray:
             coords_yx = np.argwhere(component_mask)
@@ -378,6 +489,141 @@ class RecognitionEngine:
                 cv2.circle(support, point, 1, 1, thickness=-1)
             return support.astype(bool) & subject
 
+        def shared_eye_seam(
+            first_mask: np.ndarray,
+            second_mask: np.ndarray,
+        ) -> Tuple[np.ndarray, Tuple[Tuple[float, float], ...]]:
+            """Return one centerline for the interface of touching eye whites."""
+            local_kernel = np.ones((3, 3), dtype=np.uint8)
+            first = np.asarray(first_mask, dtype=bool)
+            second = np.asarray(second_mask, dtype=bool)
+            interface = (
+                first
+                & cv2.dilate(second.astype(np.uint8), local_kernel, iterations=1).astype(bool)
+            ) | (
+                second
+                & cv2.dilate(first.astype(np.uint8), local_kernel, iterations=1).astype(bool)
+            )
+            ys, xs = np.where(interface)
+            empty = np.zeros(restored.shape, dtype=bool)
+            if len(xs) < 4:
+                return empty, ()
+
+            x_span = int(xs.max() - xs.min())
+            y_span = int(ys.max() - ys.min())
+            if max(x_span, y_span) < 4:
+                return empty, ()
+            if y_span >= x_span:
+                first_center_x = float(np.mean(np.where(first)[1]))
+                second_center_x = float(np.mean(np.where(second)[1]))
+                center_x = (first_center_x + second_center_x) * 0.5
+                center_column = int(round(center_x))
+                points = np.asarray(
+                    [
+                        (float(np.median(xs[ys == y])), float(y))
+                        for y in np.unique(ys)
+                    ],
+                    dtype=np.float32,
+                )
+                trim_top = max(2.0, float(y_span) * 0.16)
+                points = points[points[:, 1] >= float(ys.min()) + trim_top]
+                guided_x = []
+                for x_value, y_value in points:
+                    row = int(round(float(y_value)))
+                    start = max(0, center_column - 2)
+                    stop = min(gray.shape[1], center_column + 3)
+                    candidates = np.arange(start, stop, dtype=np.float32)
+                    scores = (
+                        gray[row, start:stop].astype(np.float32)
+                        + np.abs(candidates - float(x_value)) * 22.0
+                    )
+                    guided_x.append(float(candidates[int(np.argmin(scores))]))
+                if len(guided_x) >= 3:
+                    stable_x = np.asarray(guided_x, dtype=np.float32)
+                    padded = np.pad(stable_x, (1, 1), mode="edge")
+                    stable_x = np.asarray(
+                        [
+                            float(np.median(padded[index:index + 3]))
+                            for index in range(len(stable_x))
+                        ],
+                        dtype=np.float64,
+                    )
+                    y_values = points[:, 1].astype(np.float64)
+                    degree = 2 if len(stable_x) >= 5 else 1
+                    coefficients = np.polyfit(y_values, stable_x, degree)
+                    smooth_x = np.polyval(coefficients, y_values)
+                    smooth_x += float(stable_x[0] - smooth_x[0])
+                    guided_x = np.clip(
+                        smooth_x,
+                        float(start),
+                        float(stop - 1),
+                    ).tolist()
+                points[:, 0] = np.asarray(guided_x, dtype=np.float32)
+            else:
+                points = np.asarray(
+                    [
+                        (float(x), float(np.median(ys[xs == x])))
+                        for x in np.unique(xs)
+                    ],
+                    dtype=np.float32,
+                )
+            if len(points) < 2:
+                return empty, ()
+            simplified = cv2.approxPolyDP(
+                points.reshape(-1, 1, 2),
+                0.45,
+                False,
+            )[:, 0, :]
+            if len(simplified) == 2 and len(points) >= 3:
+                midpoint = points[len(points) // 2]
+                simplified = np.vstack(
+                    (simplified[0], midpoint, simplified[-1])
+                )
+            if len(simplified) < 2:
+                return empty, ()
+            seam = np.zeros(restored.shape, dtype=np.uint8)
+            cv2.polylines(
+                seam,
+                [np.rint(simplified).astype(np.int32)],
+                False,
+                255,
+                thickness=1,
+                lineType=cv2.LINE_8,
+            )
+            path = tuple(
+                (float(point[0]), float(point[1]))
+                for point in simplified
+            )
+            return seam > 0, path
+
+        def add_eye_guide(
+            mask: np.ndarray,
+            path: Tuple[Tuple[float, float], ...],
+            *,
+            kind: SemanticPartKind,
+            locked: Tuple[int, ...] = (),
+        ) -> None:
+            if not path or not np.any(mask):
+                return
+            restored[mask] = darkest
+            outlines[mask] = True
+            outline_groups.append(mask.copy())
+            feature_guides.append(
+                FeatureGuide(
+                    guide_id=f"eye-outline-{sum(guide.role == 'eye_outline' for guide in feature_guides)}",
+                    role="eye_outline",
+                    design_color_id=darkest,
+                    source_color_rgb=tuple(
+                        int(channel) for channel in palette[darkest, :3]
+                    ),
+                    thread_index=darkest,
+                    mask=mask,
+                    path=path,
+                    kind=kind,
+                    locked_corner_indices=locked,
+                )
+            )
+
         subject_envelope = np.zeros(restored.shape, dtype=np.uint8)
         subject_contours, _ = cv2.findContours(
             subject.astype(np.uint8),
@@ -386,6 +632,7 @@ class RecognitionEngine:
         )
         if subject_contours:
             cv2.drawContours(subject_envelope, subject_contours, -1, 1, thickness=-1)
+        eye_candidates = []
         for light_index in light_candidates:
             light_mask = (restored == light_index).astype(np.uint8)
             component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -399,35 +646,150 @@ class RecognitionEngine:
                 if area > int(image_area * 0.18):
                     continue
                 component = labels == component_id
-                component_kernel_size = max(
-                    5,
-                    int(round(max(width, height) * 0.70)),
+                eye_candidates.extend(
+                    RecognitionEngine._split_touching_light_features(component)
                 )
-                if component_kernel_size % 2 == 0:
-                    component_kernel_size += 1
-                component_envelope = cv2.dilate(
-                    subject_envelope,
-                    cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (component_kernel_size, component_kernel_size),
+
+        source_rgb = source[:, :, :3].astype(np.int16)
+        source_chroma = source_rgb.max(axis=2) - source_rgb.min(axis=2)
+        source_light = (
+            (gray >= 190)
+            & (source_chroma <= 58)
+            & subject
+        ).astype(np.uint8)
+        source_count, source_labels, source_stats, _ = (
+            cv2.connectedComponentsWithStats(source_light, connectivity=8)
+        )
+        for component_id in range(1, source_count):
+            area = int(source_stats[component_id, cv2.CC_STAT_AREA])
+            if (
+                area < max(35, int(image_area * 0.001))
+                or area > int(image_area * 0.18)
+            ):
+                continue
+            eye_candidates.extend(
+                RecognitionEngine._split_touching_light_features(
+                    source_labels == component_id
+                )
+            )
+
+        for eye_component in eye_candidates:
+            if any(
+                np.count_nonzero(existing & eye_component)
+                / max(1, np.count_nonzero(eye_component))
+                >= 0.72
+                for existing in eye_masks
+            ):
+                continue
+            ys, xs = np.where(eye_component)
+            if not xs.size:
+                continue
+            eye_x = int(xs.min())
+            eye_y = int(ys.min())
+            eye_width = int(xs.max() - eye_x + 1)
+            eye_height = int(ys.max() - eye_y + 1)
+            eye_area = int(xs.size)
+            component_kernel_size = max(
+                5,
+                int(round(max(eye_width, eye_height) * 0.70)),
+            )
+            if component_kernel_size % 2 == 0:
+                component_kernel_size += 1
+            component_envelope = cv2.dilate(
+                subject_envelope,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (component_kernel_size, component_kernel_size),
+                ),
+            )
+            if np.mean(component_envelope[eye_component]) < 0.78:
+                continue
+            if (
+                eye_x <= 1
+                or eye_y <= 1
+                or eye_x + eye_width >= restored.shape[1] - 1
+            ):
+                continue
+            aspect = eye_width / max(1, eye_height)
+            if not 0.35 <= aspect <= 2.4:
+                continue
+            eye_components.append(
+                (
+                    eye_x,
+                    eye_y,
+                    eye_width,
+                    eye_height,
+                    eye_area,
+                    np.asarray(
+                        [float(np.mean(xs)), float(np.mean(ys))],
+                        dtype=np.float64,
                     ),
                 )
-                if np.mean(component_envelope[component]) < 0.78:
-                    continue
-                if x <= 1 or y <= 1 or x + width >= restored.shape[1] - 1:
-                    continue
-                aspect = width / max(1, height)
-                if not 0.35 <= aspect <= 2.4:
-                    continue
-                border = vector_border(component)
-                restored[border] = darkest
-                outlines |= border
-                if np.any(border):
-                    outline_groups.append(border.copy())
-                eye_components.append((x, y, width, height, area, centroids[component_id]))
-                eye_masks.append(component.copy())
+            )
+            eye_masks.append(eye_component.copy())
 
-        gray = cv2.cvtColor(source[:, :, :3], cv2.COLOR_RGB2GRAY)
+        touching_pair = False
+        if len(eye_masks) == 2:
+            seam_mask, seam_path = shared_eye_seam(eye_masks[0], eye_masks[1])
+            seam_points = np.asarray(seam_path, dtype=np.float64)
+            touching_pair = bool(
+                len(seam_points) >= 2
+                and max(
+                    float(np.ptp(seam_points[:, 0])),
+                    float(np.ptp(seam_points[:, 1])),
+                )
+                >= 4.0
+            )
+            if touching_pair:
+                eye_union = (
+                    np.asarray(eye_masks[0], dtype=np.uint8)
+                    | np.asarray(eye_masks[1], dtype=np.uint8)
+                )
+                eye_union = cv2.morphologyEx(
+                    eye_union,
+                    cv2.MORPH_CLOSE,
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3)),
+                    iterations=1,
+                )
+                eye_envelope = np.zeros(restored.shape, dtype=np.uint8)
+                eye_contours, _ = cv2.findContours(
+                    eye_union,
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                if eye_contours:
+                    cv2.drawContours(
+                        eye_envelope,
+                        eye_contours,
+                        -1,
+                        1,
+                        thickness=-1,
+                    )
+                outer_border, outer_path, outer_locked = vector_border(
+                    eye_envelope.astype(bool)
+                )
+                add_eye_guide(
+                    outer_border,
+                    outer_path,
+                    kind=SemanticPartKind.CLOSED_CONTOUR,
+                    locked=outer_locked,
+                )
+                add_eye_guide(
+                    seam_mask,
+                    seam_path,
+                    kind=SemanticPartKind.OPEN_LINE,
+                )
+
+        if not touching_pair:
+            for eye_mask in eye_masks:
+                border, path, locked = vector_border(eye_mask)
+                add_eye_guide(
+                    border,
+                    path,
+                    kind=SemanticPartKind.CLOSED_CONTOUR,
+                    locked=locked,
+                )
+
         source_dark = ((gray <= 72) & subject).astype(np.uint8)
         component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
             source_dark,
@@ -483,7 +845,16 @@ class RecognitionEngine:
                 iterations=1,
             ).astype(bool)
             for item in dark_components:
-                component_id, _, _, _, _, area, _, _ = item
+                (
+                    component_id,
+                    _,
+                    _,
+                    pupil_width,
+                    pupil_height,
+                    area,
+                    _,
+                    pupil_centroid,
+                ) = item
                 if area < 12 or area > int(image_area * 0.04):
                     continue
                 component = labels == component_id
@@ -502,7 +873,8 @@ class RecognitionEngine:
                     enclosed
                     & ~component
                     & eye_interior
-                    & (source_luminance >= 242)
+                    & (source_luminance >= 96)
+                    & (source_chroma <= 16)
                 )
                 highlight_count, highlight_labels, highlight_stats, _ = (
                     cv2.connectedComponentsWithStats(
@@ -515,7 +887,128 @@ class RecognitionEngine:
                         highlight_stats[highlight_id, cv2.CC_STAT_AREA]
                     )
                     if 1 <= highlight_area <= max(6, int(round(area * 0.18))):
-                        restored[highlight_labels == highlight_id] = highlight_thread
+                        highlight_seed = highlight_labels == highlight_id
+                        highlight_support = highlight_seed
+                        if highlight_area < 5:
+                            candidates = cv2.dilate(
+                                highlight_seed.astype(np.uint8),
+                                cv2.getStructuringElement(
+                                    cv2.MORPH_ELLIPSE,
+                                    (3, 3),
+                                ),
+                                iterations=1,
+                            ).astype(bool)
+                            candidates &= envelope > 0
+                            candidates &= eye_interior
+                            support = highlight_seed.copy()
+                            candidate_yx = np.argwhere(
+                                candidates & ~highlight_seed
+                            )
+                            if candidate_yx.size:
+                                seed_center = np.mean(
+                                    np.argwhere(highlight_seed),
+                                    axis=0,
+                                )
+                                distances = np.linalg.norm(
+                                    candidate_yx - seed_center,
+                                    axis=1,
+                                )
+                                needed = min(
+                                    5 - highlight_area,
+                                    len(candidate_yx),
+                                )
+                                for index in np.argsort(distances)[:needed]:
+                                    y, x = candidate_yx[int(index)]
+                                    support[int(y), int(x)] = True
+                            highlight_support = support
+                        highlight_support &= envelope > 0
+                        highlight_support &= eye_interior
+                        # Keep the pupil base continuous. The light glint is
+                        # emitted below as a protected top-stitch guide, so
+                        # assigning its support to the light thread here
+                        # would punch a visible hole into the dark fill.
+                        restored[highlight_support] = darkest
+                        seed_yx = np.argwhere(highlight_seed)
+                        highlight_path = ()
+                        if seed_yx.size:
+                            inset = max(
+                                0.75,
+                                min(
+                                    1.25,
+                                    min(pupil_width, pupil_height) * 0.1,
+                                ),
+                            )
+                            target = np.asarray(
+                                (
+                                    float(pupil_centroid[1]) - inset,
+                                    float(pupil_centroid[0]) + inset,
+                                ),
+                                dtype=np.float64,
+                            )
+                            pupil_distance = cv2.distanceTransform(
+                                component.astype(np.uint8),
+                                cv2.DIST_L2,
+                                5,
+                            )
+                            safe_yx = np.argwhere(pupil_distance >= 1.0)
+                            if not safe_yx.size:
+                                safe_yx = np.argwhere(component)
+                            target_y = int(round(float(target[0])))
+                            target_x = int(round(float(target[1])))
+                            if (
+                                0 <= target_y < component.shape[0]
+                                and 0 <= target_x < component.shape[1]
+                                and pupil_distance[target_y, target_x] >= 1.0
+                            ):
+                                center_y, center_x = target
+                            else:
+                                nearest_index = int(
+                                    np.argmin(
+                                        np.linalg.norm(
+                                            safe_yx.astype(np.float64) - target,
+                                            axis=1,
+                                        )
+                                    )
+                                )
+                                center_y, center_x = safe_yx[nearest_index]
+                            # A pupil glint is a top running stitch, not a
+                            # miniature filled polygon. Keep its geometry
+                            # subpixel-small and consistently rising toward
+                            # the upper-right, matching reflected light.
+                            highlight_path = (
+                                (
+                                    float(center_x) - 0.25,
+                                    float(center_y) + 0.25,
+                                ),
+                                (float(center_x), float(center_y)),
+                                (
+                                    float(center_x) + 0.25,
+                                    float(center_y) - 0.25,
+                                ),
+                            )
+                        if highlight_path:
+                            feature_guides.append(
+                                FeatureGuide(
+                                    guide_id=(
+                                        f"pupil-highlight-"
+                                        f"{len(feature_guides)}"
+                                    ),
+                                    role="pupil_highlight",
+                                    design_color_id=highlight_thread,
+                                    source_color_rgb=tuple(
+                                        int(channel)
+                                        for channel in palette[
+                                            highlight_thread, :3
+                                        ]
+                                    ),
+                                    thread_index=highlight_thread,
+                                    mask=highlight_support,
+                                    path=highlight_path,
+                                    kind=(
+                                        SemanticPartKind.PROTECTED_HIGHLIGHT
+                                    ),
+                                )
+                            )
 
         if eye_components:
             eye_left = min(item[0] for item in eye_components)
@@ -537,17 +1030,37 @@ class RecognitionEngine:
             if mouth_candidates:
                 component_id = max(mouth_candidates, key=lambda item: item[5])[0]
                 mouth = labels == component_id
-                border = vector_border(mouth, preserve_tips=True)
+                border, path, locked = vector_border(
+                    mouth,
+                    preserve_tips=True,
+                )
                 restored[border] = darkest
                 outlines |= border
                 if np.any(border):
                     outline_groups.append(border.copy())
+                if path:
+                    feature_guides.append(
+                        FeatureGuide(
+                            guide_id="mouth-outline",
+                            role="mouth_outline",
+                            design_color_id=darkest,
+                            source_color_rgb=tuple(
+                                int(channel) for channel in palette[darkest, :3]
+                            ),
+                            thread_index=darkest,
+                            mask=border,
+                            path=path,
+                            locked_corner_indices=locked,
+                        )
+                    )
 
         source_pixels = source[:, :, :3].astype(np.float32)
         palette_pixels = palette[:, :3].astype(np.float32)
-        nearest = np.zeros(restored.shape, dtype=np.int32)
+        nearest = np.full(restored.shape, int(selected[0]), dtype=np.int32)
         best_distance_sq = np.full(restored.shape, np.inf, dtype=np.float32)
-        for palette_index, color in enumerate(palette_pixels):
+        for palette_index in selected:
+            palette_index = int(palette_index)
+            color = palette_pixels[palette_index]
             red = source_pixels[:, :, 0] - color[0]
             green = source_pixels[:, :, 1] - color[1]
             blue = source_pixels[:, :, 2] - color[2]
@@ -616,7 +1129,106 @@ class RecognitionEngine:
                     continue
                 restored[component] = target_index
 
-        return restored, outlines, tuple(outline_groups)
+        return (
+            restored,
+            outlines,
+            tuple(outline_groups),
+            tuple(feature_guides),
+        )
+
+    @staticmethod
+    def _split_touching_light_features(
+        component_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, ...]:
+        """Split a touching pair of rounded light features at its distance peaks."""
+        component = np.asarray(component_mask, dtype=bool)
+        ys, xs = np.where(component)
+        if not xs.size:
+            return ()
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        if width / max(1, height) < 1.02 or min(width, height) < 7:
+            return (component,)
+
+        filled = np.zeros(component.shape, dtype=np.uint8)
+        contours, _ = cv2.findContours(
+            component.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if contours:
+            cv2.drawContours(filled, contours, -1, 1, thickness=-1)
+        else:
+            filled[component] = 1
+        distance = cv2.distanceTransform(
+            filled,
+            cv2.DIST_L2,
+            5,
+        )
+        peak_value = float(distance.max())
+        if peak_value < 2.0:
+            return (component,)
+        smoothed = cv2.GaussianBlur(distance, (0, 0), 1.0)
+        local_maximum = smoothed >= (
+            cv2.dilate(smoothed, np.ones((5, 5), dtype=np.uint8)) - 1e-4
+        )
+        peak_mask = (
+            local_maximum
+            & (filled > 0)
+            & (smoothed >= peak_value * 0.52)
+        )
+        count, peak_labels, _, peak_centroids = cv2.connectedComponentsWithStats(
+            peak_mask.astype(np.uint8),
+            connectivity=8,
+        )
+        candidates = []
+        for peak_id in range(1, count):
+            peak = peak_labels == peak_id
+            if not np.any(peak):
+                continue
+            candidates.append(
+                (
+                    float(np.max(smoothed[peak])),
+                    np.asarray(peak_centroids[peak_id], dtype=np.float64),
+                )
+            )
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if len(candidates) < 2:
+            return (component,)
+
+        first = candidates[0][1]
+        second = next(
+            (
+                center
+                for _, center in candidates[1:]
+                if abs(float(center[0] - first[0])) >= max(4.0, width * 0.18)
+                and abs(float(center[1] - first[1])) <= height * 0.55
+                and float(np.linalg.norm(center - first)) >= max(5.0, width * 0.22)
+            ),
+            None,
+        )
+        if second is None:
+            return (component,)
+
+        pixels = np.column_stack((xs, ys)).astype(np.float64)
+        first_distance = np.sum((pixels - first) ** 2, axis=1)
+        second_distance = np.sum((pixels - second) ** 2, axis=1)
+        first_mask = np.zeros(component.shape, dtype=bool)
+        second_mask = np.zeros(component.shape, dtype=bool)
+        first_owned = first_distance <= second_distance
+        first_mask[ys[first_owned], xs[first_owned]] = True
+        second_mask[ys[~first_owned], xs[~first_owned]] = True
+        minimum_area = max(12, int(round(np.count_nonzero(component) * 0.22)))
+        if (
+            np.count_nonzero(first_mask) < minimum_area
+            or np.count_nonzero(second_mask) < minimum_area
+        ):
+            return (component,)
+        ordered = sorted(
+            (first_mask, second_mask),
+            key=lambda mask: float(np.mean(np.where(mask)[1])),
+        )
+        return tuple(ordered)
 
     @staticmethod
     def _clean_thread_map(
@@ -624,6 +1236,7 @@ class RecognitionEngine:
         subject_mask: np.ndarray,
         detail_mask: np.ndarray,
         palette_rgb: Optional[np.ndarray] = None,
+        source_rgb: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Merge isolated subject flecks into their surrounding thread color."""
         cleaned = np.asarray(thread_map, dtype=np.int32).copy()
@@ -665,6 +1278,23 @@ class RecognitionEngine:
         if palette is None or palette.ndim != 2 or palette.shape[1] < 3:
             return cleaned
 
+        cleaned = RecognitionEngine._absorb_near_color_enclosure_rims(
+            cleaned,
+            subject,
+            palette,
+        )
+        cleaned = RecognitionEngine._fill_source_supported_dark_holes(
+            cleaned,
+            subject,
+            palette,
+            source_rgb,
+        )
+        cleaned = RecognitionEngine._suppress_transition_fringes(
+            cleaned,
+            subject,
+            palette,
+            source_rgb,
+        )
         eroded_subject = cv2.erode(
             subject.astype(np.uint8),
             np.ones((3, 3), dtype=np.uint8),
@@ -713,6 +1343,375 @@ class RecognitionEngine:
                     continue
                 values, counts = np.unique(neighbors, return_counts=True)
                 cleaned[component] = int(values[int(np.argmax(counts))])
+        return cleaned
+
+    @staticmethod
+    def _suppress_transition_fringes(
+        thread_map: np.ndarray,
+        subject_mask: np.ndarray,
+        palette_rgb: np.ndarray,
+        source_rgb: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Remove thin third-color bands created by antialiased boundaries."""
+        cleaned = np.asarray(thread_map, dtype=np.int32).copy()
+        original = cleaned.copy()
+        subject = np.asarray(subject_mask, dtype=bool)
+        palette = np.asarray(palette_rgb, dtype=np.float64)
+        source = np.asarray(source_rgb) if source_rgb is not None else None
+        if (
+            source is None
+            or source.ndim != 3
+            or source.shape[:2] != cleaned.shape
+            or subject.shape != cleaned.shape
+            or palette.ndim != 2
+            or palette.shape[1] < 3
+        ):
+            return cleaned
+
+        source_pixels = source[:, :, :3].astype(np.float64)
+        max_area = max(24, int(round(cleaned.size * 0.015)))
+        ring_kernel = np.ones((5, 5), dtype=np.uint8)
+
+        def segment_fit(
+            color: np.ndarray,
+            first: np.ndarray,
+            second: np.ndarray,
+        ) -> Tuple[float, float]:
+            axis = second - first
+            denominator = float(np.dot(axis, axis))
+            if denominator <= 1.0:
+                return np.inf, 0.0
+            position = float(np.dot(color - first, axis) / denominator)
+            projected = first + np.clip(position, 0.0, 1.0) * axis
+            return float(np.linalg.norm(color - projected)), position
+
+        for thread_index in np.unique(original):
+            thread_index = int(thread_index)
+            if thread_index < 0 or thread_index >= len(palette):
+                continue
+            label_mask = (original == thread_index).astype(np.uint8)
+            component_count, components, stats, _ = (
+                cv2.connectedComponentsWithStats(label_mask, connectivity=8)
+            )
+            for component_id in range(1, component_count):
+                area = int(stats[component_id, cv2.CC_STAT_AREA])
+                if area < 1 or area > max_area:
+                    continue
+                component = components == component_id
+                thickness = cv2.distanceTransform(
+                    component.astype(np.uint8),
+                    cv2.DIST_L2,
+                    3,
+                )
+                if float(np.max(thickness)) > 2.4:
+                    continue
+
+                ring = cv2.dilate(
+                    component.astype(np.uint8),
+                    ring_kernel,
+                    iterations=1,
+                ).astype(bool)
+                ring &= ~component
+                neighbors = original[ring]
+                neighbors = neighbors[
+                    (neighbors >= 0)
+                    & (neighbors < len(palette))
+                    & (neighbors != thread_index)
+                ]
+                if neighbors.size < 4:
+                    continue
+                values, counts = np.unique(neighbors, return_counts=True)
+                order = np.argsort(counts)[::-1][:4]
+                candidates = [
+                    (int(values[index]), int(counts[index]))
+                    for index in order
+                    if int(counts[index]) >= max(2, int(neighbors.size * 0.06))
+                ]
+                if len(candidates) < 2:
+                    continue
+
+                source_color = np.median(source_pixels[component], axis=0)
+                current_color = palette[thread_index, :3]
+                best_pair = None
+                best_score = np.inf
+                for first_position in range(len(candidates) - 1):
+                    for second_position in range(first_position + 1, len(candidates)):
+                        first_index = candidates[first_position][0]
+                        second_index = candidates[second_position][0]
+                        first_color = palette[first_index, :3]
+                        second_color = palette[second_index, :3]
+                        source_error, source_position = segment_fit(
+                            source_color,
+                            first_color,
+                            second_color,
+                        )
+                        palette_error, palette_position = segment_fit(
+                            current_color,
+                            first_color,
+                            second_color,
+                        )
+                        source_is_mixture = (
+                            0.06 <= source_position <= 0.94
+                            and source_error <= 38.0
+                        )
+                        palette_is_mixture = (
+                            0.06 <= palette_position <= 0.94
+                            and palette_error <= 28.0
+                        )
+                        if not (source_is_mixture or palette_is_mixture):
+                            continue
+                        score = min(
+                            source_error if source_is_mixture else np.inf,
+                            palette_error if palette_is_mixture else np.inf,
+                        )
+                        if score < best_score:
+                            best_score = score
+                            best_pair = (first_index, second_index)
+                if best_pair is None:
+                    continue
+
+                first_index, second_index = best_pair
+                first_ring = ring & (original == first_index)
+                second_ring = ring & (original == second_index)
+                first_subject_ratio = (
+                    float(np.mean(subject[first_ring]))
+                    if np.any(first_ring)
+                    else 0.5
+                )
+                second_subject_ratio = (
+                    float(np.mean(subject[second_ring]))
+                    if np.any(second_ring)
+                    else 0.5
+                )
+                if abs(first_subject_ratio - second_subject_ratio) >= 0.55:
+                    inside_index = (
+                        first_index
+                        if first_subject_ratio > second_subject_ratio
+                        else second_index
+                    )
+                    outside_index = (
+                        second_index
+                        if inside_index == first_index
+                        else first_index
+                    )
+                    cleaned[component & subject] = inside_index
+                    cleaned[component & ~subject] = outside_index
+                    continue
+
+                distance_to_first = cv2.distanceTransform(
+                    (original != first_index).astype(np.uint8),
+                    cv2.DIST_L2,
+                    3,
+                )
+                distance_to_second = cv2.distanceTransform(
+                    (original != second_index).astype(np.uint8),
+                    cv2.DIST_L2,
+                    3,
+                )
+                choose_first = component & (distance_to_first < distance_to_second)
+                choose_second = component & (distance_to_second < distance_to_first)
+                ties = component & ~(choose_first | choose_second)
+                if np.any(ties):
+                    first_error = np.linalg.norm(
+                        source_pixels - palette[first_index, :3],
+                        axis=2,
+                    )
+                    second_error = np.linalg.norm(
+                        source_pixels - palette[second_index, :3],
+                        axis=2,
+                    )
+                    choose_first |= ties & (first_error <= second_error)
+                    choose_second |= ties & ~choose_first
+                cleaned[choose_first] = first_index
+                cleaned[choose_second] = second_index
+
+        return cleaned
+
+    @staticmethod
+    def _fill_source_supported_dark_holes(
+        thread_map: np.ndarray,
+        subject_mask: np.ndarray,
+        palette_rgb: np.ndarray,
+        source_rgb: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Repair tiny quantization holes inside source-solid dark marks."""
+        cleaned = np.asarray(thread_map, dtype=np.int32).copy()
+        source = np.asarray(source_rgb) if source_rgb is not None else None
+        subject = np.asarray(subject_mask, dtype=bool)
+        palette = np.asarray(palette_rgb, dtype=np.float64)
+        if (
+            source is None
+            or source.ndim != 3
+            or source.shape[:2] != cleaned.shape
+            or palette.ndim != 2
+            or palette.shape[1] < 3
+        ):
+            return cleaned
+
+        palette_luminance = (
+            palette[:, 0] * 0.299
+            + palette[:, 1] * 0.587
+            + palette[:, 2] * 0.114
+        )
+        source_rgb64 = source[:, :, :3].astype(np.float64)
+        source_luminance = (
+            source_rgb64[:, :, 0] * 0.299
+            + source_rgb64[:, :, 1] * 0.587
+            + source_rgb64[:, :, 2] * 0.114
+        )
+        max_component_area = max(256, int(round(cleaned.size * 0.02)))
+        max_hole_area = max(16, int(round(cleaned.size * 0.0015)))
+
+        for thread_index in np.unique(cleaned[subject]):
+            thread_index = int(thread_index)
+            if (
+                thread_index < 0
+                or thread_index >= len(palette)
+                or palette_luminance[thread_index] > 115.0
+            ):
+                continue
+            label_mask = ((cleaned == thread_index) & subject).astype(np.uint8)
+            component_count, components, stats, _ = cv2.connectedComponentsWithStats(
+                label_mask,
+                connectivity=8,
+            )
+            for component_id in range(1, component_count):
+                area = int(stats[component_id, cv2.CC_STAT_AREA])
+                if area < 12 or area > max_component_area:
+                    continue
+                component = components == component_id
+                contours, hierarchy = cv2.findContours(
+                    component.astype(np.uint8),
+                    cv2.RETR_CCOMP,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                if hierarchy is None:
+                    continue
+                for contour_index, contour in enumerate(contours):
+                    if hierarchy[0][contour_index][3] < 0:
+                        continue
+                    hole = np.zeros(cleaned.shape, dtype=np.uint8)
+                    cv2.drawContours(hole, [contour], -1, 1, thickness=-1)
+                    hole_mask = (hole > 0) & ~component & subject
+                    hole_area = int(np.count_nonzero(hole_mask))
+                    if (
+                        hole_area == 0
+                        or hole_area > max_hole_area
+                        or hole_area / max(1, area) > 0.35
+                    ):
+                        continue
+                    pixels = source_rgb64[hole_mask]
+                    median_distance = float(
+                        np.median(
+                            np.linalg.norm(
+                                pixels - palette[thread_index, :3],
+                                axis=1,
+                            )
+                        )
+                    )
+                    median_luminance = float(np.median(source_luminance[hole_mask]))
+                    if (
+                        median_distance <= 85.0
+                        and median_luminance
+                        <= min(145.0, palette_luminance[thread_index] + 70.0)
+                    ):
+                        cleaned[hole_mask] = thread_index
+        return cleaned
+
+    @staticmethod
+    def _absorb_near_color_enclosure_rims(
+        thread_map: np.ndarray,
+        subject_mask: np.ndarray,
+        palette_rgb: np.ndarray,
+    ) -> np.ndarray:
+        """Merge antialias color rings back into the surrounding base color."""
+        cleaned = np.asarray(thread_map, dtype=np.int32).copy()
+        subject = np.asarray(subject_mask, dtype=bool)
+        palette = np.asarray(palette_rgb, dtype=np.float64)
+        max_area = max(256, int(round(cleaned.size * 0.025)))
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        luminance = (
+            palette[:, 0] * 0.299
+            + palette[:, 1] * 0.587
+            + palette[:, 2] * 0.114
+        )
+
+        for thread_index in np.unique(cleaned[subject]):
+            thread_index = int(thread_index)
+            if thread_index < 0 or thread_index >= len(palette):
+                continue
+            label_mask = ((cleaned == thread_index) & subject).astype(np.uint8)
+            component_count, components, stats, _ = (
+                cv2.connectedComponentsWithStats(label_mask, connectivity=8)
+            )
+            for component_id in range(1, component_count):
+                area = int(stats[component_id, cv2.CC_STAT_AREA])
+                if area < 8 or area > max_area:
+                    continue
+                component = components == component_id
+                contours, hierarchy = cv2.findContours(
+                    component.astype(np.uint8),
+                    cv2.RETR_CCOMP,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                if hierarchy is None:
+                    continue
+                hole_indices = [
+                    index
+                    for index in range(len(contours))
+                    if hierarchy[0][index][3] >= 0
+                ]
+                if not hole_indices:
+                    continue
+
+                hole_mask = np.zeros(cleaned.shape, dtype=np.uint8)
+                cv2.drawContours(
+                    hole_mask,
+                    [contours[index] for index in hole_indices],
+                    -1,
+                    1,
+                    thickness=-1,
+                )
+                enclosed = cleaned[(hole_mask > 0) & ~component]
+                enclosed = enclosed[
+                    (enclosed >= 0) & (enclosed < len(palette))
+                ]
+                if not enclosed.size or not np.any(
+                    luminance[thread_index] - luminance[enclosed] >= 45.0
+                ):
+                    continue
+
+                neighborhood = cv2.dilate(
+                    component.astype(np.uint8),
+                    kernel,
+                    iterations=1,
+                ).astype(bool)
+                neighborhood &= ~component
+                neighborhood &= subject
+                neighbors = cleaned[neighborhood]
+                neighbors = neighbors[
+                    (neighbors >= 0)
+                    & (neighbors < len(palette))
+                    & (neighbors != thread_index)
+                ]
+                if not neighbors.size:
+                    continue
+                values, counts = np.unique(neighbors, return_counts=True)
+                related = [
+                    (int(count), int(value))
+                    for value, count in zip(values, counts)
+                    if float(
+                        np.linalg.norm(
+                            palette[int(value)] - palette[thread_index]
+                        )
+                    )
+                    <= 18.0
+                ]
+                if not related:
+                    continue
+                replacement = max(related, key=lambda item: item[0])[1]
+                cleaned[component] = replacement
+
         return cleaned
 
     @staticmethod
@@ -1165,6 +2164,32 @@ class RecognitionEngine:
                 detail[component] = True
 
         return detail
+
+    @classmethod
+    def extract_observed_detail_mask(
+        cls,
+        image: np.ndarray,
+        support_mask: Optional[np.ndarray] = None,
+        sensitivity: float = 0.65,
+    ) -> np.ndarray:
+        """Measure visible detail independently from the source detail mask."""
+        rgb = np.asarray(image, dtype=np.uint8)
+        observed = cls.detect_fine_details(
+            rgb,
+            sensitivity=sensitivity,
+        )
+        gray = cv2.cvtColor(rgb[:, :, :3], cv2.COLOR_RGB2GRAY)
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+        low = max(6, int(round(20.0 * (1.15 - sensitivity))))
+        high = max(low + 8, int(round(low * 2.8)))
+        visible_edges = cv2.Canny(gray, low, high, L2gradient=True) > 0
+        observed |= visible_edges
+        if support_mask is None:
+            return observed
+        support = np.asarray(support_mask, dtype=bool)
+        if support.shape != observed.shape:
+            raise ValueError("Detail support mask must match image dimensions")
+        return observed & support
 
     @staticmethod
     def measure_fidelity(

@@ -60,6 +60,7 @@ class StitchSettings:
     run_endpoint_extension_mm: float = 0.0  # recover pointed antialias tips on open runs
     run_preserve_corners: bool = False  # retain high-curvature vertices in closed runs
     run_corner_mode: str = "legacy"  # legacy, smooth, preserve, or adaptive
+    run_restore_source_pixels: bool = True  # recover antialias fragments near a raw run mask
     flow_strength: float = 1.0  # how much flow field influences direction
     flow_smoothing: float = 3.0  # gaussian sigma for flow field smoothing
     cross_method: str = "auto"

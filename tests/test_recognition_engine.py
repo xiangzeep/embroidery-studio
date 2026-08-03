@@ -3,6 +3,7 @@ from dataclasses import replace
 import hashlib
 import importlib
 import os
+from pathlib import Path
 import statistics
 import time
 import tracemalloc
@@ -1331,6 +1332,48 @@ class DetailRecognitionTests(unittest.TestCase):
 
 
 class ThreadSuggestionTests(unittest.TestCase):
+    def test_subject_feature_restore_splits_touching_eye_whites_into_two_outlines(self):
+        height, width = 92, 118
+        coral = (250, 140, 119)
+        black = (8, 8, 8)
+        white = (252, 252, 252)
+        source = np.full((height, width, 3), coral, dtype=np.uint8)
+        subject = np.ones((height, width), dtype=bool)
+        palette = np.asarray([black, coral, white], dtype=np.uint8)
+        thread_map = np.full((height, width), 1, dtype=np.int32)
+
+        left_eye = np.zeros((height, width), dtype=np.uint8)
+        right_eye = np.zeros((height, width), dtype=np.uint8)
+        cv2.ellipse(left_eye, (49, 32), (14, 20), -8, 0, 360, 1, -1)
+        cv2.ellipse(right_eye, (69, 33), (14, 21), 7, 0, 360, 1, -1)
+        eye_union = (left_eye | right_eye).astype(bool)
+        source[eye_union] = white
+        thread_map[eye_union] = 2
+
+        mouth = np.asarray(
+            [(38, 58), (59, 70), (82, 57), (76, 82), (59, 87), (43, 80)],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(source, [mouth], black)
+        cv2.fillPoly(thread_map, [mouth], 0)
+
+        _, _, outline_groups = RecognitionEngine._restore_subject_features(
+            thread_map,
+            source,
+            subject,
+            palette,
+        )
+
+        eye_groups = []
+        for group in outline_groups:
+            ys, xs = np.where(group)
+            if xs.size and float(np.mean(ys)) < 48.0:
+                eye_groups.append(group)
+
+        self.assertEqual(len(eye_groups), 2)
+        self.assertTrue(any(group[32, 35] for group in eye_groups))
+        self.assertTrue(any(group[33, 83] for group in eye_groups))
+
     def test_subject_features_restore_eye_mouth_outlines_and_eyebrow(self):
         image = np.full((80, 100, 3), (255, 127, 80), dtype=np.uint8)
         subject = np.zeros((80, 100), dtype=bool)
@@ -1421,6 +1464,29 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertLessEqual(_mask_boundary_turn_p90(mouth_group), 45.1)
         self.assertLessEqual(int(np.count_nonzero(mouth_group)), 180)
 
+        _, _, _, feature_guides = (
+            RecognitionEngine._restore_subject_features_with_guides(
+                thread_map,
+                source,
+                subject,
+                palette,
+            )
+        )
+        mouth_guide = next(
+            guide for guide in feature_guides if guide.role == "mouth_outline"
+        )
+        self.assertGreaterEqual(len(mouth_guide.locked_corner_indices), 2)
+        locked_points = [
+            np.asarray(mouth_guide.path[index])
+            for index in mouth_guide.locked_corner_indices
+        ]
+        self.assertTrue(
+            any(np.linalg.norm(point - (38.0, 50.0)) <= 2.0 for point in locked_points)
+        )
+        self.assertTrue(
+            any(np.linalg.norm(point - (90.0, 50.0)) <= 2.0 for point in locked_points)
+        )
+
     def test_subject_feature_restore_preserves_pupil_highlights(self):
         height, width = 72, 96
         source = np.full((height, width, 3), (250, 140, 119), dtype=np.uint8)
@@ -1444,22 +1510,43 @@ class ThreadSuggestionTests(unittest.TestCase):
             cv2.circle(thread_map, center, 14, 1, -1)
             cv2.circle(thread_map, center, 5, 2, -1)
 
-        restored, _, _ = RecognitionEngine._restore_subject_features(
+        restored, _, _, guides = (
+            RecognitionEngine._restore_subject_features_with_guides(
             thread_map,
             source,
             subject,
             palette,
+            )
         )
 
-        self.assertEqual(int(restored[29, 40]), 1)
-        self.assertEqual(int(restored[29, 60]), 1)
+        self.assertEqual(int(restored[29, 40]), 2)
+        self.assertEqual(int(restored[29, 60]), 2)
+        highlight_guides = [
+            guide for guide in guides if guide.role == "pupil_highlight"
+        ]
+        self.assertEqual(len(highlight_guides), 2)
+        guide_centers = sorted(
+            (
+                float(np.mean(np.asarray(guide.path)[:, 0])),
+                float(np.mean(np.asarray(guide.path)[:, 1])),
+            )
+            for guide in highlight_guides
+        )
+        for guide_center, pupil_center in zip(
+            guide_centers,
+            ((38, 31), (58, 31)),
+        ):
+            self.assertGreaterEqual(guide_center[0] - pupil_center[0], 0.5)
+            self.assertLessEqual(guide_center[0] - pupil_center[0], 1.5)
+            self.assertGreaterEqual(guide_center[1] - pupil_center[1], -1.5)
+            self.assertLessEqual(guide_center[1] - pupil_center[1], -0.5)
         self.assertGreaterEqual(np.count_nonzero(restored == 2), 120)
         for center in ((38, 31), (58, 31)):
             pupil = np.zeros((height, width), dtype=np.uint8)
             cv2.circle(pupil, center, 5, 1, -1)
             pupil_pixels = restored[pupil > 0]
-            self.assertGreaterEqual(np.count_nonzero(pupil_pixels == 2), 70)
-            self.assertLessEqual(np.count_nonzero(pupil_pixels == 1), 6)
+            self.assertGreaterEqual(np.count_nonzero(pupil_pixels == 2), 76)
+            self.assertEqual(np.count_nonzero(pupil_pixels == 1), 0)
 
     def test_subject_feature_restore_does_not_add_highlight_to_mouth(self):
         height, width = 80, 100
@@ -1523,6 +1610,7 @@ class ThreadSuggestionTests(unittest.TestCase):
             dtype=np.uint8,
         )
         thread_map = np.zeros((64, 96), dtype=np.int32)
+        thread_map[0, 0] = 1
         cv2.line(source, (70, 18), (76, 21), (20, 150, 105), 2)
         cv2.line(source, (82, 32), (88, 29), (20, 150, 105), 1)
         cv2.line(source, (70, 16), (76, 19), (50, 140, 140), 1)
@@ -1592,6 +1680,32 @@ class ThreadSuggestionTests(unittest.TestCase):
             )
         )
 
+    def test_subject_feature_restore_never_adds_an_unselected_thread(self):
+        source = np.full((64, 96, 3), (248, 140, 118), dtype=np.uint8)
+        subject = np.ones((64, 96), dtype=bool)
+        palette = np.asarray(
+            [
+                (248, 140, 118),
+                (245, 245, 245),
+                (18, 18, 18),
+                (20, 155, 92),
+            ],
+            dtype=np.uint8,
+        )
+        thread_map = np.zeros((64, 96), dtype=np.int32)
+        cv2.ellipse(source, (48, 30), (12, 18), 0, 0, 360, (245, 245, 245), -1)
+        cv2.ellipse(thread_map, (48, 30), (12, 18), 0, 0, 360, 1, -1)
+
+        restored, _, _ = RecognitionEngine._restore_subject_features(
+            thread_map,
+            source,
+            subject,
+            palette,
+        )
+
+        self.assertEqual(set(np.unique(restored).tolist()), {0, 1})
+        self.assertFalse(np.any(restored == 2))
+
     def test_thread_map_removes_isolated_subject_speckles_but_keeps_detail(self):
         thread_map = np.full((9, 9), 2, dtype=np.int32)
         thread_map[4, 4] = 0
@@ -1653,6 +1767,153 @@ class ThreadSuggestionTests(unittest.TestCase):
         )
 
         self.assertTrue(np.all(cleaned[2, 6:9] == 1))
+
+    def test_thread_map_removes_colored_transition_fringe_at_subject_boundary(self):
+        height, width = 28, 36
+        subject = np.zeros((height, width), dtype=bool)
+        subject[3:25, 14:32] = True
+        thread_map = np.zeros((height, width), dtype=np.int32)
+        thread_map[subject] = 1
+        thread_map[3:25, 13] = 3
+        thread_map[10:12, 20:29] = 2
+        detail = np.zeros((height, width), dtype=bool)
+        detail[3:25, 13] = True
+        detail[10:12, 20:29] = True
+        palette = np.array(
+            [
+                (0, 70, 200),
+                (255, 127, 80),
+                (220, 30, 30),
+                (148, 103, 189),
+            ],
+            dtype=np.uint8,
+        )
+        source = palette[thread_map].copy()
+        source[3:25, 13] = (128, 98, 140)
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            subject,
+            detail,
+            palette,
+            source,
+        )
+
+        self.assertFalse(np.any(cleaned == 3))
+        self.assertTrue(np.all(cleaned[10:12, 20:29] == 2))
+
+    def test_thread_map_removes_internal_transition_rim_but_keeps_true_outline(self):
+        height, width = 36, 44
+        subject = np.ones((height, width), dtype=bool)
+        thread_map = np.zeros((height, width), dtype=np.int32)
+        thread_map[8:28, 12:34] = 1
+        thread_map[8:28, 11] = 3
+        thread_map[8:28, 12] = 2
+        detail = np.zeros((height, width), dtype=bool)
+        detail[8:28, 11:13] = True
+        palette = np.array(
+            [
+                (255, 127, 80),
+                (255, 255, 255),
+                (0, 0, 0),
+                (128, 128, 128),
+            ],
+            dtype=np.uint8,
+        )
+        source = palette[thread_map].copy()
+        source[8:28, 11] = (128, 128, 128)
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            subject,
+            detail,
+            palette,
+            source,
+        )
+
+        self.assertFalse(np.any(cleaned == 3))
+        self.assertTrue(np.all(cleaned[8:28, 12] == 2))
+
+    def test_thread_map_removes_single_pixel_boundary_transition(self):
+        subject = np.zeros((15, 15), dtype=bool)
+        subject[4:12, 6:13] = True
+        thread_map = np.zeros((15, 15), dtype=np.int32)
+        thread_map[subject] = 1
+        thread_map[3, 7] = 2
+        palette = np.array(
+            [
+                (0, 70, 200),
+                (255, 127, 80),
+                (148, 103, 189),
+            ],
+            dtype=np.uint8,
+        )
+        source = palette[thread_map].copy()
+        source[3, 7] = (128, 98, 140)
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            subject,
+            np.zeros(subject.shape, dtype=bool),
+            palette,
+            source,
+        )
+
+        self.assertEqual(cleaned[3, 7], 0)
+
+    def test_thread_map_absorbs_near_skin_ring_around_solid_eyebrow(self):
+        shape = (72, 88)
+        thread_map = np.zeros(shape, dtype=np.int32)
+        outer = cv2.boxPoints(((46, 28), (28, 13), -30)).astype(np.int32)
+        eyebrow = cv2.boxPoints(((46, 28), (21, 7), -30)).astype(np.int32)
+        cv2.fillConvexPoly(thread_map, outer, 2, lineType=cv2.LINE_8)
+        cv2.fillConvexPoly(thread_map, eyebrow, 1, lineType=cv2.LINE_8)
+        palette = np.array(
+            [
+                (250, 140, 119),
+                (12, 8, 6),
+                (247, 137, 116),
+            ],
+            dtype=np.uint8,
+        )
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            np.ones(shape, dtype=bool),
+            thread_map != 0,
+            palette,
+        )
+
+        self.assertFalse(np.any(cleaned == 2))
+        self.assertTrue(np.all(cleaned[thread_map == 1] == 1))
+
+    def test_thread_map_fills_quantization_hole_inside_solid_dark_eyebrow(self):
+        shape = (72, 88)
+        thread_map = np.zeros(shape, dtype=np.int32)
+        eyebrow = cv2.boxPoints(((46, 28), (24, 8), -30)).astype(np.int32)
+        cv2.fillConvexPoly(thread_map, eyebrow, 1, lineType=cv2.LINE_8)
+        thread_map[27:30, 44:48] = 0
+        source = np.full((*shape, 3), (250, 140, 119), dtype=np.uint8)
+        source[thread_map == 1] = (12, 8, 6)
+        source[27:30, 44:48] = (15, 10, 8)
+        palette = np.array(
+            [
+                (250, 140, 119),
+                (0, 0, 0),
+                (255, 255, 255),
+            ],
+            dtype=np.uint8,
+        )
+
+        cleaned = RecognitionEngine._clean_thread_map(
+            thread_map,
+            np.ones(shape, dtype=bool),
+            thread_map != 0,
+            palette,
+            source,
+        )
+
+        self.assertTrue(np.all(cleaned[27:30, 44:48] == 1))
 
     def test_thread_budget_prioritizes_subject_over_broad_background(self):
         design_colors = np.array(
@@ -2505,10 +2766,392 @@ class ThreadSuggestionTests(unittest.TestCase):
 
 
 class PatrickRegressionTests(unittest.TestCase):
-    SOURCE_PATH = (
-        "/var/folders/dr/g_jjd1vj4356dmv095y1l4jc0000gn/T/"
-        "codex-clipboard-8db3b55f-c71c-497e-9c3e-45a029756fe6.png"
-    )
+    SOURCE_PATH = Path(__file__).resolve().parent / "fixtures" / "patrick-source.png"
+
+    def test_palette_refinement_keeps_canonical_face_guides_in_photo_layers(self):
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        quantized = Image.fromarray(image, mode="RGB").quantize(
+            colors=15,
+            method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.NONE,
+        )
+        palette = quantized.getpalette() or []
+        counts = sorted(
+            quantized.getcolors(maxcolors=image.shape[0] * image.shape[1]) or [],
+            reverse=True,
+        )
+        threads = []
+        for _, palette_index in counts:
+            offset = int(palette_index) * 3
+            rgb = tuple(int(value) for value in palette[offset : offset + 3])
+            if len(rgb) != 3 or any(thread.color_rgb == rgb for thread in threads):
+                continue
+            threads.append(
+                ThreadColor(
+                    uid=f"patrick-{len(threads):02d}",
+                    name=f"Patrick {len(threads) + 1}",
+                    color_rgb=rgb,
+                )
+            )
+
+        settings = QuantizationSettings(
+            n_colors=15,
+            design_color_budget=24,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.72,
+            min_region_area_px=4,
+            morphology_kernel_size=3,
+            smooth_regions=False,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        roles = [guide.role for guide in result.feature_guides]
+        self.assertEqual(roles.count("eye_outline"), 2)
+        self.assertEqual(roles.count("mouth_outline"), 1)
+        eye_guides = [
+            guide
+            for guide in result.feature_guides
+            if guide.role == "eye_outline"
+        ]
+        self.assertEqual(
+            sorted(guide.kind.value for guide in eye_guides),
+            ["closed_contour", "open_line"],
+            "touching eyes must share one outer outline and one open seam",
+        )
+        seam = next(
+            guide for guide in eye_guides if guide.kind.value == "open_line"
+        )
+        self.assertNotEqual(seam.path[0], seam.path[-1])
+        seam_points = np.asarray(seam.path, dtype=np.float64)
+        self.assertGreater(float(np.ptp(seam_points[:, 1])), 12.0)
+        self.assertLessEqual(float(np.ptp(seam_points[:, 0])), 5.0)
+        self.assertGreaterEqual(
+            float(seam_points[0, 1]),
+            52.0,
+            "the shared eye seam must start at the visible eye junction",
+        )
+        self.assertGreaterEqual(float(seam_points[0, 0]), 156.0)
+        lateral_steps = np.diff(seam_points[:, 0])
+        lateral_steps = lateral_steps[np.abs(lateral_steps) >= 0.5]
+        lateral_reversals = int(
+            np.count_nonzero(lateral_steps[:-1] * lateral_steps[1:] < 0.0)
+        )
+        self.assertLessEqual(
+            lateral_reversals,
+            1,
+            "the shared eye seam must not zigzag into knots or duplicate stitches",
+        )
+        outer = next(
+            guide
+            for guide in eye_guides
+            if guide.kind.value == "closed_contour"
+        )
+        outer_points = np.asarray(outer.path, dtype=np.float64)
+        false_inner_seam = (
+            (outer_points[:, 0] >= 151.0)
+            & (outer_points[:, 0] <= 157.0)
+            & (outer_points[:, 1] >= 59.0)
+            & (outer_points[:, 1] <= 76.0)
+        )
+        self.assertFalse(
+            np.any(false_inner_seam),
+            "the outer eye contour must not trace both sides of the shared seam",
+        )
+        palette_rgb = np.asarray(
+            [thread.color_rgb for thread in threads],
+            dtype=np.uint8,
+        )
+        palette_luminance = (
+            palette_rgb[:, 0] * 0.299
+            + palette_rgb[:, 1] * 0.587
+            + palette_rgb[:, 2] * 0.114
+        )
+        neutral = palette_rgb.max(axis=1) - palette_rgb.min(axis=1) <= 48
+        highlight_thread = int(
+            np.argmax(np.where(neutral, palette_luminance, -1.0))
+        )
+        pupil_thread = int(np.argmin(palette_luminance))
+        for x, y in ((149, 64), (164, 66)):
+            self.assertEqual(int(result.thread_map[y, x]), pupil_thread)
+        highlight_guides = [
+            guide
+            for guide in result.feature_guides
+            if guide.role == "pupil_highlight"
+        ]
+        self.assertEqual(len(highlight_guides), 2)
+        self.assertTrue(
+            all(guide.thread_index == highlight_thread for guide in highlight_guides)
+        )
+
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        eye_interior = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(
+            eye_interior,
+            [np.rint(outer_points).astype(np.int32)],
+            1,
+        )
+        background_inside_eye = np.zeros(image.shape[:2], dtype=bool)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is not None
+                    and region.semantic_part_id is None
+                    and region.scene_plane == "background_base"
+                ):
+                    background_inside_eye |= (
+                        (np.asarray(region.mask) > 0)
+                        & (eye_interior > 0)
+                    )
+        self.assertFalse(
+            np.any(background_inside_eye),
+            "closed eye interiors must stay on the subject plane instead of "
+            "forming a compensated background halo",
+        )
+        eye_bounds_min = np.min(np.rint(outer_points), axis=0) - 5.0
+        eye_bounds_max = np.max(np.rint(outer_points), axis=0) + 5.0
+        eye_fill_regions = [
+            region
+            for layer in layers
+            for region in layer.regions
+            if (
+                region.mask is not None
+                and region.semantic_part_id is None
+                and region.stitch_settings.fill_mode == "scanline"
+                and np.count_nonzero(
+                    (np.asarray(region.mask) > 0) & (eye_interior > 0)
+                ) >= 100
+            )
+        ]
+        self.assertEqual(len(eye_fill_regions), 1)
+        from stitch_studio.core.stitch_engine import StitchEngine
+
+        eye_fill_distances = []
+        stitch_engine = StitchEngine()
+        for path in stitch_engine.generate_region_paths(eye_fill_regions[0], image):
+            for point in np.asarray(path, dtype=np.float64):
+                pixel_point = point * stitch_engine.px_per_mm / 10.0
+                if np.all(pixel_point >= eye_bounds_min) and np.all(
+                    pixel_point <= eye_bounds_max
+                ):
+                    eye_fill_distances.append(
+                        cv2.pointPolygonTest(
+                            np.rint(outer_points).astype(np.int32),
+                            tuple(float(value) for value in pixel_point),
+                            True,
+                        )
+                    )
+        self.assertTrue(eye_fill_distances)
+        self.assertGreaterEqual(
+            min(eye_fill_distances),
+            0.0,
+            "eye fill compensation must stay beneath the authoritative outline",
+        )
+        canonical_ids = {guide.guide_id for guide in result.feature_guides}
+        layer_ids = {
+            region.semantic_part_id
+            for layer in layers
+            for region in layer.regions
+            if region.semantic_part_id is not None
+        }
+        self.assertTrue(
+            canonical_ids.issubset(layer_ids),
+            f"missing canonical guides: {sorted(canonical_ids - layer_ids)}",
+        )
+
+        eye_guide_ids = {
+            guide.guide_id
+            for guide in result.feature_guides
+            if guide.role == "eye_outline"
+        }
+        eye_support = np.zeros(image.shape[:2], dtype=np.uint8)
+        for guide in result.feature_guides:
+            if guide.guide_id in eye_guide_ids:
+                eye_support[np.asarray(guide.mask, dtype=bool)] = 1
+        eye_support = cv2.dilate(
+            eye_support,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        competing_runs = np.zeros(image.shape[:2], dtype=bool)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is not None
+                    and region.semantic_part_id not in eye_guide_ids
+                    and region.stitch_settings.fill_mode in ("run", "satin")
+                ):
+                    competing_runs |= np.asarray(region.mask) > 0
+        self.assertFalse(
+            np.any(competing_runs & eye_support),
+            "canonical eye guides must be the only running stitches in their support corridor",
+        )
+
+        eye_envelope = cv2.dilate(
+            eye_support.astype(np.uint8),
+            np.ones((9, 9), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is None
+                    or region.semantic_part_id is not None
+                    or region.stitch_settings.fill_mode not in ("run", "satin")
+                ):
+                    continue
+                mask = np.asarray(region.mask) > 0
+                if not np.any(mask & eye_envelope):
+                    continue
+                component_count, _ = cv2.connectedComponents(
+                    mask.astype(np.uint8),
+                    connectivity=8,
+                )
+                self.assertLessEqual(
+                    component_count - 1,
+                    1,
+                    "disconnected eye-adjacent remnants must not be stitched as one path",
+                )
+                if region.stitch_settings.fill_mode == "run":
+                    from stitch_studio.core.stitch_engine import StitchEngine
+
+                    engine = StitchEngine()
+                    paths = engine.generate_region_paths(region, image)
+                    points = np.asarray(
+                        [point for path in paths for point in path],
+                        dtype=np.float64,
+                    )
+                    if points.size:
+                        points *= engine.px_per_mm / 10.0
+                        ys, xs = np.where(mask)
+                        self.assertGreaterEqual(
+                            float(np.min(points[:, 0])),
+                            float(np.min(xs)) - 2.0,
+                            "eye-adjacent remnants must not regrow into the pupil",
+                        )
+                        self.assertLessEqual(
+                            float(np.max(points[:, 0])),
+                            float(np.max(xs)) + 2.0,
+                            "eye-adjacent remnants must stay inside their local mark",
+                        )
+                        self.assertGreaterEqual(
+                            float(np.min(points[:, 1])),
+                            float(np.min(ys)) - 2.0,
+                            "eye-adjacent remnants must not regrow above their local mark",
+                        )
+                        self.assertLessEqual(
+                            float(np.max(points[:, 1])),
+                            float(np.max(ys)) + 2.0,
+                            "eye-adjacent remnants must not regrow below their local mark",
+                        )
+
+        eye_seams = [
+            region
+            for layer in layers
+            for region in layer.regions
+            if (
+                region.semantic_part_id in eye_guide_ids
+                and region.semantic_kind == "open_line"
+            )
+        ]
+        self.assertEqual(len(eye_seams), 1)
+        self.assertEqual(eye_seams[0].stitch_settings.run_passes, 1)
+        self.assertEqual(
+            eye_seams[0].stitch_settings.run_endpoint_extension_mm,
+            0.0,
+        )
+
+        closed_eye_regions = [
+            region
+            for layer in layers
+            for region in layer.regions
+            if (
+                region.semantic_part_id in eye_guide_ids
+                and region.semantic_kind == "closed_contour"
+            )
+        ]
+        self.assertEqual(len(closed_eye_regions), 1)
+        from stitch_studio.core.stitch_engine import StitchEngine
+
+        closed_eye_path = StitchEngine().generate_region_paths(
+            closed_eye_regions[0],
+            image,
+        )[0]
+        eye_turns = _polyline_turn_angles(closed_eye_path)
+        self.assertLessEqual(
+            float(np.percentile(eye_turns, 90)),
+            30.0,
+            "the exported eye outline must smooth subpixel contour jitter",
+        )
+        eye_vectors = np.diff(
+            np.asarray(closed_eye_path, dtype=np.float64),
+            axis=0,
+        )
+        eye_lengths = np.linalg.norm(eye_vectors, axis=1)
+        eye_vectors = eye_vectors[eye_lengths > 1e-6]
+        eye_units = eye_vectors / np.linalg.norm(
+            eye_vectors,
+            axis=1,
+        )[:, None]
+        signed_turns = (
+            eye_units[:-1, 0] * eye_units[1:, 1]
+            - eye_units[:-1, 1] * eye_units[1:, 0]
+        )
+        turn_signs = np.sign(signed_turns[np.abs(signed_turns) > 0.03])
+        turn_reversals = int(
+            np.count_nonzero(turn_signs[:-1] * turn_signs[1:] < 0)
+        )
+        self.assertLessEqual(
+            turn_reversals,
+            16,
+            "the exported eye outline must not alternate left-right at pixel frequency",
+        )
+
+        highlight_regions = [
+            region
+            for layer in layers
+            for region in layer.regions
+            if region.semantic_role == "pupil_highlight"
+        ]
+        self.assertEqual(len(highlight_regions), 2)
+        for x, y in ((149, 64), (164, 66)):
+            matching = [
+                region
+                for region in highlight_regions
+                if region.mask is not None and region.mask[y, x] > 0
+            ]
+            self.assertEqual(len(matching), 1)
+            from stitch_studio.core.stitch_engine import StitchEngine
+
+            region = matching[0]
+            self.assertEqual(region.stitch_settings.fill_mode, "run")
+            self.assertEqual(region.guide_paths_closed, [False])
+            self.assertNotEqual(
+                tuple(region.guide_paths_px[0][0]),
+                tuple(region.guide_paths_px[0][-1]),
+            )
+            paths = StitchEngine().generate_region_paths(region, image)
+            self.assertTrue(paths)
+            self.assertGreaterEqual(sum(len(path) for path in paths), 2)
+            self.assertLessEqual(sum(len(path) for path in paths), 3)
+            points = np.asarray(
+                [point for path in paths for point in path],
+                dtype=np.float64,
+            )
+            self.assertLessEqual(float(np.ptp(points[:, 0])), 1.5)
+            self.assertLessEqual(float(np.ptp(points[:, 1])), 1.5)
+
+    def test_supplied_regression_fixture_is_permanent(self):
+        self.assertTrue(
+            self.SOURCE_PATH.is_file(),
+            f"Missing permanent regression fixture: {self.SOURCE_PATH}",
+        )
 
     def test_primary_subject_detection_uses_a_bounded_grabcut_budget(self):
         image = np.full((720, 1280, 3), (35, 105, 180), dtype=np.uint8)
@@ -2535,8 +3178,6 @@ class PatrickRegressionTests(unittest.TestCase):
         self.assertLessEqual(observed["iterations"], 2)
 
     def test_primary_subject_mask_prefers_center_character(self):
-        if not os.path.exists(self.SOURCE_PATH):
-            self.skipTest("Supplied Patrick regression image is not available")
         image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
 
         subject = RecognitionEngine.detect_primary_subject(image)
@@ -2550,8 +3191,6 @@ class PatrickRegressionTests(unittest.TestCase):
         self.assertLess(np.mean(subject), 0.60)
 
     def test_reports_fidelity_for_final_physical_threads(self):
-        if not os.path.exists(self.SOURCE_PATH):
-            self.skipTest("Supplied Patrick regression image is not available")
         image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
         threads = [
             ThreadColor(name="Black", color_rgb=(0, 0, 0)),
@@ -2577,6 +3216,53 @@ class PatrickRegressionTests(unittest.TestCase):
             result.metrics.perceptual_similarity,
         )
         self.assertGreater(result.subject_metrics.pixel_coverage, 0.20)
+
+    def test_final_physical_thread_map_respects_requested_color_budget(self):
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(
+                name=f"Thread {index}",
+                color_rgb=color,
+            )
+            for index, color in enumerate(
+                [
+                    (0, 0, 0),
+                    (255, 255, 255),
+                    (0, 120, 210),
+                    (255, 125, 100),
+                    (210, 35, 25),
+                    (130, 160, 110),
+                    (65, 90, 170),
+                    (125, 70, 155),
+                    (230, 210, 145),
+                    (75, 145, 115),
+                    (185, 185, 185),
+                    (105, 55, 45),
+                    (45, 150, 205),
+                    (190, 70, 105),
+                    (245, 170, 145),
+                    (25, 85, 65),
+                ]
+            )
+        ]
+
+        result = RecognitionEngine.recognize(
+            image,
+            threads,
+            QuantizationSettings(
+                n_colors=8,
+                auto_design_colors=True,
+                preserve_details=True,
+                include_background=True,
+            ),
+        )
+
+        used = np.unique(result.thread_map[result.thread_map >= 0])
+        self.assertLessEqual(len(used), 8)
+        self.assertTrue(
+            all(part.thread_index in set(used.tolist()) for part in result.semantic_parts)
+        )
+        self.assertLessEqual(len(result.semantic_parts), 96)
 
     def test_subject_boundary_uses_satin_but_internal_mark_uses_run(self):
         height, width = 80, 80
@@ -2619,8 +3305,6 @@ class PatrickRegressionTests(unittest.TestCase):
         self.assertEqual(modes, {"satin", "run"})
 
     def test_supplied_image_meets_high_fidelity_gates(self):
-        if not os.path.exists(self.SOURCE_PATH):
-            self.skipTest("Supplied Patrick regression image is not available")
         with open(self.SOURCE_PATH, "rb") as source_file:
             digest = hashlib.sha256(source_file.read()).hexdigest()
         self.assertEqual(
@@ -2693,6 +3377,26 @@ class PatrickRegressionTests(unittest.TestCase):
                 union += int(np.count_nonzero(source | rendered))
 
         self.assertGreaterEqual(intersection / max(1, union), 0.95)
+
+    def test_missing_reconstructed_line_reduces_detail_recall(self):
+        source = np.full((80, 120, 3), 245, dtype=np.uint8)
+        cv2.line(source, (16, 40), (104, 40), (12, 12, 12), 2, cv2.LINE_AA)
+        reconstructed = np.full_like(source, 245)
+
+        source_detail = RecognitionEngine.extract_observed_detail_mask(source)
+        reconstructed_detail = RecognitionEngine.extract_observed_detail_mask(
+            reconstructed
+        )
+        metrics = RecognitionEngine.measure_fidelity(
+            source,
+            reconstructed,
+            source_detail_mask=source_detail,
+            recognized_detail_mask=reconstructed_detail,
+        )
+
+        self.assertGreater(np.count_nonzero(source_detail), 0)
+        self.assertEqual(np.count_nonzero(reconstructed_detail), 0)
+        self.assertLess(metrics.detail_recall, 0.10)
 
 
 if __name__ == "__main__":

@@ -940,21 +940,24 @@ class StitchEngine:
                 else ()
             )
             simplified = self._simplify_run_path(raw, closed=closed)
-            if closed and locked:
-                # Recognition already smoothed the spans between supported
-                # corners. Preserve that geometry and every locked tip instead
-                # of tracing the lower-resolution raster mask again.
-                sampled = self._resample_polyline_preserving_vertices(
-                    raw,
-                    stitch_len_px,
-                    closed=True,
-                )
-            elif closed:
-                sampled = self._resample_run_path(
-                    simplified,
-                    stitch_len_px,
-                    closed=True,
-                )
+            if closed:
+                if corner_mode == "preserve":
+                    sampled = self._resample_polyline_preserving_vertices(
+                        simplified,
+                        stitch_len_px,
+                        closed=True,
+                    )
+                else:
+                    sampled = adaptive_closed_contour(
+                        raw,
+                        spacing_px=stitch_len_px,
+                        smoothing_iterations=(
+                            1 if corner_mode == "adaptive" and locked else 2
+                        ),
+                        locked_corner_indices=(
+                            locked if corner_mode == "adaptive" else ()
+                        ),
+                    )
             elif corner_mode == "preserve":
                 sampled = self._resample_polyline_preserving_vertices(
                     simplified,
@@ -1069,7 +1072,8 @@ class StitchEngine:
         if getattr(settings, "run_trace_contour", False):
             return self._generate_closed_contour_run(mask, settings)
 
-        mask = self._restore_line_art_run_mask(mask, image, source_color)
+        if getattr(settings, "run_restore_source_pixels", True):
+            mask = self._restore_line_art_run_mask(mask, image, source_color)
         loop_paths, loop_exclusion = self._extract_closed_run_loops(mask)
 
         skeleton = skeletonize(mask > 0).astype(np.uint8)

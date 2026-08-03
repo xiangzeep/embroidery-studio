@@ -93,6 +93,7 @@ def adaptive_closed_contour(
     points,
     spacing_px,
     smoothing_iterations=2,
+    locked_corner_indices=None,
 ) -> list[tuple[float, float]]:
     """Smooth a closed contour while leaving locally stable anchors unchanged."""
     contour = normalize_closed_contour(points)
@@ -100,7 +101,18 @@ def adaptive_closed_contour(
         return _as_tuples(contour)
 
     iterations = _nonnegative_int(smoothing_iterations)
-    anchors = detect_locked_corner_indices(contour)
+    if locked_corner_indices is None:
+        anchors = detect_locked_corner_indices(contour)
+    else:
+        anchors = tuple(
+            sorted(
+                {
+                    int(index) % len(contour)
+                    for index in locked_corner_indices
+                    if isinstance(index, (int, np.integer))
+                }
+            )
+        )
     if not anchors:
         smooth = _chaikin_closed(contour, iterations)
         return _close(_resample_closed(smooth, spacing_px))
