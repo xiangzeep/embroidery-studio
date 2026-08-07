@@ -553,8 +553,24 @@ class ImageEngine:
         design_map = np.asarray(recognition.design_map)
         design_colors = recognition.design_colors
         detail_design_ids = set(recognition.detail_design_ids)
+        stitch_design_map = getattr(recognition, "stitch_design_map", None)
+        stitch_design_colors = tuple(
+            getattr(recognition, "stitch_design_colors", ())
+        )
+        if (
+            generation_mode != "cross_stitch"
+            and stitch_design_map is not None
+            and stitch_design_colors
+        ):
+            candidate_map = np.asarray(stitch_design_map)
+            if candidate_map.shape == design_map.shape:
+                design_map = candidate_map
+                design_colors = stitch_design_colors
+                detail_design_ids = set(
+                    getattr(recognition, "stitch_detail_design_ids", ())
+                )
         thread_map = getattr(recognition, "thread_map", None)
-        if thread_map is not None:
+        if generation_mode == "cross_stitch" and thread_map is not None:
             candidate_map = np.asarray(thread_map)
             if candidate_map.shape == design_map.shape:
                 design_map = candidate_map
@@ -589,6 +605,14 @@ class ImageEngine:
                     ))
                     if np.mean(detail_pixels[mask]) >= 0.5:
                         detail_design_ids.add(thread_index)
+        detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
+        if detail_mask.shape != design_map.shape:
+            detail_mask = np.zeros(design_map.shape, dtype=bool)
+        design_map = ImageEngine._suppress_unsewable_color_islands(
+            design_map,
+            detail_mask,
+            min_region_area_px=settings.min_region_area_px,
+        )
         foreground = np.ones(design_map.shape, dtype=bool)
         if source_image is not None and not settings.include_background:
             foreground = ~ImageEngine._detect_background_mask(source_image)
@@ -601,7 +625,6 @@ class ImageEngine:
             )
 
         layer_map = {}
-        detail_mask = np.asarray(recognition.detail_mask, dtype=bool)
         for design_color in design_colors:
             binary = (
                 (design_map == design_color.design_id) & foreground
@@ -622,9 +645,10 @@ class ImageEngine:
                 design_color.design_id in detail_design_ids
                 or detail_ratio >= 0.5
             )
-            key = (
-                ("thread", matched_thread.uid)
-                if matched_thread else ("design", exact_rgb)
+            key = ImageEngine._design_layer_key(
+                matched_thread,
+                exact_rgb,
+                design_color.nearest_thread_delta_e,
             )
             layer = layer_map.get(key)
             if layer is None:
@@ -781,6 +805,69 @@ class ImageEngine:
         return layers
 
     @staticmethod
+    def _suppress_unsewable_color_islands(
+        design_map: np.ndarray,
+        detail_mask: np.ndarray,
+        min_region_area_px: int,
+    ) -> np.ndarray:
+        """Absorb compact color specks that cannot produce a stable stitch region.
+
+        The classifier is allowed to keep a small compact color only when the
+        detail detector independently supports it.  Thin semantic line art is
+        preserved as long as it also has that support; all other tiny islands
+        are assigned to the neighboring design color with the greatest contact.
+        """
+        source = np.asarray(design_map)
+        if source.ndim != 2 or source.size == 0:
+            return source.copy()
+        details = np.asarray(detail_mask, dtype=bool)
+        if details.shape != source.shape:
+            details = np.zeros(source.shape, dtype=bool)
+
+        cleaned = source.copy()
+        area_limit = max(6, min(int(min_region_area_px), 48))
+        kernel = np.ones((3, 3), dtype=np.uint8)
+
+        for color_id in np.unique(source):
+            color_mask = (source == color_id).astype(np.uint8)
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                color_mask,
+                connectivity=8,
+            )
+            for label in range(1, count):
+                area = int(stats[label, cv2.CC_STAT_AREA])
+                if area >= area_limit:
+                    continue
+                component = labels == label
+                component_details = float(np.mean(details[component]))
+                width = int(stats[label, cv2.CC_STAT_WIDTH])
+                height = int(stats[label, cv2.CC_STAT_HEIGHT])
+                short_axis = max(1, min(width, height))
+                long_axis = max(width, height)
+                is_supported_line = (
+                    component_details >= 0.25
+                    and long_axis >= 6
+                    and long_axis / short_axis >= 2.0
+                )
+                if component_details >= 0.5 or is_supported_line:
+                    continue
+
+                border = cv2.dilate(
+                    component.astype(np.uint8),
+                    kernel,
+                    iterations=1,
+                ).astype(bool) & ~component
+                neighbors = cleaned[border]
+                neighbors = neighbors[neighbors != color_id]
+                if neighbors.size == 0:
+                    continue
+                candidate_ids, contacts = np.unique(neighbors, return_counts=True)
+                target = candidate_ids[int(np.argmax(contacts))]
+                cleaned[component] = target
+
+        return cleaned
+
+    @staticmethod
     def _feature_aware_subject_mask(
         subject_mask: Optional[np.ndarray],
         feature_guides,
@@ -865,11 +952,15 @@ class ImageEngine:
             mask = np.asarray(part.mask, dtype=bool) & foreground
             if not np.any(mask):
                 continue
-            if part.kind != SemanticPartKind.PROTECTED_HIGHLIGHT and any(
+            if (
+                part.kind != SemanticPartKind.PROTECTED_HIGHLIGHT
+                and getattr(part, "stitch_intent", "") != "continuous_run"
+                and any(
                 existing.shape == mask.shape
                 and np.count_nonzero(existing & mask)
                 / max(1, np.count_nonzero(mask)) >= 0.92
                 for existing in seen_masks
+                )
             ):
                 continue
 
@@ -880,48 +971,56 @@ class ImageEngine:
                 and 0 <= thread_index < len(physical_threads)
                 else None
             )
+            source_rgb = tuple(part.source_color_rgb)
+            physical_rgb = (
+                tuple(matched_thread.color_rgb)
+                if matched_thread
+                else source_rgb
+            )
+            source_luminance = (
+                0.299 * source_rgb[0]
+                + 0.587 * source_rgb[1]
+                + 0.114 * source_rgb[2]
+            )
+            physical_luminance = (
+                0.299 * physical_rgb[0]
+                + 0.587 * physical_rgb[1]
+                + 0.114 * physical_rgb[2]
+            )
+            if (
+                part.role in {"eye_outline", "mouth_outline"}
+                and matched_thread is not None
+                and source_luminance <= 85.0
+                and physical_luminance <= 65.0
+            ):
+                # Anti-aliased black contours sample as charcoal against the
+                # surrounding fill.  Once recognition has identified a facial
+                # outline and the catalog selects black, retain the real spool
+                # color so exports do not create a visible gray/brown halo.
+                source_rgb = physical_rgb
+            match_delta_e = (
+                ImageEngine._color_delta_e(source_rgb, physical_rgb)
+                if matched_thread
+                else None
+            )
+            key = ImageEngine._design_layer_key(
+                matched_thread,
+                source_rgb,
+                match_delta_e,
+            )
             if part.kind == SemanticPartKind.PROTECTED_HIGHLIGHT:
-                key = (
-                    (
-                        "protected-highlight-thread",
-                        matched_thread.uid,
-                        part.role,
-                    )
-                    if matched_thread
-                    else (
-                        "protected-highlight-design",
-                        tuple(part.source_color_rgb),
-                        part.role,
-                    )
-                )
-            else:
-                key = (
-                    ("thread", matched_thread.uid)
-                    if matched_thread
-                    else ("design", tuple(part.source_color_rgb))
-                )
+                key = ("protected-highlight", key, part.role)
             layer = layer_map.get(key)
             if layer is None:
-                physical_rgb = (
-                    tuple(matched_thread.color_rgb)
-                    if matched_thread
-                    else tuple(part.source_color_rgb)
-                )
                 layer = Layer(
                     name=matched_thread.name if matched_thread else part.role,
                     thread_uid=matched_thread.uid if matched_thread else "",
-                    thread_color_rgb=tuple(part.source_color_rgb),
+                    thread_color_rgb=source_rgb,
                     thread_name=matched_thread.name if matched_thread else "Design color",
                     design_color_id=part.design_color_id,
-                    design_color_rgb=tuple(part.source_color_rgb),
+                    design_color_rgb=source_rgb,
                     matched_thread_rgb=physical_rgb if matched_thread else None,
-                    thread_match_delta_e=(
-                        ImageEngine._color_delta_e(
-                            part.source_color_rgb,
-                            physical_rgb,
-                        )
-                        if matched_thread else None
-                    ),
+                    thread_match_delta_e=match_delta_e,
                     is_detail_layer=True,
                 )
                 layer_map[key] = layer
@@ -954,6 +1053,39 @@ class ImageEngine:
                 settings.run_passes = 1
                 settings.run_endpoint_extension_mm = 0.0
                 settings.run_corner_mode = "preserve"
+            elif (
+                part.role == "eye_outline"
+                and part.kind == SemanticPartKind.CLOSED_CONTOUR
+            ):
+                # Eye sockets are rounded source geometry.  Do not preserve
+                # the raster contour's tiny turns as embroidery vertices.
+                settings.run_passes = 1
+                settings.run_corner_mode = "smooth"
+            elif (
+                part.role == "line_detail"
+                and part.kind == SemanticPartKind.OPEN_LINE
+            ):
+                # Short facial marks (for example the lower lip) are a single
+                # drawn stroke.  A three-pass generic line folds thread back
+                # over the same tiny segment and reads as a dirty, broken bar.
+                settings.run_passes = 1
+                settings.run_endpoint_extension_mm = 0.0
+                settings.run_corner_mode = "adaptive"
+            elif (
+                part.role == "mouth_outline"
+                and part.kind == SemanticPartKind.CLOSED_CONTOUR
+            ):
+                # The mouth guide is the one authoritative closed path.  At
+                # the default feature-outline spacing it only receives a
+                # handful of stitches, making the pointed corners look broken
+                # after export.  Keep it dense and single-pass without
+                # rebuilding a second source-pixel contour.
+                settings.stitch_length_mm = 0.8
+                settings.stitch_length_min_mm = 0.45
+                settings.stitch_length_max_mm = 1.1
+                settings.run_passes = 1
+                settings.run_corner_mode = "adaptive"
+                settings.run_restore_source_pixels = False
             region_mask = mask.astype(np.uint8) * 255
             guide_paths = [list(path) for path in part.paths]
             if (
@@ -994,6 +1126,21 @@ class ImageEngine:
             region.polygon = GeometryEngine.reconstruct_region_polygon(region_mask)
             layer.add_region(region)
             seen_masks.append(mask.copy())
+
+    @staticmethod
+    def _design_layer_key(
+        matched_thread: Optional[ThreadColor],
+        design_rgb: Tuple[int, int, int],
+        match_delta_e: Optional[float],
+    ) -> tuple:
+        """Merge only colors that the suggested physical spool represents."""
+        if (
+            matched_thread is not None
+            and match_delta_e is not None
+            and float(match_delta_e) <= 6.0
+        ):
+            return ("thread", matched_thread.uid)
+        return ("design", tuple(int(value) for value in design_rgb))
 
     @staticmethod
     def _should_append_semantic_part(
@@ -1099,7 +1246,21 @@ class ImageEngine:
                 ):
                     retained.append(region)
                     continue
-                if region.stitch_settings.fill_mode not in ("run", "satin"):
+                if region.stitch_settings.fill_mode not in (
+                    "run",
+                    "satin",
+                    "scanline",
+                ):
+                    retained.append(region)
+                    continue
+                if (
+                    region.stitch_settings.fill_mode == "scanline"
+                    and region.semantic_part_id is None
+                ):
+                    # Base fills have already been carved by
+                    # _constrain_protected_feature_fills.  Keep the dedicated
+                    # white eye underfill intact; only semantic micro-details
+                    # need this second exclusion pass.
                     retained.append(region)
                     continue
                 mask = np.asarray(region.mask) > 0
@@ -2359,11 +2520,14 @@ class ImageEngine:
             return
 
         protected = np.zeros(shape, dtype=np.uint8)
+        eye_guides = np.zeros(shape, dtype=np.uint8)
         for guide in feature_guides or ():
-            if (
-                getattr(guide, "role", "") != "eye_outline"
-                or getattr(guide, "kind", None) != SemanticPartKind.CLOSED_CONTOUR
-            ):
+            if getattr(guide, "role", "") != "eye_outline":
+                continue
+            guide_mask = np.asarray(getattr(guide, "mask", ()), dtype=bool)
+            if guide_mask.shape == shape:
+                eye_guides[guide_mask] = 255
+            if getattr(guide, "kind", None) != SemanticPartKind.CLOSED_CONTOUR:
                 continue
             path = np.asarray(getattr(guide, "path", ()), dtype=np.float64)
             if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] != 2:
@@ -2372,17 +2536,20 @@ class ImageEngine:
             polygon[:, 0] = np.clip(polygon[:, 0], 0, shape[1] - 1)
             polygon[:, 1] = np.clip(polygon[:, 1], 0, shape[0] - 1)
             cv2.fillPoly(protected, [polygon], 255)
-        if not np.any(protected):
+        if not np.any(protected) or not np.any(eye_guides):
             return
 
         protected_pixels = protected > 0
         protected_fill_pixels = cv2.erode(
             protected,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-            iterations=1,
+            # The authoritative outline is smoothed after the source mask is
+            # rasterized.  Keep a two-pixel fill safety band so scanline end
+            # points cannot cross that smoother contour during export.
+            iterations=2,
         ) > 0
         corridor = cv2.dilate(
-            protected,
+            np.maximum(protected, eye_guides),
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
             iterations=1,
         ) > 0
@@ -2403,10 +2570,10 @@ class ImageEngine:
 
                 source = np.asarray(region.mask) > 0
                 feature_fill = source & protected_fill_pixels
-                if np.count_nonzero(feature_fill) < minimum_overlap:
-                    rebuilt.append(region)
-                    continue
-
+                # Every ordinary fill must yield to a canonical eye boundary.
+                # Source anti-alias pixels can otherwise assign coral, teal, or
+                # background colors to the same few pixels as a black eye guide.
+                # At export this becomes a visibly dirty, doubled eye rim.
                 remainder = source & ~corridor
                 if np.any(remainder):
                     region.mask = remainder.astype(np.uint8) * 255
@@ -2415,6 +2582,9 @@ class ImageEngine:
                         simplify=False,
                     )
                     rebuilt.append(region)
+
+                if np.count_nonzero(feature_fill) < minimum_overlap:
+                    continue
 
                 protected_region = copy.deepcopy(region)
                 protected_region.name = f"{region.name} protected fill"
@@ -2463,9 +2633,18 @@ class ImageEngine:
 
             shape = semantic_regions[0].mask.shape
             semantic_union = np.zeros(shape, dtype=np.uint8)
+            exclusive_eye_corridor = np.zeros(shape, dtype=np.uint8)
             for region in semantic_regions:
                 if region.mask.shape == shape:
                     semantic_union[region.mask > 0] = 255
+                    if region.semantic_role == "eye_outline":
+                        exclusive_eye_corridor[region.mask > 0] = 255
+            if np.any(exclusive_eye_corridor):
+                exclusive_eye_corridor = cv2.dilate(
+                    exclusive_eye_corridor,
+                    kernel,
+                    iterations=1,
+                )
 
             for region in fill_regions:
                 if region.mask.shape != shape:
@@ -2478,6 +2657,10 @@ class ImageEngine:
                     )
                     > 0
                 ) & (semantic_union > 0)
+                # Never restore an ordinary same-color fill over an eye guide.
+                # The guide corridor has a dedicated inner white underfill; any
+                # additional antialias color here turns into a dirty eye rim.
+                adjacent &= ~(exclusive_eye_corridor > 0)
                 if not np.any(adjacent):
                     continue
                 region.mask = np.maximum(

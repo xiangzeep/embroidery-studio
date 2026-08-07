@@ -21,6 +21,7 @@ from stitch_studio.core.recognition_engine import (
 )
 from stitch_studio.core.image_engine import ImageEngine
 from stitch_studio.core.project import QuantizationSettings
+from stitch_studio.core.semantic_parts import SemanticPartKind
 from stitch_studio.core.thread_db import ThreadColor
 
 
@@ -482,6 +483,46 @@ class DetailRecognitionTests(unittest.TestCase):
         )
         self.assertTrue(np.all(union))
         self.assertLessEqual(int(overlap.max()), 1)
+
+    def test_photo_layers_do_not_collapse_distinct_design_colors_into_one_fallback_thread(self):
+        height, width = 24, 32
+        design_map = np.zeros((height, width), dtype=np.int32)
+        design_map[:, width // 2:] = 1
+        recognition = RecognitionResult(
+            design_map=design_map,
+            design_colors=[
+                DesignColor(0, (249, 249, 251), height * width // 2, 0, 18.0),
+                DesignColor(1, (33, 20, 15), height * width // 2, 0, 32.0),
+            ],
+            reconstructed_rgb=np.where(
+                design_map[:, :, None] == 0,
+                np.asarray((249, 249, 251), dtype=np.uint8),
+                np.asarray((33, 20, 15), dtype=np.uint8),
+            ),
+            detail_mask=np.zeros((height, width), dtype=bool),
+            detail_design_ids=(),
+            metrics=RecognitionMetrics(1.0, 1.0, 1.0, 1.0),
+            subject_mask=np.ones((height, width), dtype=bool),
+        )
+        fallback = ThreadColor(name="Fallback", color_rgb=(120, 140, 100))
+
+        layers = ImageEngine.build_layers_from_recognition(
+            recognition,
+            [fallback],
+            recognition.reconstructed_rgb,
+            "photo_stitch",
+            QuantizationSettings(include_background=True),
+        )
+
+        self.assertEqual(len(layers), 2)
+        self.assertEqual(
+            {layer.effective_color_rgb() for layer in layers},
+            {(249, 249, 251), (33, 20, 15)},
+        )
+        covered = np.logical_or.reduce(
+            [region.mask > 0 for layer in layers for region in layer.regions]
+        )
+        self.assertTrue(np.all(covered))
 
     def test_cross_stitch_layer_builds_aligned_regions_without_extra_thread_layer(self):
         height, width = 48, 64
@@ -2765,8 +2806,519 @@ class ThreadSuggestionTests(unittest.TestCase):
         self.assertTrue(np.all(covered))
 
 
+class DesignAcceptanceArtifactTests(unittest.TestCase):
+    def test_design_diagnostics_stay_independent_from_thread_palette(self):
+        """Acceptance previews must describe source recognition, not spool mapping."""
+        image = np.full((48, 64, 3), (245, 120, 102), dtype=np.uint8)
+        image[:, :20] = (42, 115, 205)
+        cv2.circle(image, (42, 24), 9, (250, 250, 250), -1)
+        cv2.circle(image, (42, 24), 3, (20, 20, 20), -1)
+        threads = [
+            ThreadColor(name="Olive", color_rgb=(74, 95, 45)),
+            ThreadColor(name="Brown", color_rgb=(104, 70, 32)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=2,
+            design_color_budget=8,
+            auto_design_colors=False,
+            include_background=True,
+            preserve_details=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+        diagnostics = RecognitionEngine.build_design_diagnostics(image, result)
+
+        self.assertEqual(diagnostics.design_preview_rgb.shape, image.shape)
+        self.assertEqual(
+            diagnostics.layer_preview_rgb.shape,
+            (image.shape[0] * 4, image.shape[1] * 4, 3),
+        )
+        self.assertEqual(diagnostics.difference_heatmap_rgb.shape, image.shape)
+        self.assertTrue(np.all(diagnostics.layer_preview_rgb[1, 1] < 40))
+        self.assertGreater(
+            diagnostics.metrics.perceptual_similarity,
+            result.thread_metrics.perceptual_similarity,
+        )
+        self.assertGreater(
+            diagnostics.subject_metrics.perceptual_similarity,
+            result.subject_metrics.perceptual_similarity,
+        )
+        self.assertTrue(diagnostics.acceptance_passed)
+
+    def test_eye_rims_follow_their_light_fill_geometry(self):
+        """Eye outlines must be derived from the white fills they surround."""
+        image = np.full((48, 64, 3), (245, 120, 102), dtype=np.uint8)
+        cv2.ellipse(image, (24, 24), (10, 13), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(image, (40, 24), (10, 13), 0, 0, 360, (248, 248, 248), -1)
+        cv2.line(image, (32, 11), (32, 37), (30, 30, 30), 2)
+        guide_mask = np.zeros(image.shape[:2], dtype=bool)
+        guide_path = ((14.0, 24.0), (20.0, 12.0), (32.0, 11.0), (44.0, 12.0), (50.0, 24.0), (44.0, 36.0), (32.0, 37.0), (20.0, 36.0))
+        from stitch_studio.core.semantic_parts import FeatureGuide
+
+        guides = (
+            FeatureGuide(
+                guide_id="eyes", role="eye_outline", design_color_id=0,
+                source_color_rgb=(30, 30, 30), thread_index=0,
+                mask=guide_mask, path=guide_path,
+            ),
+            FeatureGuide(
+                guide_id="eye-bridge", role="eye_outline", design_color_id=0,
+                source_color_rgb=(30, 30, 30), thread_index=0,
+                mask=guide_mask, path=((32.0, 11.0), (32.0, 37.0)),
+                kind=SemanticPartKind.OPEN_LINE,
+            ),
+        )
+
+        contours = RecognitionEngine._extract_eye_fill_contours(image, guides)
+
+        self.assertEqual(len(contours), 2)
+        self.assertTrue(all(len(contour) >= 48 for contour in contours))
+        centers = sorted(float(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]) for contour in contours)
+        self.assertLess(centers[0], 29.0)
+        self.assertGreater(centers[1], 35.0)
+
+        separator = RecognitionEngine._extract_eye_separator_path(guides)
+        self.assertEqual(len(separator), 2)
+        self.assertLess(separator[0][1], 11.0)
+        self.assertGreater(separator[-1][1], 37.0)
+
+    def test_eye_rims_split_connected_fills_even_when_the_bridge_guide_is_partial(self):
+        """A short seam guide must not collapse two touching eye fills into one rim."""
+        image = np.full((52, 72, 3), (245, 120, 102), dtype=np.uint8)
+        cv2.ellipse(image, (29, 26), (11, 15), 0, 0, 360, (248, 248, 248), -1)
+        cv2.ellipse(image, (43, 26), (11, 15), 0, 0, 360, (248, 248, 248), -1)
+        guide_mask = np.zeros(image.shape[:2], dtype=bool)
+        from stitch_studio.core.semantic_parts import FeatureGuide
+
+        guides = (
+            FeatureGuide(
+                guide_id="eyes", role="eye_outline", design_color_id=0,
+                source_color_rgb=(30, 30, 30), thread_index=0,
+                mask=guide_mask,
+                path=((18.0, 26.0), (23.0, 12.0), (36.0, 10.0), (49.0, 12.0),
+                      (54.0, 26.0), (49.0, 40.0), (36.0, 42.0), (23.0, 40.0)),
+            ),
+            FeatureGuide(
+                guide_id="partial-eye-bridge", role="eye_outline", design_color_id=0,
+                source_color_rgb=(30, 30, 30), thread_index=0,
+                mask=guide_mask, path=((36.0, 24.0), (36.0, 31.0)),
+                kind=SemanticPartKind.OPEN_LINE,
+            ),
+        )
+
+        contours = RecognitionEngine._extract_eye_fill_contours(image, guides)
+
+        self.assertEqual(len(contours), 2)
+        self.assertTrue(all(len(contour) >= 48 for contour in contours))
+        centers = sorted(float(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]) for contour in contours)
+        self.assertLess(centers[0], 34.0)
+        self.assertGreater(centers[1], 38.0)
+
+    def test_antialias_blends_are_not_promoted_to_detail_colors(self):
+        """A soft edge belongs to its adjacent solid colors, not a new gray spool."""
+        image = np.full((64, 64, 3), 240, dtype=np.uint8)
+        cv2.line(image, (8, 32), (56, 32), (12, 12, 12), 3, cv2.LINE_AA)
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=2,
+            design_color_budget=8,
+            auto_design_colors=False,
+            include_background=True,
+            preserve_details=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+        antialias = RecognitionEngine.detect_antialias_blends(image)
+        detail_ids = np.asarray(result.detail_design_ids, dtype=np.int32)
+
+        self.assertTrue(np.any(antialias))
+        self.assertTrue(np.any(result.detail_mask & ~antialias))
+        self.assertFalse(np.any(np.isin(result.design_map[antialias], detail_ids)))
+
+
 class PatrickRegressionTests(unittest.TestCase):
     SOURCE_PATH = Path(__file__).resolve().parent / "fixtures" / "patrick-source.png"
+
+    def test_photo_stitch_palette_stays_within_requested_thread_budget(self):
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        self.assertLessEqual(
+            len(result.stitch_design_colors),
+            16,
+            "a 12-thread photo stitch must reserve only a small detail budget",
+        )
+
+    def test_photo_stitch_does_not_emit_a_second_outline_inside_mouth(self):
+        """The dark mouth fill must not become a duplicate running outline."""
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+
+        result = RecognitionEngine.recognize(image, threads, settings)
+        mouth = next(
+            part
+            for part in result.semantic_parts
+            if part.role == "mouth_outline"
+        )
+        mouth_interior = np.zeros(image.shape[:2], dtype=np.uint8)
+        contour = np.rint(np.asarray(mouth.paths[0], dtype=np.float32)).astype(
+            np.int32
+        )
+        cv2.fillPoly(mouth_interior, [contour], 1)
+
+        duplicate_outlines = []
+        for part in result.semantic_parts:
+            if (
+                part.part_id == mouth.part_id
+                or part.kind != SemanticPartKind.CLOSED_CONTOUR
+                or part.role != "feature_outline"
+            ):
+                continue
+            mask = np.asarray(part.mask, dtype=bool)
+            if not np.any(mask):
+                continue
+            inside = np.count_nonzero(mask & mouth_interior.astype(bool))
+            if inside / np.count_nonzero(mask) >= 0.8:
+                duplicate_outlines.append(part.part_id)
+
+        self.assertEqual(
+            duplicate_outlines,
+            [],
+            "mouth fill was emitted again as an inner running outline",
+        )
+
+    def test_photo_stitch_uses_dense_single_pass_for_canonical_mouth(self):
+        """Mouth contours need enough stitches to keep their pointed corners joined."""
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        region = next(
+            region
+            for layer in layers
+            for region in layer.regions
+            if region.semantic_part_id == "mouth-outline"
+        )
+
+        self.assertEqual(region.stitch_settings.fill_mode, "run")
+        self.assertEqual(region.stitch_settings.run_passes, 1)
+        self.assertLessEqual(region.stitch_settings.stitch_length_mm, 0.8)
+        self.assertFalse(region.stitch_settings.run_restore_source_pixels)
+        self.assertEqual(region.guide_paths_closed, [True])
+
+    def test_photo_stitch_classifies_lower_mouth_mark_as_continuous_line(self):
+        """A short unbranched lower-lip mark must not be converted to a loop."""
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+        lower_marks = [
+            part
+            for part in result.semantic_parts
+            if (
+                part.area >= 20
+                and 135.0 <= part.centroid[0] <= 150.0
+                and 132.0 <= part.centroid[1] <= 140.0
+            )
+        ]
+
+        self.assertEqual(len(lower_marks), 1)
+        self.assertEqual(lower_marks[0].kind, SemanticPartKind.OPEN_LINE)
+        self.assertEqual(lower_marks[0].stitch_intent, "continuous_run")
+
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        lower_region = next(
+            region
+            for layer in layers
+            for region in layer.regions
+            if region.semantic_part_id == lower_marks[0].part_id
+        )
+        self.assertEqual(
+            lower_region.stitch_settings.run_passes,
+            1,
+            "a short lip mark must be one clean continuous run, not three overlaid passes",
+        )
+        from stitch_studio.core.stitch_engine import StitchEngine
+
+        paths = StitchEngine().generate_region_paths(lower_region, image)
+        self.assertEqual(len(paths), 1)
+        path = np.asarray(paths[0], dtype=np.float64)
+        self.assertGreaterEqual(len(path), 2)
+        self.assertFalse(
+            np.allclose(path[0], path[-1]),
+            "the lower lip is an open stroke, never a tiny closed loop",
+        )
+        segment_lengths = np.linalg.norm(np.diff(path, axis=0), axis=1)
+        self.assertTrue(np.all(segment_lengths > 0.01))
+
+    def test_photo_stitch_uses_black_thread_for_dark_eye_outlines(self):
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        eye_layers = [
+            layer
+            for layer in layers
+            if any(region.semantic_role == "eye_outline" for region in layer.regions)
+        ]
+
+        self.assertTrue(eye_layers)
+        self.assertEqual(
+            {layer.effective_color_rgb() for layer in eye_layers},
+            {(0, 0, 0)},
+            "dark eye outlines must use the catalog black, never a gray fringe",
+        )
+
+    def test_photo_eye_outline_corridor_excludes_antialias_fill_fragments(self):
+        """Only the eye guide and its white underfill may occupy an eye edge."""
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 110, 205)),
+            ThreadColor(name="Light blue", color_rgb=(80, 190, 245)),
+            ThreadColor(name="Coral", color_rgb=(250, 130, 110)),
+            ThreadColor(name="Dark red", color_rgb=(110, 20, 10)),
+            ThreadColor(name="Red", color_rgb=(220, 30, 30)),
+            ThreadColor(name="Gray", color_rgb=(170, 170, 170)),
+            ThreadColor(name="Beige", color_rgb=(200, 190, 150)),
+            ThreadColor(name="Teal", color_rgb=(0, 120, 120)),
+            ThreadColor(name="Purple", color_rgb=(125, 90, 190)),
+            ThreadColor(name="Green", color_rgb=(20, 125, 70)),
+        ]
+        settings = QuantizationSettings(
+            n_colors=12,
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+            detail_sensitivity=0.65,
+            min_region_area_px=40,
+            morphology_kernel_size=5,
+            smooth_regions=True,
+        )
+        result = RecognitionEngine.recognize(image, threads, settings)
+        layers = ImageEngine.build_layers_from_recognition(
+            result,
+            threads,
+            image,
+            "photo_stitch",
+            settings,
+        )
+        corridor = np.zeros(image.shape[:2], dtype=np.uint8)
+        for part in result.semantic_parts:
+            if part.role == "eye_outline":
+                corridor[part.mask.astype(bool)] = 255
+        corridor = cv2.dilate(corridor, np.ones((3, 3), dtype=np.uint8)) > 0
+
+        intruders = []
+        for layer in layers:
+            for region in layer.regions:
+                if (
+                    region.mask is None
+                    or region.stitch_settings.fill_mode != "scanline"
+                    or region.name.endswith("protected fill")
+                    or region.semantic_role == "eye_outline"
+                ):
+                    continue
+                overlap = int(np.count_nonzero((region.mask > 0) & corridor))
+                if overlap:
+                    intruders.append((layer.name, region.name, overlap))
+
+        self.assertEqual(
+            intruders,
+            [],
+            "anti-aliased neighboring fills must not cross the eye outline corridor",
+        )
+
+    def test_auto_design_budget_treats_flat_cartoon_as_illustration(self):
+        image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
+        threads = [
+            ThreadColor(name="Black", color_rgb=(0, 0, 0)),
+            ThreadColor(name="White", color_rgb=(255, 255, 255)),
+            ThreadColor(name="Blue", color_rgb=(0, 120, 210)),
+            ThreadColor(name="Coral", color_rgb=(255, 125, 100)),
+            ThreadColor(name="Red", color_rgb=(210, 35, 25)),
+            ThreadColor(name="Green", color_rgb=(130, 160, 110)),
+        ]
+        settings = QuantizationSettings(
+            design_color_budget=0,
+            auto_design_colors=True,
+            include_background=True,
+            preserve_details=True,
+        )
+
+        budget = RecognitionEngine._design_color_budget(image, settings)
+        result = RecognitionEngine.recognize(image, threads, settings)
+
+        self.assertEqual(budget, 32)
+        self.assertGreaterEqual(result.metrics.perceptual_similarity, 0.95)
+        self.assertIsNotNone(result.stitch_design_map)
+        self.assertLessEqual(len(result.stitch_design_colors), budget)
+
+    def test_auto_design_budget_keeps_textured_images_above_cartoon_budget(self):
+        rng = np.random.default_rng(7)
+        y, x = np.mgrid[0:192, 0:256]
+        textured = np.stack(
+            [
+                90 + 70 * np.sin(x / 17) + 35 * np.sin(y / 7),
+                100 + 60 * np.sin((x + y) / 23) + 25 * np.cos(x / 5),
+                120 + 55 * np.cos(y / 13) + 30 * np.sin(x / 9),
+            ],
+            axis=2,
+        )
+        textured += rng.normal(0, 12, textured.shape)
+        image = np.clip(textured, 0, 255).astype(np.uint8)
+        settings = QuantizationSettings(
+            design_color_budget=0,
+            auto_design_colors=True,
+        )
+
+        budget = RecognitionEngine._design_color_budget(image, settings)
+
+        self.assertGreaterEqual(budget, 64)
 
     def test_palette_refinement_keeps_canonical_face_guides_in_photo_layers(self):
         image = np.array(Image.open(self.SOURCE_PATH).convert("RGB"))
@@ -2816,47 +3368,54 @@ class PatrickRegressionTests(unittest.TestCase):
         ]
         self.assertEqual(
             sorted(guide.kind.value for guide in eye_guides),
-            ["closed_contour", "open_line"],
-            "touching eyes must share one outer outline and one open seam",
+            ["closed_contour", "closed_contour"],
+            "each eye must keep its own smooth canonical rim",
         )
-        seam = next(
-            guide for guide in eye_guides if guide.kind.value == "open_line"
-        )
-        self.assertNotEqual(seam.path[0], seam.path[-1])
-        seam_points = np.asarray(seam.path, dtype=np.float64)
-        self.assertGreater(float(np.ptp(seam_points[:, 1])), 12.0)
-        self.assertLessEqual(float(np.ptp(seam_points[:, 0])), 5.0)
-        self.assertGreaterEqual(
-            float(seam_points[0, 1]),
-            52.0,
-            "the shared eye seam must start at the visible eye junction",
-        )
-        self.assertGreaterEqual(float(seam_points[0, 0]), 156.0)
-        lateral_steps = np.diff(seam_points[:, 0])
-        lateral_steps = lateral_steps[np.abs(lateral_steps) >= 0.5]
-        lateral_reversals = int(
-            np.count_nonzero(lateral_steps[:-1] * lateral_steps[1:] < 0.0)
-        )
-        self.assertLessEqual(
-            lateral_reversals,
-            1,
-            "the shared eye seam must not zigzag into knots or duplicate stitches",
-        )
-        outer = next(
+        closed_eye_guides = [
             guide
             for guide in eye_guides
             if guide.kind.value == "closed_contour"
+        ]
+        self.assertEqual(len(closed_eye_guides), 2)
+        self.assertTrue(
+            all(len(guide.path) >= 32 for guide in closed_eye_guides),
+            "each eye rim must be sampled from smooth ellipse geometry",
         )
-        outer_points = np.asarray(outer.path, dtype=np.float64)
-        false_inner_seam = (
-            (outer_points[:, 0] >= 151.0)
-            & (outer_points[:, 0] <= 157.0)
-            & (outer_points[:, 1] >= 59.0)
-            & (outer_points[:, 1] <= 76.0)
+        for guide in (*eye_guides, next(
+            (guide for guide in result.feature_guides if guide.role == "mouth_outline"),
+            None,
+        )):
+            if guide is None:
+                continue
+            red, green, blue = guide.source_color_rgb
+            luminance = red * 0.299 + green * 0.587 + blue * 0.114
+            self.assertLessEqual(luminance, 72)
+            if guide.role == "eye_outline":
+                self.assertLessEqual(
+                    max(red, green, blue) - min(red, green, blue),
+                    40,
+                )
+        closed_eye_paths = [
+            np.asarray(guide.path, dtype=np.float64)
+            for guide in closed_eye_guides
+        ]
+        eye_widths = [float(np.ptp(path[:, 0])) for path in closed_eye_paths]
+        self.assertTrue(
+            all(14.0 <= width <= 30.0 for width in eye_widths),
+            "each eye rim must follow one eye instead of a combined peanut outline",
         )
-        self.assertFalse(
-            np.any(false_inner_seam),
-            "the outer eye contour must not trace both sides of the shared seam",
+        ordered_eye_paths = sorted(
+            closed_eye_paths,
+            key=lambda path: float(np.mean(path[:, 0])),
+        )
+        centre_overlap = float(
+            np.max(ordered_eye_paths[0][:, 0])
+            - np.min(ordered_eye_paths[1][:, 0])
+        )
+        self.assertLessEqual(
+            centre_overlap,
+            0.75,
+            "eye rims must meet at one centre boundary instead of overlapping",
         )
         palette_rgb = np.asarray(
             [thread.color_rgb for thread in threads],
@@ -2883,6 +3442,29 @@ class PatrickRegressionTests(unittest.TestCase):
         self.assertTrue(
             all(guide.thread_index == highlight_thread for guide in highlight_guides)
         )
+        self.assertTrue(
+            all(min(guide.source_color_rgb) >= 230 for guide in highlight_guides)
+        )
+        lower_lip_guides = [
+            guide
+            for guide in result.feature_guides
+            if guide.guide_id == "mouth-lower-lip"
+        ]
+        self.assertEqual(
+            len(lower_lip_guides),
+            1,
+            "the lower mouth crease must survive palette refinement as one semantic run",
+        )
+        lower_lip = lower_lip_guides[0]
+        self.assertEqual(lower_lip.kind.value, "open_line")
+        self.assertGreaterEqual(len(lower_lip.path), 3)
+        lower_lip_points = np.asarray(lower_lip.path, dtype=np.float64)
+        self.assertGreaterEqual(float(np.ptp(lower_lip_points[:, 0])), 5.0)
+        self.assertLessEqual(
+            float(np.ptp(lower_lip_points[:, 1])),
+            1.0,
+            "the lower mouth crease must remain a continuous horizontal run",
+        )
 
         layers = ImageEngine.build_layers_from_recognition(
             result,
@@ -2894,7 +3476,7 @@ class PatrickRegressionTests(unittest.TestCase):
         eye_interior = np.zeros(image.shape[:2], dtype=np.uint8)
         cv2.fillPoly(
             eye_interior,
-            [np.rint(outer_points).astype(np.int32)],
+            [np.rint(path).astype(np.int32) for path in closed_eye_paths],
             1,
         )
         background_inside_eye = np.zeros(image.shape[:2], dtype=bool)
@@ -2914,13 +3496,16 @@ class PatrickRegressionTests(unittest.TestCase):
             "closed eye interiors must stay on the subject plane instead of "
             "forming a compensated background halo",
         )
-        eye_bounds_min = np.min(np.rint(outer_points), axis=0) - 5.0
-        eye_bounds_max = np.max(np.rint(outer_points), axis=0) + 5.0
+        eye_bounds = np.vstack(closed_eye_paths)
+        eye_bounds_min = np.min(np.rint(eye_bounds), axis=0) - 5.0
+        eye_bounds_max = np.max(np.rint(eye_bounds), axis=0) + 5.0
         eye_fill_regions = [
             region
             for layer in layers
             for region in layer.regions
             if (
+                min(layer.effective_color_rgb()) >= 180
+                and
                 region.mask is not None
                 and region.semantic_part_id is None
                 and region.stitch_settings.fill_mode == "scanline"
@@ -2941,17 +3526,21 @@ class PatrickRegressionTests(unittest.TestCase):
                     pixel_point <= eye_bounds_max
                 ):
                     eye_fill_distances.append(
-                        cv2.pointPolygonTest(
-                            np.rint(outer_points).astype(np.int32),
-                            tuple(float(value) for value in pixel_point),
-                            True,
+                        max(
+                            cv2.pointPolygonTest(
+                                np.rint(path).astype(np.int32),
+                                tuple(float(value) for value in pixel_point),
+                                True,
+                            )
+                            for path in closed_eye_paths
                         )
                     )
         self.assertTrue(eye_fill_distances)
         self.assertGreaterEqual(
             min(eye_fill_distances),
-            0.0,
-            "eye fill compensation must stay beneath the authoritative outline",
+            -0.75,
+            "eye fill compensation must stay beneath the authoritative outline "
+            "within raster sampling tolerance",
         )
         canonical_ids = {guide.guide_id for guide in result.feature_guides}
         layer_ids = {
@@ -3060,11 +3649,10 @@ class PatrickRegressionTests(unittest.TestCase):
                 and region.semantic_kind == "open_line"
             )
         ]
-        self.assertEqual(len(eye_seams), 1)
-        self.assertEqual(eye_seams[0].stitch_settings.run_passes, 1)
         self.assertEqual(
-            eye_seams[0].stitch_settings.run_endpoint_extension_mm,
-            0.0,
+            eye_seams,
+            [],
+            "independent eye rims already create the centre boundary without a third run",
         )
 
         closed_eye_regions = [
@@ -3076,42 +3664,43 @@ class PatrickRegressionTests(unittest.TestCase):
                 and region.semantic_kind == "closed_contour"
             )
         ]
-        self.assertEqual(len(closed_eye_regions), 1)
+        # A cartoon source contains two individual eye whites.  Fitting and
+        # stitching them separately avoids a raster-derived combined contour
+        # that distorts both eye sockets.
+        self.assertEqual(len(closed_eye_regions), 2)
         from stitch_studio.core.stitch_engine import StitchEngine
 
-        closed_eye_path = StitchEngine().generate_region_paths(
-            closed_eye_regions[0],
-            image,
-        )[0]
-        eye_turns = _polyline_turn_angles(closed_eye_path)
-        self.assertLessEqual(
-            float(np.percentile(eye_turns, 90)),
-            30.0,
-            "the exported eye outline must smooth subpixel contour jitter",
-        )
-        eye_vectors = np.diff(
-            np.asarray(closed_eye_path, dtype=np.float64),
-            axis=0,
-        )
-        eye_lengths = np.linalg.norm(eye_vectors, axis=1)
-        eye_vectors = eye_vectors[eye_lengths > 1e-6]
-        eye_units = eye_vectors / np.linalg.norm(
-            eye_vectors,
-            axis=1,
-        )[:, None]
-        signed_turns = (
-            eye_units[:-1, 0] * eye_units[1:, 1]
-            - eye_units[:-1, 1] * eye_units[1:, 0]
-        )
-        turn_signs = np.sign(signed_turns[np.abs(signed_turns) > 0.03])
-        turn_reversals = int(
-            np.count_nonzero(turn_signs[:-1] * turn_signs[1:] < 0)
-        )
-        self.assertLessEqual(
-            turn_reversals,
-            16,
-            "the exported eye outline must not alternate left-right at pixel frequency",
-        )
+        for region in closed_eye_regions:
+            closed_eye_path = StitchEngine().generate_region_paths(region, image)[0]
+            eye_turns = _polyline_turn_angles(closed_eye_path)
+            self.assertLessEqual(
+                float(np.percentile(eye_turns, 90)),
+                30.0,
+                "the exported eye outline must smooth subpixel contour jitter",
+            )
+            eye_vectors = np.diff(
+                np.asarray(closed_eye_path, dtype=np.float64),
+                axis=0,
+            )
+            eye_lengths = np.linalg.norm(eye_vectors, axis=1)
+            eye_vectors = eye_vectors[eye_lengths > 1e-6]
+            eye_units = eye_vectors / np.linalg.norm(
+                eye_vectors,
+                axis=1,
+            )[:, None]
+            signed_turns = (
+                eye_units[:-1, 0] * eye_units[1:, 1]
+                - eye_units[:-1, 1] * eye_units[1:, 0]
+            )
+            turn_signs = np.sign(signed_turns[np.abs(signed_turns) > 0.03])
+            turn_reversals = int(
+                np.count_nonzero(turn_signs[:-1] * turn_signs[1:] < 0)
+            )
+            self.assertLessEqual(
+                turn_reversals,
+                4,
+                "the exported eye outline must be a stable curve, not a pixel-frequency zigzag",
+            )
 
         highlight_regions = [
             region
@@ -3329,11 +3918,20 @@ class PatrickRegressionTests(unittest.TestCase):
         )
 
         result = RecognitionEngine.recognize(image, threads, settings)
+        diagnostics = RecognitionEngine.build_design_diagnostics(image, result)
 
         self.assertGreaterEqual(result.metrics.perceptual_similarity, 0.95)
         self.assertGreaterEqual(result.metrics.boundary_recall, 0.95)
         self.assertGreaterEqual(result.metrics.pixel_coverage, 0.995)
         self.assertGreaterEqual(result.metrics.detail_recall, 0.95)
+        self.assertTrue(diagnostics.acceptance_passed)
+        self.assertEqual(diagnostics.acceptance_failures, ())
+        self.assertEqual(diagnostics.design_preview_rgb.shape, image.shape)
+        self.assertEqual(
+            diagnostics.layer_preview_rgb.shape,
+            (image.shape[0] * 4, image.shape[1] * 4, 3),
+        )
+        self.assertEqual(diagnostics.difference_heatmap_rgb.shape, image.shape)
         self.assertTrue(result.detail_design_ids)
         detail_ids = np.array(result.detail_design_ids, dtype=np.int32)
         self.assertTrue(np.all(np.isin(result.design_map[result.detail_mask], detail_ids)))

@@ -240,6 +240,10 @@ class SemanticPartExtractor:
                     part,
                     guide_exclusion,
                 )
+                and not self._duplicates_mouth_interior_outline(
+                    part,
+                    guides,
+                )
             )
         ]
         regular_budget = max(0, self.max_parts - len(guide_parts))
@@ -263,6 +267,47 @@ class SemanticPartExtractor:
             return False
         overlap = np.count_nonzero(mask & guide_exclusion)
         return overlap / max(1, np.count_nonzero(mask)) >= 0.35
+
+    @staticmethod
+    def _duplicates_mouth_interior_outline(
+        part: SemanticPart,
+        guides: Sequence[FeatureGuide],
+    ) -> bool:
+        """Discard a mouth-fill component that was reclassified as an outline.
+
+        The canonical mouth guide owns the single outside running path.  A dark
+        mouth fill can otherwise be split from the same pixels and emitted as a
+        second closed contour, which creates the visible jagged double border.
+        Compact fills such as a tongue are deliberately left untouched.
+        """
+        if (
+            part.kind != SemanticPartKind.CLOSED_CONTOUR
+            or part.role != "feature_outline"
+        ):
+            return False
+        mask = np.asarray(part.mask, dtype=bool)
+        if not np.any(mask):
+            return False
+
+        for guide in guides:
+            if (
+                guide.role != "mouth_outline"
+                or guide.kind != SemanticPartKind.CLOSED_CONTOUR
+                or len(guide.path) < 3
+            ):
+                continue
+            mouth_interior = np.zeros(mask.shape, dtype=np.uint8)
+            contour = np.rint(
+                np.asarray(guide.path, dtype=np.float32)
+            ).astype(np.int32)
+            cv2.fillPoly(mouth_interior, [contour], 1)
+            interior = mouth_interior.astype(bool)
+            if interior.shape != mask.shape:
+                continue
+            overlap = np.count_nonzero(mask & interior)
+            if overlap / max(1, np.count_nonzero(mask)) >= 0.8:
+                return True
+        return False
 
     @staticmethod
     def _parts_from_feature_guides(
@@ -317,7 +362,11 @@ class SemanticPartExtractor:
                     stitch_intent=(
                         "protected_highlight"
                         if guide.kind == SemanticPartKind.PROTECTED_HIGHLIGHT
-                        else "canonical_closed_run"
+                        else (
+                            "continuous_run"
+                            if guide.kind == SemanticPartKind.OPEN_LINE
+                            else "canonical_closed_run"
+                        )
                     ),
                 )
             )
@@ -690,12 +739,40 @@ class SemanticPartExtractor:
             float(rotated_width * rotated_height),
         )
 
+        # A short lip or facial crease can become locally thick after color
+        # quantization, even though its skeleton is still one unbranched
+        # stroke.  Preserve that topology instead of turning the mark into a
+        # tiny closed outline loop.
+        skeleton = skeletonize(component)
+        skeleton_u8 = skeleton.astype(np.uint8)
+        neighbor_count = cv2.filter2D(
+            skeleton_u8,
+            ddepth=cv2.CV_16S,
+            kernel=np.ones((3, 3), dtype=np.uint8),
+        ) - skeleton_u8
+        skeleton_pixels = int(np.count_nonzero(skeleton_u8))
+        endpoint_count = int(
+            np.count_nonzero(skeleton & (neighbor_count == 1))
+        )
+        branch_count = int(
+            np.count_nonzero(skeleton & (neighbor_count >= 3))
+        )
+        is_unbranched_stroke = (
+            not hole_contours
+            and max(width, height) >= 7
+            and elongation >= 1.7
+            and stroke_width <= 6.5
+            and skeleton_pixels >= 6
+            and endpoint_count == 2
+            and branch_count == 0
+        )
+
         is_open_line = (
             not hole_contours
             and max(width, height) >= 5
             and stroke_width <= 4.2
             and (elongation >= 1.35 or fill_ratio <= 0.34)
-        )
+        ) or is_unbranched_stroke
         if is_open_line:
             open_path = self._trace_open_component(component)
             if len(open_path) < 2:

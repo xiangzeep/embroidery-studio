@@ -7,6 +7,105 @@ from pathlib import Path
 
 
 class RealExportRoundTripTests(unittest.TestCase):
+    def test_pes_compatibility_palette_is_stable_and_hue_faithful(self):
+        script = r"""
+import json
+import os
+import tempfile
+
+from pyembroidery import COLOR_CHANGE, END, STITCH, EmbPattern, EmbThread, write
+from pyembroidery.EmbThreadPec import get_thread_set
+
+from stitch_studio.core.export_engine import ExportEngine
+
+
+def make_thread(rgb, name):
+    thread = EmbThread()
+    thread.color = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
+    thread.name = name
+    thread.description = name
+    return thread
+
+
+threads = [
+    make_thread((68, 68, 54), "Dark Gray"),
+    make_thread((70, 20, 13), "Burgundy"),
+    make_thread((6, 143, 213), "Sky Blue"),
+    make_thread((162, 178, 145), "Light Gray"),
+    make_thread((197, 208, 169), "Light Yellow"),
+    make_thread((255, 255, 255), "White"),
+    make_thread((107, 24, 11), "Dark Red"),
+    make_thread((112, 131, 131), "Medium Gray"),
+    make_thread((250, 139, 119), "Coral"),
+    make_thread((250, 138, 118), "Coral shade"),
+    make_thread((3, 116, 209), "Blue Metallic"),
+    make_thread((231, 64, 35), "Red"),
+    make_thread((58, 34, 25), "Black"),
+    make_thread((249, 249, 251), "Eye white"),
+    make_thread((255, 255, 255), "White"),
+]
+palette = get_thread_set()
+first = ExportEngine._build_stable_pec_palette(palette, threads)
+second = ExportEngine._build_stable_pec_palette(get_thread_set(), threads)
+descriptions = [palette[index].description for index in first]
+pattern = EmbPattern()
+for index, thread in enumerate(threads):
+    pattern.add_thread(thread)
+    pattern.add_stitch_absolute(STITCH, float(index * 10), float(index % 2))
+    if index + 1 < len(threads):
+        pattern.add_stitch_absolute(COLOR_CHANGE, float(index * 10), float(index % 2))
+pattern.add_stitch_absolute(END, 120.0, 0.0)
+with tempfile.TemporaryDirectory() as directory:
+    path = os.path.join(directory, "palette.pes")
+    with ExportEngine._stable_pes_palette_writer():
+        write(pattern, path, {"version": 6.0})
+    raw = open(path, "rb").read()
+    pec_offset = int.from_bytes(raw[8:12], "little")
+    palette_start = pec_offset + 3 + 16 + 15 + 1 + 1 + 12
+    color_changes = raw[palette_start]
+    encoded = list(raw[palette_start + 1:palette_start + color_changes + 2])
+print("PALETTE=" + json.dumps({
+    "indices": first,
+    "second": second,
+    "encoded": encoded,
+    "descriptions": descriptions,
+}))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stdout + completed.stderr,
+        )
+        payload = next(
+            line.removeprefix("PALETTE=")
+            for line in completed.stdout.splitlines()
+            if line.startswith("PALETTE=")
+        )
+        result = json.loads(payload)
+        self.assertEqual(result["indices"], result["second"])
+        self.assertEqual(result["indices"], result["encoded"])
+        self.assertEqual(result["descriptions"][5], "White")
+        self.assertEqual(result["descriptions"][8], "Salmon Pink")
+        self.assertEqual(result["descriptions"][12], "Black")
+        self.assertEqual(
+            result["indices"][8],
+            result["indices"][9],
+            "near-identical coral colors must reuse the closest PEC color",
+        )
+        self.assertEqual(
+            result["indices"][13],
+            result["indices"][14],
+            "near-identical whites must not turn into flesh pink",
+        )
+
     def test_patrick_photo_stitch_pes_roundtrip_keeps_real_pattern(self):
         source_path = (
             Path(__file__).resolve().parent

@@ -382,6 +382,10 @@ class QuantizeWorker(QThread):
                 self.generation_mode,
                 self.quant_settings,
             )
+            diagnostics = RecognitionEngine.build_design_diagnostics(
+                processed,
+                recognition,
+            )
             regions = [
                 (region.design_color_id, region.mask)
                 for layer in layers
@@ -404,6 +408,7 @@ class QuantizeWorker(QThread):
                 "regions": regions,
                 "layers": layers,
                 "recognition": recognition,
+                "recognition_diagnostics": diagnostics,
             })
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
@@ -704,6 +709,12 @@ class MainWindow(QMainWindow):
         # Image panel
         self.image_panel.image_changed.connect(self._on_image_settings_changed)
         self.image_panel.quantize_requested.connect(self._quantize_and_segment)
+        self.image_panel.recognition_preview_requested.connect(
+            self._show_recognition_preview
+        )
+        self.image_panel.production_preview_requested.connect(
+            self._show_production_preview
+        )
         self.image_panel.btn_photo_stitch.toggled.connect(
             lambda checked: self._set_generation_mode("photo_stitch") if checked else None
         )
@@ -767,6 +778,7 @@ class MainWindow(QMainWindow):
         self.project = Project()
         self.canvas.clear_all()
         self.layer_panel.set_project(self.project)
+        self.image_panel.set_recognition_preview_available(False)
         self._flow_field = None
         self.status_info.setText(tr("status.new_project"))
 
@@ -782,6 +794,7 @@ class MainWindow(QMainWindow):
             self.project = Project()
             self.project.load(path)
             self.layer_panel.set_project(self.project)
+            self.image_panel.set_recognition_preview_available(False)
 
             if self.project.source_image is not None:
                 size = (self.project.image_settings.output_width_mm,
@@ -841,6 +854,8 @@ class MainWindow(QMainWindow):
             self.project.source_image = image
             self.project.source_image_path = path
             self.project.name = os.path.splitext(os.path.basename(path))[0]
+            self.project.recognition_diagnostics = None
+            self.image_panel.set_recognition_preview_available(False)
 
             # Auto-set output size proportional to image
             h, w = image.shape[:2]
@@ -943,37 +958,19 @@ class MainWindow(QMainWindow):
         regions = result["regions"]
         layers = result["layers"]
         recognition = result.get("recognition")
+        diagnostics = result.get("recognition_diagnostics")
 
         self.project.processed_image = processed
         self.project.quantized_map = thread_map
         self.project.layers = layers
+        self.project.recognition_diagnostics = diagnostics
         self.project.modified = True
 
         # Update UI
         self.layer_panel.set_project(self.project)
 
-        img_h, img_w = processed.shape[:2]
-        out_w = img_settings.output_width_mm * 10
-        out_h = img_settings.output_height_mm * 10
-        mask_scale = min(out_w / img_w, out_h / img_h)
-
-        self.canvas.clear_all()
-        self.canvas.set_background_image(
-            processed,
-            (img_settings.output_width_mm, img_settings.output_height_mm)
-        )
-
-        for layer in layers:
-            for region in layer.regions:
-                if region.mask is not None:
-                    self.canvas.set_region_mask(
-                        region.uid, region.mask,
-                        layer.thread_color_rgb,
-                        mask_scale,
-                        getattr(region, "polygon", None)
-                    )
-
-        self.canvas.fit_to_content()
+        self.image_panel.set_recognition_preview_available(diagnostics is not None)
+        self._show_production_preview()
         self.status_info.setText(
             tr("status.quantized").format(
                 colors=len(used_indices),
@@ -997,6 +994,55 @@ class MainWindow(QMainWindow):
                 ),
             )
         )
+
+    def _show_production_preview(self):
+        """Restore the actual embroidery-layer preview after design QA."""
+        processed = self.project.processed_image
+        if processed is None:
+            return
+
+        img_settings = self.image_panel.get_image_settings()
+        img_h, img_w = processed.shape[:2]
+        out_w = img_settings.output_width_mm * 10
+        out_h = img_settings.output_height_mm * 10
+        mask_scale = min(out_w / img_w, out_h / img_h)
+
+        self.canvas.clear_all()
+        self.canvas.set_background_image(
+            processed,
+            (img_settings.output_width_mm, img_settings.output_height_mm)
+        )
+        for layer in self.project.layers:
+            for region in layer.regions:
+                if region.mask is not None:
+                    self.canvas.set_region_mask(
+                        region.uid,
+                        region.mask,
+                        layer.thread_color_rgb,
+                        mask_scale,
+                        getattr(region, "polygon", None),
+                    )
+        self.canvas.fit_to_content()
+
+    def _show_recognition_preview(self, mode: str):
+        """Display source-faithful design QA without physical thread remapping."""
+        diagnostics = getattr(self.project, "recognition_diagnostics", None)
+        if diagnostics is None:
+            return
+
+        previews = {
+            "design": diagnostics.design_preview_rgb,
+            "layers": diagnostics.layer_preview_rgb,
+            "difference": diagnostics.difference_heatmap_rgb,
+        }
+        preview = previews.get(mode, diagnostics.design_preview_rgb)
+        img_settings = self.image_panel.get_image_settings()
+        self.canvas.clear_all()
+        self.canvas.set_background_image(
+            preview,
+            (img_settings.output_width_mm, img_settings.output_height_mm),
+        )
+        self.canvas.fit_to_content()
 
     def _on_quantize_error(self, msg):
         QMessageBox.critical(

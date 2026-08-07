@@ -484,7 +484,7 @@ class StitchEngine:
         """Path-aware scanline fill. Each separated island row is its own path."""
         poly = self._polygon_for_fill(mask, settings.pull_compensation_mm, polygon)
         if poly is None or poly.is_empty:
-            return self._generate_hairline_fill_paths(mask, settings)
+            return self._scanline_or_hairline_fallback(mask, settings)
 
         geometries = getattr(poly, "geoms", None)
         if geometries is None:
@@ -495,7 +495,81 @@ class StitchEngine:
             if geometry.is_empty or not hasattr(geometry, "exterior"):
                 continue
             paths.extend(self._generate_scanline_polygon_paths(geometry, settings))
-        return paths or self._generate_hairline_fill_paths(mask, settings)
+        return paths or self._scanline_or_hairline_fallback(mask, settings)
+
+    def _scanline_or_hairline_fallback(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Keep sewable areas filled if vector reconstruction becomes invalid."""
+        binary = mask > 0
+        if not np.any(binary):
+            return []
+        ys, xs = np.where(binary)
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        min_area = max(24, int(round(2.0 * self.px_per_mm ** 2)))
+        min_axis = max(3, int(round(self.px_per_mm)))
+        if int(binary.sum()) >= min_area and min(width, height) >= min_axis:
+            paths = self._generate_raster_scanline_paths(mask, settings)
+            if paths:
+                return paths
+        return self._generate_hairline_fill_paths(mask, settings)
+
+    def _generate_raster_scanline_paths(
+        self,
+        mask: np.ndarray,
+        settings: StitchSettings,
+    ) -> List[List[Tuple[float, float]]]:
+        """Raster-space scanline fallback used only when vector geometry is unusable."""
+        binary = (mask > 0).astype(np.uint8) * 255
+        height, width = binary.shape[:2]
+        if height == 0 or width == 0:
+            return []
+
+        center = ((width - 1) / 2.0, (height - 1) / 2.0)
+        transform = cv2.getRotationMatrix2D(center, -settings.angle_deg, 1.0)
+        rotated = cv2.warpAffine(
+            binary,
+            transform,
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        inverse = cv2.invertAffineTransform(transform)
+        pitch_px = max(1.0, settings.row_spacing_mm * self.px_per_mm / settings.density)
+        stitch_len_px = max(1.0, settings.stitch_length_mm * self.px_per_mm)
+        paths: List[List[Tuple[float, float]]] = []
+        row_idx = 0
+        y = pitch_px / 2.0
+
+        while y < height:
+            row = rotated[min(height - 1, max(0, int(round(y))))] > 0
+            active = np.flatnonzero(row)
+            if active.size:
+                splits = np.where(np.diff(active) > 1)[0] + 1
+                for segment in np.split(active, splits):
+                    if segment.size < 2:
+                        continue
+                    coords = [(float(segment[0]), y), (float(segment[-1]), y)]
+                    if row_idx % 2:
+                        coords.reverse()
+                    path = []
+                    for px, py in self._resample_line(
+                        coords,
+                        stitch_len_px,
+                        settings.randomize_length,
+                    ):
+                        x0 = inverse[0, 0] * px + inverse[0, 1] * py + inverse[0, 2]
+                        y0 = inverse[1, 0] * px + inverse[1, 1] * py + inverse[1, 2]
+                        path.append((float(x0), float(y0)))
+                    if len(path) >= 2:
+                        paths.append(path)
+            y += pitch_px
+            row_idx += 1
+        return paths
 
     def _generate_scanline_polygon_paths(
         self,
@@ -940,6 +1014,23 @@ class StitchEngine:
                 else ()
             )
             simplified = self._simplify_run_path(raw, closed=closed)
+            if closed and corner_mode == "smooth" and not locked:
+                # Canonical rounded guides (notably eye sockets) are already
+                # vector-like.  Use a stronger reduction than the generic
+                # run-path tolerance so a one-pixel raster stair cannot
+                # survive as alternating stitch directions.
+                contour = np.asarray(simplified, dtype=np.float32)
+                reduced = cv2.approxPolyDP(
+                    contour.reshape((-1, 1, 2)),
+                    max(1.0, 0.15 * self.px_per_mm),
+                    closed=True,
+                )
+                candidate = [
+                    (float(point[0][0]), float(point[0][1]))
+                    for point in reduced
+                ]
+                if len(candidate) >= 4:
+                    simplified = self._ensure_closed_path(candidate)
             if closed:
                 if corner_mode == "preserve":
                     sampled = self._resample_polyline_preserving_vertices(
@@ -948,8 +1039,12 @@ class StitchEngine:
                         closed=True,
                     )
                 else:
+                    # ``simplified`` has already removed pixel-scale turns.
+                    # Re-feeding the raw guide here reintroduced the very
+                    # staircase vibration that recognition had smoothed out.
+                    geometry = raw if locked else simplified
                     sampled = adaptive_closed_contour(
-                        raw,
+                        geometry,
                         spacing_px=stitch_len_px,
                         smoothing_iterations=(
                             1 if corner_mode == "adaptive" and locked else 2

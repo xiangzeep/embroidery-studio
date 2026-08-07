@@ -7,8 +7,13 @@ via pyembroidery (DST, PES, JEF, VP3, EXP, SVG, PNG).
 import pyembroidery
 import numpy as np
 import os
+import importlib
+import re
+import threading
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import asdict, dataclass
+from skimage.color import rgb2lab
 from typing import List, Tuple, Optional, Dict
 from .project import Project, Layer, Region
 from .pattern_renderer import PatternRenderer
@@ -27,6 +32,9 @@ SUPPORTED_FORMATS = {
     'csv': 'CSV Debug',
     'json': 'JSON Debug',
 }
+
+
+_PES_PALETTE_WRITE_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -189,7 +197,10 @@ class ExportEngine:
             # PES v1 remaps custom RGB values to a small built-in Brother
             # palette. Version 6 embeds the actual thread chart and colors.
             write_settings.setdefault("version", 6.0)
-        pyembroidery.write(pattern, filepath, write_settings)
+            with self._stable_pes_palette_writer():
+                pyembroidery.write(pattern, filepath, write_settings)
+        else:
+            pyembroidery.write(pattern, filepath, write_settings)
         written_files = [filepath]
         if filepath.lower().endswith(".pes") and os.path.isfile(filepath):
             self.validate_roundtrip(pattern, filepath)
@@ -200,6 +211,126 @@ class ExportEngine:
             pyembroidery.write(pattern, edr_path, {})
             written_files.append(edr_path)
         return written_files
+
+    @staticmethod
+    def _build_stable_pec_palette(thread_palette, threadlist):
+        """Assign deterministic, hue-faithful PEC compatibility colors.
+
+        PES 6 stores exact custom RGB values, but many viewers render the PEC
+        compatibility indices instead. pyembroidery's default mapper greedily
+        walks a set, so its result depends on object iteration order and can
+        turn coral into khaki or black into green. Solve the complete unique
+        color assignment in CIELAB space and reuse indices for visually
+        equivalent colors.
+        """
+        threads = list(threadlist)
+        candidates = [
+            (index, thread)
+            for index, thread in enumerate(thread_palette)
+            if thread is not None
+        ]
+        if not threads or not candidates:
+            return [0 for _ in threads]
+
+        unique_threads = []
+        unique_lookup = {}
+        thread_keys = []
+        for thread in threads:
+            color = int(getattr(thread, "color", 0)) & 0xFFFFFF
+            key = color
+            thread_keys.append(key)
+            if key not in unique_lookup:
+                unique_lookup[key] = len(unique_threads)
+                unique_threads.append(thread)
+
+        source_rgb = np.asarray(
+            [
+                (
+                    (int(thread.color) >> 16) & 0xFF,
+                    (int(thread.color) >> 8) & 0xFF,
+                    int(thread.color) & 0xFF,
+                )
+                for thread in unique_threads
+            ],
+            dtype=np.float64,
+        )
+        target_rgb = np.asarray(
+            [
+                (thread.get_red(), thread.get_green(), thread.get_blue())
+                for _, thread in candidates
+            ],
+            dtype=np.float64,
+        )
+        source_lab = rgb2lab(source_rgb.reshape(1, -1, 3) / 255.0)[0]
+        target_lab = rgb2lab(target_rgb.reshape(1, -1, 3) / 255.0)[0]
+        costs = np.linalg.norm(
+            source_lab[:, None, :] - target_lab[None, :, :],
+            axis=2,
+        )
+
+        target_names = [
+            str(getattr(thread, "description", "") or "").strip().lower()
+            for _, thread in candidates
+        ]
+        for row, thread in enumerate(unique_threads):
+            label = " ".join(
+                str(getattr(thread, field, "") or "")
+                for field in ("name", "description", "details")
+            ).lower()
+            words = set(re.findall(r"[a-z]+", label))
+            required_name = (
+                "black"
+                if "black" in words
+                else "white"
+                if "white" in words
+                else None
+            )
+            if required_name is not None:
+                costs[row] += np.asarray(
+                    [0.0 if name == required_name else 1_000_000.0 for name in target_names],
+                    dtype=np.float64,
+                )
+
+        # PEC color changes may legally reuse a palette index. Assign each
+        # design color independently so near-identical coral or white shades
+        # stay in the same hue family instead of being forced into unrelated
+        # colors merely to make every index unique.
+        costs += np.arange(len(candidates), dtype=np.float64)[None, :] * 1e-9
+        assigned = {}
+        for row in range(len(unique_threads)):
+            equivalent = next(
+                (
+                    previous
+                    for previous in range(row)
+                    if np.linalg.norm(source_lab[row] - source_lab[previous]) <= 2.5
+                ),
+                None,
+            )
+            if equivalent is not None:
+                assigned[row] = assigned[equivalent]
+                continue
+            assigned[row] = int(candidates[int(np.argmin(costs[row]))][0])
+
+        return [assigned[unique_lookup[key]] for key in thread_keys]
+
+    @classmethod
+    @contextmanager
+    def _stable_pes_palette_writer(cls):
+        """Use the stable PEC mapper only while pyembroidery writes PES."""
+        try:
+            pec_writer = importlib.import_module("pyembroidery.PecWriter")
+        except (ImportError, ModuleNotFoundError):
+            # Lightweight test doubles do not expose pyembroidery internals.
+            yield
+            return
+
+        with _PES_PALETTE_WRITE_LOCK:
+            original = pec_writer.build_unique_palette
+            pec_writer.build_unique_palette = cls._build_stable_pec_palette
+            try:
+                yield
+            finally:
+                pec_writer.build_unique_palette = original
 
     def validate_roundtrip(
         self,
@@ -400,12 +531,21 @@ class ExportEngine:
         """Combine equal threads only when moving them cannot change occlusion."""
         grouped = []
         latest_indexes = {}
+        canonical_colors = []
         for layer, region_paths in drawable_layers:
             color = layer.effective_color_rgb()
-            if layer.thread_uid and layer.matched_thread_rgb:
-                key = ("thread", layer.thread_uid)
-            else:
-                key = ("color", color)
+            equivalent_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(canonical_colors)
+                    if self._color_delta_e(color, candidate) <= 2.5
+                ),
+                None,
+            )
+            if equivalent_index is None:
+                equivalent_index = len(canonical_colors)
+                canonical_colors.append(color)
+            key = ("visual-color", equivalent_index)
 
             index = latest_indexes.get(key)
             can_merge = index is not None and all(
@@ -421,6 +561,12 @@ class ExportEngine:
             else:
                 grouped[index][1].extend(region_paths)
         return grouped
+
+    @staticmethod
+    def _color_delta_e(first, second):
+        colors = np.asarray((first, second), dtype=np.float64).reshape(1, 2, 3)
+        lab = rgb2lab(colors / 255.0)[0]
+        return float(np.linalg.norm(lab[0] - lab[1]))
 
     @staticmethod
     def _scene_plane_rank(scene_plane):

@@ -863,6 +863,8 @@ class ImagePanel(QWidget):
 
     image_changed = Signal()
     quantize_requested = Signal()
+    recognition_preview_requested = Signal(str)
+    production_preview_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1064,6 +1066,43 @@ class ImagePanel(QWidget):
 
         layout.addWidget(self.grp_quant)
 
+        # --- Recognition Review ---
+        self.lbl_step_review = QLabel(tr("image.step_review"))
+        self.lbl_step_review.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.lbl_step_review)
+
+        grp_review = QGroupBox(tr("image.review_title"))
+        rl = QVBoxLayout(grp_review)
+        self.lbl_review_status = QLabel(tr("image.review_pending"))
+        self.lbl_review_status.setStyleSheet("color: gray; font-size: 11px;")
+        rl.addWidget(self.lbl_review_status)
+
+        self.combo_recognition_preview = QComboBox()
+        self.combo_recognition_preview.addItem(tr("image.review_design"), "design")
+        self.combo_recognition_preview.addItem(tr("image.review_layers"), "layers")
+        self.combo_recognition_preview.addItem(
+            tr("image.review_difference"), "difference"
+        )
+        self.combo_recognition_preview.setEnabled(False)
+        rl.addWidget(self.combo_recognition_preview)
+
+        self.btn_view_recognition_preview = QPushButton(tr("image.review_open"))
+        self.btn_view_recognition_preview.setEnabled(False)
+        self.btn_view_recognition_preview.clicked.connect(
+            lambda: self.recognition_preview_requested.emit(
+                self.combo_recognition_preview.currentData()
+            )
+        )
+        rl.addWidget(self.btn_view_recognition_preview)
+
+        self.btn_return_stitch_preview = QPushButton(tr("image.review_return"))
+        self.btn_return_stitch_preview.setEnabled(False)
+        self.btn_return_stitch_preview.clicked.connect(
+            self.production_preview_requested.emit
+        )
+        rl.addWidget(self.btn_return_stitch_preview)
+        layout.addWidget(grp_review)
+
         self.lbl_step_generate = QLabel(tr("image.step_generate"))
         self.lbl_step_generate.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout.addWidget(self.lbl_step_generate)
@@ -1161,6 +1200,15 @@ class ImagePanel(QWidget):
         self.chk_smooth.setChecked(q.smooth_regions)
         self.chk_dither.setChecked(q.dither)
         self._blocking = False
+
+    def set_recognition_preview_available(self, available: bool):
+        """Enable review only when it belongs to the current processed image."""
+        self.combo_recognition_preview.setEnabled(available)
+        self.btn_view_recognition_preview.setEnabled(available)
+        self.btn_return_stitch_preview.setEnabled(available)
+        self.lbl_review_status.setText(
+            tr("image.review_ready") if available else tr("image.review_pending")
+        )
 
     def _on_image_changed(self):
         if not self._blocking:

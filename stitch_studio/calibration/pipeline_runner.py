@@ -39,7 +39,8 @@ class MSEmbPipelineRunner:
         threads = self._build_thread_palette(working_source)
         settings = QuantizationSettings(
             n_colors=min(self.max_colors, len(threads)),
-            design_color_budget=min(24, max(8, len(threads) * 2)),
+            design_color_budget=0,
+            auto_design_colors=True,
             include_background=True,
             preserve_details=True,
             detail_sensitivity=0.72,

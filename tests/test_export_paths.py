@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -972,6 +973,39 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertGreater(engine._polyline_length(merged[0]), 25.0)
 
+    def test_scanline_fallback_keeps_broad_fill_covered_when_polygon_reconstruction_fails(self):
+        """A malformed polygon must not turn an area fill into a hairline run."""
+        stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
+        project_mod = importlib.import_module("stitch_studio.core.project")
+
+        engine = stitch_mod.StitchEngine(px_per_mm=4.0)
+        mask = np.zeros((96, 96), dtype=np.uint8)
+        mask[18:78, 18:78] = 255
+        settings = project_mod.StitchSettings(
+            fill_mode="scanline",
+            angle_deg=0.0,
+            stitch_length_mm=1.2,
+            row_spacing_mm=0.8,
+            density=1.0,
+            underlay=False,
+        )
+
+        with mock.patch.object(engine, "_polygon_for_fill", return_value=None):
+            paths = engine._generate_scanline_paths(mask, settings)
+
+        raster = np.zeros_like(mask)
+        for path in paths:
+            for start, end in zip(path, path[1:]):
+                cv2.line(
+                    raster,
+                    tuple(np.rint(start).astype(int)),
+                    tuple(np.rint(end).astype(int)),
+                    255,
+                    2,
+                )
+        covered = np.count_nonzero((raster > 0) & (mask > 0))
+        self.assertGreater(covered / np.count_nonzero(mask), 0.30)
+
     def test_run_components_do_not_sew_diagonally_across_blank_space(self):
         stitch_mod = importlib.import_module("stitch_studio.core.stitch_engine")
         engine = stitch_mod.StitchEngine(px_per_mm=4.0)
@@ -1578,6 +1612,38 @@ class ExportPathTests(unittest.TestCase):
         self.assertEqual(len(regions), 1)
         self.assertEqual(regions[0][0], 1)
         self.assertEqual(int(np.count_nonzero(regions[0][1])), 40)
+
+    def test_design_map_absorbs_unsewable_compact_color_islands(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        design_map = np.zeros((48, 48), dtype=np.int32)
+        design_map[21:24, 21:24] = 1
+        detail_mask = np.zeros_like(design_map, dtype=bool)
+
+        cleaned = image_mod.ImageEngine._suppress_unsewable_color_islands(
+            design_map,
+            detail_mask,
+            min_region_area_px=40,
+        )
+
+        self.assertEqual(int(np.count_nonzero(cleaned == 1)), 0)
+        self.assertTrue(np.array_equal(cleaned, np.zeros_like(design_map)))
+
+    def test_design_map_keeps_detail_supported_thin_islands(self):
+        image_mod = importlib.import_module("stitch_studio.core.image_engine")
+
+        design_map = np.zeros((48, 48), dtype=np.int32)
+        design_map[22:24, 16:28] = 1
+        detail_mask = np.zeros_like(design_map, dtype=bool)
+        detail_mask[22:24, 16:28] = True
+
+        cleaned = image_mod.ImageEngine._suppress_unsewable_color_islands(
+            design_map,
+            detail_mask,
+            min_region_area_px=40,
+        )
+
+        self.assertEqual(int(np.count_nonzero(cleaned == 1)), 24)
 
     def test_segmentation_can_include_border_background_when_requested(self):
         image_mod = importlib.import_module("stitch_studio.core.image_engine")
@@ -5637,6 +5703,69 @@ class ExportPathTests(unittest.TestCase):
 
         self.assertEqual(len(pattern.threadlist), 1)
         self.assertEqual(pattern.threadlist[0].color, 0x1469D2)
+        self.assertNotIn(
+            pyembroidery.COLOR_CHANGE,
+            [command for _, _, command in pattern.stitches],
+        )
+
+    def test_export_keeps_distinct_exact_colors_even_with_same_physical_thread(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        for index, design_color in enumerate(((250, 139, 119), (58, 34, 25))):
+            layer = project_mod.Layer(
+                thread_uid="shared-fallback-thread",
+                thread_color_rgb=design_color,
+                design_color_rgb=design_color,
+                matched_thread_rgb=(112, 96, 80),
+                thread_match_delta_e=20.0,
+                order=index,
+            )
+            region = project_mod.Region()
+            region.stitch_paths = [[(0.0, float(index)), (10.0, float(index))]]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(len(pattern.threadlist), 2)
+        self.assertEqual(
+            [thread.color for thread in pattern.threadlist],
+            [0x3A2219, 0xFA8B77],
+        )
+        self.assertIn(
+            pyembroidery.COLOR_CHANGE,
+            [command for _, _, command in pattern.stitches],
+        )
+
+    def test_export_merges_visually_equivalent_exact_colors(self):
+        pyembroidery = install_fake_pyembroidery()
+        project_mod = importlib.import_module("stitch_studio.core.project")
+        export_mod = importlib.import_module("stitch_studio.core.export_engine")
+
+        project = project_mod.Project()
+        for index, design_color in enumerate(((250, 139, 119), (250, 138, 118))):
+            layer = project_mod.Layer(
+                thread_uid="shared-coral-thread",
+                thread_color_rgb=design_color,
+                design_color_rgb=design_color,
+                matched_thread_rgb=(220, 120, 100),
+                thread_match_delta_e=10.0,
+                order=index,
+            )
+            region = project_mod.Region()
+            region.stitch_paths = [[
+                (float(index * 20), 0.0),
+                (float(index * 20 + 10), 0.0),
+            ]]
+            layer.regions = [region]
+            project.layers.append(layer)
+
+        pattern = export_mod.ExportEngine().build_pattern(project)
+
+        self.assertEqual(len(pattern.threadlist), 1)
         self.assertNotIn(
             pyembroidery.COLOR_CHANGE,
             [command for _, _, command in pattern.stitches],

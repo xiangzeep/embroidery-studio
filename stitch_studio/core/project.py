@@ -499,6 +499,9 @@ class Project:
         self.source_image: Optional[np.ndarray] = None  # RGB uint8
         self.processed_image: Optional[np.ndarray] = None
         self.quantized_map: Optional[np.ndarray] = None  # H×W int
+        # Transient design-stage QA artifacts. They are rebuilt from the image and
+        # intentionally excluded from project serialization.
+        self.recognition_diagnostics = None
         self.layers: List[Layer] = []
         self.image_settings = ImageSettings()
         self.quant_settings = QuantizationSettings()

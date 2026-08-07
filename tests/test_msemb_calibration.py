@@ -129,6 +129,14 @@ class MSEmbCalibrationRunnerTests(unittest.TestCase):
 
         self.assertGreaterEqual(result["scores"]["overall"], 0.72)
         self.assertGreaterEqual(result["scores"]["color_similarity"], 0.86)
+        self.assertGreaterEqual(result["thread_metrics"]["detail_recall"], 0.72)
+        self.assertLess(
+            np.linalg.norm(
+                result["preview"][70, 175].astype(np.float32)
+                - source[70, 175].astype(np.float32)
+            ),
+            24.0,
+        )
         self.assertLess(
             np.linalg.norm(
                 result["preview"][170, 160].astype(np.float32)
